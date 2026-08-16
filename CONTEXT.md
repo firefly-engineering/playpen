@@ -73,8 +73,46 @@ the granularity a minted credential natively expresses.
 
 ## Minter
 
-The thing that produces a credential for a forge scope. Named by an opaque string in the
-workspace; playpen does not model any particular forge.
+The thing that produces a credential for a declared scope — an executable the policy names and
+playpen runs, outside the boundary and before the sandbox exists. Takes the scope, returns a
+secret and an expiry. A **forge scope** is one kind of declared scope; an LLM provider or any
+other third-party service is another, so a minter is not a forge concept. playpen models no
+particular service, which is why the minter is declared rather than built in.
+
+Trusted host code, in the same class as the **policy** that declared it: it runs unconfined,
+because minting is itself usually a network call that cannot pass through the allow-list it
+helps build.
+
+May be paired with a **revoker**, run best-effort when the run ends. Revocation is an
+optimization; the expiry the minter returned is the guarantee.
+
+## Credential route
+
+The pairing of a destination — a host plus a literal path prefix — with the credential to
+present there and the **delivery** that points the agent at it. The unit the **proxy** matches
+against, and the reason two workspaces' credentials stay distinct in *use* and not merely at
+minting: a forge names the org in the path. Two routes on one host, neither path prefix
+extending the other, are ambiguous and playpen refuses.
+
+Attaches to the **workspace** when the credential minimizes to that workspace's **forge scope**,
+and to the **profile** otherwise. Both resolve into one table, provenance retained.
+
+## Delivery
+
+How a route's **session phantom** reaches the agent — a named environment variable today. Named
+by the route, never by the **kind**, so that per-agent knowledge stays in the kind table. A
+field rather than an assumption, so another transport can be added without disturbing the route.
+
+## Session phantom
+
+The random bearer token that stands in for every real credential inside the boundary — one per
+run, not one per credential, since delivery cannot hand one tool a choice between two. The agent
+presents it; the **proxy** strips it and injects the real secret, which never crosses the
+boundary in any mode.
+
+It faces both ways. Inward it contains exfiltration — a secret that is not present cannot leak
+through a log line or a tool call. Outward it authenticates callers of the proxy, which is what
+keeps the shared host loopback on macOS from being a credential leak.
 
 ## Egress setting
 
