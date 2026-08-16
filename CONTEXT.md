@@ -51,14 +51,29 @@ the run can refer to it. The host's own temp is unreachable.
 
 ## Provisioned area
 
-A writable directory playpen creates, keyed by workspace name. The operator declares
-that one must exist and what it is *for*; the path is playpen's business. Always
-writable, and carries a **lifetime**.
+A writable directory playpen creates. The operator declares that one must exist and what it is
+*for*; the path is playpen's business. Always writable, and carries a **lifetime** — which also
+decides what it is keyed by, and whether it carries a **concurrency**.
 
 ## Lifetime
 
-A property of a provisioned area. `ephemeral` — created at launch, removed at exit.
-`persistent` — created on first use and reused by later runs of the same workspace.
+A property of a provisioned area. `ephemeral` — created at launch, removed at exit, keyed by the
+**run**, since nothing outside the run can refer to it. `persistent` — created on first use,
+keyed by workspace name, and reused by later runs of the same workspace.
+
+## Concurrency
+
+A property of a `persistent` provisioned area, and of no other. `exclusive` — at most one live
+run may hold it, and a second is a **refusal**. `shared` — every run gets the same path and
+playpen says nothing about the contents. The default is `exclusive`, because a wrongly-shared
+working area corrupts silently while a wrongly-exclusive cache merely refuses.
+
+The distinction it draws is between a **cache**, whose owning tool already locks it, and a
+*working area* — a **landing zone**, a worktree root, a place an agent works — where two agents
+overwrite each other's edits with no error from any tool.
+
+playpen arbitrates only what it *provisions*: a **brought root** carries no concurrency, even
+though the sharpest contention lives there.
 
 ## Landing zone
 
@@ -276,5 +291,15 @@ debugging aid, not an audit log.
 A reachable surface playpen consciously declines to close, written down rather than
 silently inherited. It is not the same as **out of scope**: the surface is inside the
 boundary's remit, and the decision is that closing it costs more than it buys. ACP's
-client-side execution, the shared host loopback on macOS, and a browser running without its
-own renderer isolation are the three so far.
+client-side execution, the shared host loopback on macOS, a browser running without its
+own renderer isolation, an agent orphaned by the death of its **supervisor** while still holding
+a released **provisioned area**, and the sequential cross-profile channel a `persistent` area
+opens are the five so far.
+
+## Supervisor
+
+The playpen process that outlives setup and remains the confined agent's direct parent for the
+whole run. It exists because playpen cannot be a pure `exec` shim — ephemeral areas must be torn
+down and the credential proxy hosted — and it is *transparent*: it inherits stdio untouched,
+forwards signals, and exits with the child's status. Its lifetime is what an `exclusive`
+**concurrency** claim is pinned to, so a claim cannot outlive the run that took it.
