@@ -46,6 +46,38 @@ the granularity a minted credential natively expresses.
 The thing that produces a credential for a forge scope. Named by an opaque string in the
 workspace; playpen does not model any particular forge.
 
+## Egress setting
+
+Which of `none`, `open` or `allowlist` governs a run's outbound network. A property of the
+**profile**, never of a workspace — there is one boundary over one process tree, and no
+channel by which a connection could be attributed to a workspace that the agent could not
+forge. Independent of **forge scope**, which is stated in credential vocabulary; the two
+lists can disagree, and playpen refuses rather than reconciling them.
+
+## Proxy
+
+The process that enforces the egress allow-list, run **outside** the boundary as a detached
+sibling of the agent and reached over TCP loopback. Exists only under `allowlist` — `open`
+has no proxy rather than a permissive one. It is also the sole resolver: the sandbox gets no
+DNS. Terminates TLS only for hosts whose rule requires it, under an ephemeral per-session CA
+that never touches disk.
+
+The **credential broker** is this same process wearing its other hat: one process, two
+lists, because "reachable" and "authenticated" are different facts.
+
+## Allow-list fragment
+
+A named, composable set of **host entries** the operator references from a profile — `npm`,
+the forge, the model API. Data in the **policy**, never code, so the resolved allow-list is
+readable. playpen ships fragments but merges none by default; there is only ever one policy
+author.
+
+## Host entry
+
+One member of an allow-list: an exact hostname, or a left-anchored suffix matched on a label
+boundary. Never a regex. Port 443 is implied — transport is HTTPS-only, so an entry names a
+host, not a host and port.
+
 ## Agent state directory
 
 The directory an agent binary keeps its own state and configuration in. Per workspace,
@@ -119,4 +151,12 @@ the failure that matters is a boundary that silently stopped being enforced.
 
 playpen declining to launch. The standing alternative to any silent downgrade: where a
 required capability is unavailable, or a workspace is incoherent, playpen refuses rather
-than running with less than was asked for.
+than running with less than was asked for. A capability that can only be enforced
+*cooperatively* counts as unavailable, not as degraded.
+
+## Named residual
+
+A reachable surface playpen consciously declines to close, written down rather than
+silently inherited. It is not the same as **out of scope**: the surface is inside the
+boundary's remit, and the decision is that closing it costs more than it buys. ACP's
+client-side execution and the shared host loopback on macOS are the two so far.
