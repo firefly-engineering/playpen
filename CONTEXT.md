@@ -1,0 +1,74 @@
+# playpen — domain context
+
+Ubiquitous language for playpen. Glossary only — no implementation detail, no spec.
+
+## Workspace
+
+A single named object describing everything one agent run may reach. It has two
+structurally separate halves — **brought roots** (filesystem) and **forge scope**
+(remote) — plus **provisioned areas** that playpen creates. The name is what keeps
+the halves in sync; nothing derives one from the other.
+
+A **profile** references a *list* of workspaces. Brought roots union across them;
+provisioned areas and forge scope stay per workspace.
+
+## Brought root
+
+A filesystem tree that already exists, whose path the operator declares. playpen only
+grants access to it, never creates it. Carries a mode of `read` or `readwrite`.
+
+Contrast **provisioned area**, where playpen owns the path.
+
+## Provisioned area
+
+A writable directory playpen creates, keyed by workspace name. The operator declares
+that one must exist and what it is *for*; the path is playpen's business. Always
+writable, and carries a **lifetime**.
+
+## Lifetime
+
+A property of a provisioned area. `ephemeral` — created at launch, removed at exit.
+`persistent` — created on first use and reused by later runs of the same workspace.
+
+## Landing zone
+
+The provisioned area a repo cloned mid-session lands in. Named explicitly rather than
+inferred, so that its absence is a refusal rather than a surprise.
+
+## Forge scope
+
+The half of a workspace describing which remote repositories the agent may reach. Stated
+in *forge* vocabulary — an org, or a list of repos — never in path vocabulary. This is
+the granularity a minted credential natively expresses.
+
+## Minter
+
+The thing that produces a credential for a forge scope. Named by an opaque string in the
+workspace; playpen does not model any particular forge.
+
+## Agent state directory
+
+The directory an agent binary keeps its own state and configuration in. Per workspace,
+with an explicit read-only **share list** naming what is carried over from the real one.
+
+## Share list
+
+The entries of the real agent state directory made visible, read-only, inside a
+workspace's own. Default-deny: empty unless named.
+
+## Manifest
+
+The canonical description of a workspace's layout, readable from inside the boundary.
+playpen owns the facts it states; how it reaches an agent's attention is a per-harness
+presentation concern.
+
+## Profile
+
+The unit an invocation selects. Names the workspaces in play and the confinement to
+apply. Selected from invocation context, never chosen by the agent.
+
+## Refusal
+
+playpen declining to launch. The standing alternative to any silent downgrade: where a
+required capability is unavailable, or a workspace is incoherent, playpen refuses rather
+than running with less than was asked for.
