@@ -116,9 +116,16 @@ declares, never by searching PATH.
 ## Kind
 
 Which agent binary is being wrapped (`claude`, `omp`). Always stated, never inferred from
-the invoked name. It selects the agent state directory, the manifest's presentation, and
-how playpen displaces that agent's own native sandboxing; an unrecognised kind is a
-**refusal**.
+the invoked name. It selects the agent state directory, the manifest's presentation, and the
+**suppression table**; an unrecognised kind is a **refusal**, because there is nowhere to put
+what playpen would need to know about it. All per-agent knowledge is confined here.
+
+## Suppression table
+
+The per-**kind** set of environment entries playpen sets and strips so that an agent does not
+try to apply its own sandbox inside playpen's. Cooperative, and permitted to be: honouring it
+buys only usability, never confinement, so a guest that ignores it merely breaks rather than
+escapes.
 
 ## Mechanism
 
@@ -159,4 +166,5 @@ than running with less than was asked for. A capability that can only be enforce
 A reachable surface playpen consciously declines to close, written down rather than
 silently inherited. It is not the same as **out of scope**: the surface is inside the
 boundary's remit, and the decision is that closing it costs more than it buys. ACP's
-client-side execution and the shared host loopback on macOS are the two so far.
+client-side execution, the shared host loopback on macOS, and a browser running without its
+own renderer isolation are the three so far.
