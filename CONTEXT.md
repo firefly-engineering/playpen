@@ -67,6 +67,27 @@ presentation concern.
 The unit an invocation selects. Names the workspaces in play and the confinement to
 apply. Selected from invocation context, never chosen by the agent.
 
+## Policy
+
+The document declaring every profile, workspace and shim on a host. Located by a fixed
+ordered search path, first hit wins — never merged, so that "which rule won" always has
+one answer. Owner-authored; playpen refuses to launch if the policy it read sits inside
+anything the selected profile can write.
+
+## Shim
+
+A stand-in for an agent binary, placed on the operator's PATH so that invoking `claude`
+launches it confined. Thin by construction — it supplies a profile and a **kind** to the
+core CLI and nothing else. It finds the real binary by an absolute path the policy
+declares, never by searching PATH.
+
+## Kind
+
+Which agent binary is being wrapped (`claude`, `omp`). Always stated, never inferred from
+the invoked name. It selects the agent state directory, the manifest's presentation, and
+how playpen displaces that agent's own native sandboxing; an unrecognised kind is a
+**refusal**.
+
 ## Refusal
 
 playpen declining to launch. The standing alternative to any silent downgrade: where a
