@@ -47,7 +47,8 @@ mechanism enforces on the resolved path.
 
 The single ephemeral writable directory playpen provisions per run and exposes as `TMPDIR`. A
 property of the run, not of a workspace, so it is not a **provisioned area** — nothing outside
-the run can refer to it. The host's own temp is unreachable.
+the run can refer to it. The host's own temp is unreachable. It also holds what playpen writes
+for the run and only for the run: the **manifest** and the proxy's ephemeral CA.
 
 ## Provisioned area
 
@@ -173,14 +174,32 @@ workspace's own. Default-deny: empty unless named.
 
 ## Manifest
 
-The canonical description of a workspace's layout, readable from inside the boundary.
-playpen owns the facts it states; how it reaches an agent's attention is a per-harness
-presentation concern.
+The canonical description of a workspace's layout, readable from inside the boundary: a JSON
+file in the **run scratch**, named by `PLAYPEN_MANIFEST`, always written. Not authored — a
+projection of the **run record**, facing inward as the **capability set** faces outward, and
+strictly narrower: no selection trace, no policy provenance. playpen owns the facts it states;
+how it reaches an agent's attention is a per-harness presentation concern.
 
 It is also the *only* thing playpen tells an agent about its own confinement, and it says so
-up front rather than at the moment of failure: alongside the layout it carries how to read a
-**denial**, and that the boundary is fixed for the whole session. It is the sole inward-facing
-truth — nothing playpen offers inside the boundary may state a fact the manifest does not.
+up front rather than at the moment of failure: alongside the layout it carries the **egress
+setting** and the hosts it resolves to, the destinations a **credential route** authenticates,
+how to read a **denial**, and that the boundary is fixed for the whole session. **Exclusions**
+are the one omission — enumerating them maps what is worth attacking. It is the sole
+inward-facing truth — nothing playpen offers inside the boundary may state a fact the manifest
+does not.
+
+It **describes** the boundary and never constitutes it. It sits in writable scratch, so an
+agent can rewrite it; nothing moves when it does, and the agent has lied only to itself.
+
+## Presentation adapter
+
+The per-**kind** renderer that puts the **manifest**'s facts into the idiom that kind's binary
+reads — typically a file in that workspace's **agent state directory**, which playpen owns. Bound
+by one law: it may state facts about the boundary playpen built, and may never state what the
+agent should do about them. Generated from the manifest's own data, never hand-written prose, and
+carrying no compatibility promise — its consumer is a model, not a parser.
+
+_Avoid_: prompt fragment, system prompt injection.
 
 ## Profile
 

@@ -115,7 +115,13 @@ diagnosed from the kernel log afterwards. The status itself propagates untouched
   `EPERM`/`EACCES`, and `ENOSYS` appears if a `USER_NOTIF` supervisor dies. The only `ENOENT`
   sites in Landlock are genuine-absence guards. Source-read, not yet observed on a live kernel.
 
-- **The manifest gains a failure-interpretation section, and `playpen explain --self` prints
-  nothing but that section back.** No policy read, no privilege, no second code path that could
+- **The manifest gains a failure-interpretation section, and ~~`playpen explain --self` prints
+  nothing but that section back~~.** No policy read, no privilege, no second code path that could
   disagree with the manifest. How the section is worded per `kind` belongs to the manifest's
   own per-harness presentation, not here.
+
+  _Amended by [ADR 0011](0011-the-manifest-is-a-generated-projection-and-playpen-states-facts-never-instructions.md):
+  `explain --self` is withdrawn. The manifest is a file inside the boundary, so the
+  no-second-code-path goal is met by having no second code path rather than two that agree — and
+  the command would have required playpen's own binary inside every profile's toolchain root. The
+  section's content is per-platform, not per-`kind`; `kind` selects only the rendering._
