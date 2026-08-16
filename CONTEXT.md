@@ -179,6 +179,12 @@ ordered search path, first hit wins — never merged, so that "which rule won" a
 one answer. Owner-authored; playpen refuses to launch if the policy it read sits inside
 anything the selected profile can write.
 
+A *single* document of keyed tables, never a directory — splitting it would give
+"which rule won" back to an ordering rule. Its data model is JSON; YAML is the surface
+syntax, because JSON is a subset of it and strict parsing leaves JSON no way to carry a
+comment. Strictly parsed throughout: an unknown field or version is a **refusal**. Its
+authored shape is distinct from the **capability set** it resolves to.
+
 ## Shim
 
 A stand-in for an agent binary, placed on the operator's PATH so that invoking `claude`
