@@ -78,9 +78,16 @@ diagnosed from the kernel log afterwards. The status itself propagates untouched
   stderr belongs to the agent under the transparency contract. Where a platform cannot provide
   the trace, the flag is refused at parse time — scoped to the flag, not the run — because an
   empty trace file that means "unsupported" reads as "nothing was denied", which is a silent
-  downgrade in its purest form. Whether Linux can provide it at all is an open question:
-  Landlock's audit records appear to be recent-kernel-only and privileged, and this is
-  unverified.
+  downgrade in its purest form. Linux **can** provide it, and more richly than macOS — a
+  Landlock audit record names the path *and the exact missing right* — but only from kernel
+  6.15 (ABI 7), only when `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON` is passed, since every
+  denial after `execve` is otherwise dropped and post-`execve` is precisely playpen's shape.
+  The "privileged reader" fear did not survive contact: `CAP_AUDIT_READ` gates only the
+  direct netlink path, and on a journald host the records reach the ordinary system journal.
+  The current ceiling is the dependency's, not the kernel's — nono passes flags `0` and caps
+  its ABI probe at V6. So the refusal is **per-precondition with a distinct code**, never a
+  hardcoded "macOS only": macOS yields the trace with zero preconditions and Linux with four,
+  three of which an operator can fix.
 
 - **The floor self-test runs on every launch and is never cached.** Caching means keying on a
   proxy for "the floor still works" — an OS version, a hash — and every such key is a guess
@@ -102,8 +109,11 @@ diagnosed from the kernel log afterwards. The status itself propagates untouched
 
 - **"A denial is never `ENOENT`" joins the enforcement suite on both platforms**, stated
   positively: a denial is always distinguishable in-band from absence and from success. It is
-  the filesystem twin of the egress invariant above. Seatbelt's `EPERM` is verified; Landlock's
-  `EACCES` and seccomp's behaviour are not.
+  the filesystem twin of the egress invariant above. Seatbelt's `EPERM` is verified by
+  experiment. On Linux the law holds but the assertion must be a **set**, not a single errno:
+  Landlock yields `EACCES`, `EXDEV` or `EPERM` depending on the operation, seccomp yields
+  `EPERM`/`EACCES`, and `ENOSYS` appears if a `USER_NOTIF` supervisor dies. The only `ENOENT`
+  sites in Landlock are genuine-absence guards. Source-read, not yet observed on a live kernel.
 
 - **The manifest gains a failure-interpretation section, and `playpen explain --self` prints
   nothing but that section back.** No policy read, no privilege, no second code path that could
