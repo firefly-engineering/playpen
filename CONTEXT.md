@@ -15,9 +15,39 @@ provisioned areas and forge scope stay per workspace.
 ## Brought root
 
 A filesystem tree that already exists, whose path the operator declares. playpen only
-grants access to it, never creates it. Carries a mode of `read` or `readwrite`.
+grants access to it, never creates it. Carries a mode of `read` or `readwrite`; `read`
+grants execute as well, since a writable area can host a copied binary anyway. May carry
+**exclusions**.
 
 Contrast **provisioned area**, where playpen owns the path.
+
+## Exclusion
+
+A literal subpath subtracted from a **brought root** or **toolchain root**, with an optional
+set of access classes (`read`, `execute`, `write`) defaulting to all of them. Never a pattern.
+It is what makes a coarse root safe — the precise alternative, one root per closure path, does
+not fit the compiled-profile ceiling. Must exist or playpen refuses, because an exclusion whose
+path has gone is a leak that reopened silently.
+
+## Floor
+
+The grant playpen always applies and no policy can widen or narrow: read and execute under
+OS-owned paths, plus a short enumerated set of Mach services. Never under `$HOME`, never under
+a package store, never writable. It is the one built-in default in the model, and it earns the
+exception by deciding whether `exec` returns at all rather than what is reachable.
+
+## Toolchain root
+
+A read-only **brought root** naming what the agent works *with* rather than what it works *on*.
+Attached to the **profile**, not to a workspace — every workspace needs it equally. Where policy
+names a stable symlink, playpen resolves it and grants both link and target, because the
+mechanism enforces on the resolved path.
+
+## Run scratch
+
+The single ephemeral writable directory playpen provisions per run and exposes as `TMPDIR`. A
+property of the run, not of a workspace, so it is not a **provisioned area** — nothing outside
+the run can refer to it. The host's own temp is unreachable.
 
 ## Provisioned area
 
@@ -146,6 +176,10 @@ with access modes, a network mode, an environment allow-list. Nothing above that
 workspace names, no lifetimes, no profiles.
 
 Faces *outward*, at the kernel. Contrast the **manifest**, which faces inward, at the agent.
+Dumpable without launching an agent, so that "which rule won" has an answer for the filesystem.
+A backend may impose a **budget** the capability set can exceed — macOS caps the compiled
+profile at 65535 bytes — and exceeding it is a **refusal** in playpen's own vocabulary, never a
+leaked backend error.
 _Avoid_: manifest, capability manifest.
 
 ## Enforcement test
