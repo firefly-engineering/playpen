@@ -124,6 +124,11 @@ The canonical description of a workspace's layout, readable from inside the boun
 playpen owns the facts it states; how it reaches an agent's attention is a per-harness
 presentation concern.
 
+It is also the *only* thing playpen tells an agent about its own confinement, and it says so
+up front rather than at the moment of failure: alongside the layout it carries how to read a
+**denial**, and that the boundary is fixed for the whole session. It is the sole inward-facing
+truth — nothing playpen offers inside the boundary may state a fact the manifest does not.
+
 ## Profile
 
 The unit an invocation selects. Names the workspaces in play and the confinement to
@@ -188,12 +193,39 @@ An assertion, made from inside a live sandbox, that something is *not* reachable
 collected set of them is the contract a backend must satisfy — stated as negatives because
 the failure that matters is a boundary that silently stopped being enforced.
 
+## Denial
+
+A single access the mechanism refused while a run was already live — the runtime counterpart of
+a **refusal**. Observed in-band by the confined process as an errno, and out-of-band by the
+operator in the kernel's own log. Always distinguishable from absence and from success:
+never `ENOENT`. playpen adds nothing to it at the moment it happens.
+
+An egress denial is the same event at L7 — the **proxy** refusing a host — and is likewise
+distinguishable in-band from a transport failure.
+
 ## Refusal
 
 playpen declining to launch. The standing alternative to any silent downgrade: where a
 required capability is unavailable, or a workspace is incoherent, playpen refuses rather
 than running with less than was asked for. A capability that can only be enforced
 *cooperatively* counts as unavailable, not as degraded.
+
+## Code
+
+The stable, enumerated string naming *why* playpen said no. One namespace, two prefixes:
+`refusal.*` for a **refusal**, `egress.*` for an egress **denial** — different events, and
+conflating them would make "playpen refused" ambiguous to the consumers the enumeration exists
+to serve. The set is closed and versioned; consumers branch on the code, never on the prose
+beside it. Every backend error is translated into one, never leaked.
+
+## Run record
+
+What playpen knows and the kernel cannot: which policy produced this boundary. The resolved
+profile and the selection trace that chose it, the **capability set**, the egress list, the
+pid, the timestamps. Written *before* launch, since a run that refuses is the one whose record
+is most wanted. Lives outside every workspace and is unreachable from inside the boundary — a
+record the agent could read is one it could be confused by. A bounded ring of recent runs: a
+debugging aid, not an audit log.
 
 ## Named residual
 
