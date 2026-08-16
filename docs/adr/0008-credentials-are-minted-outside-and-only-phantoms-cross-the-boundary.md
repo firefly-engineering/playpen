@@ -108,8 +108,12 @@ written down rather than left to be discovered in a source file.
   a phantom through a tunnel you cannot read — so every credentialed host is intercepted
   necessarily. Opaque-CONNECT-by-default survives as stated, but now covers only hosts reached
   *without* a credential. The ephemeral CA's certificate is written into the **run scratch** and
-  named by `SSL_CERT_FILE`, so its lifetime matches the session's without anyone enforcing it.
-  The CA certificate is public, not secret; the private key never leaves the proxy's memory.
+  named by `SSL_CERT_FILE` — ~~one variable~~; *corrected by ADR 0012*: **`SSL_CERT_FILE` and
+  `NODE_EXTRA_CA_CERTS` both**, since the flagship binaries are Bun and honour the latter while
+  the OpenSSL-linked toolchain beside them reads the former. Two disjoint TLS stacks live inside
+  one boundary, so naming one of them was a silent half-measure. Either way its lifetime matches
+  the session's without anyone enforcing it. The CA certificate is public, not secret; the
+  private key never leaves the proxy's memory.
 
 - **Delivery is named by the route, never by the agent kind.** Policy names the variable
   (`{env: "GH_TOKEN"}`) and playpen copies a string into a name it was handed — data, not

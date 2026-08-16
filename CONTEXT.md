@@ -36,6 +36,11 @@ OS-owned paths, plus a short enumerated set of Mach services. Never under `$HOME
 a package store, never writable. It is the one built-in default in the model, and it earns the
 exception by deciding whether `exec` returns at all rather than what is reachable.
 
+The **environment allow-list** has a floor of its own, held to the same test: the names any
+process needs to *start* — `PATH`, `HOME`, `USER`/`LOGNAME`, `SHELL`, `TERM`, `LANG` and the
+enumerated `LC_*`, `TZ` — and nothing that is a fact about the **toolchain root** that was
+brought rather than about the process.
+
 ## Toolchain root
 
 A read-only **brought root** naming what the agent works *with* rather than what it works *on*.
@@ -156,11 +161,46 @@ the forge, the model API. Data in the **policy**, never code, so the resolved al
 readable. playpen ships fragments but merges none by default; there is only ever one policy
 author.
 
+The **environment allow-list** takes fragments of the same shape — a `rust` fragment carrying
+`CARGO_HOME`/`RUSTUP_HOME`, a `nix` fragment carrying `NIX_*` and `LOCALE_ARCHIVE`. A fragment
+carries *names* only and never a **set entry**'s value: a name is host-independent, a value is a
+fact about one host, and a value reaches the policy by generation instead.
+
 ## Host entry
 
 One member of an allow-list: an exact hostname, or a left-anchored suffix matched on a label
 boundary. Never a regex. Port 443 is implied — transport is HTTPS-only, so an entry names a
 host, not a host and port.
+
+## Environment allow-list
+
+The set of environment variable *names* passed through from the host into the boundary. Names
+only — an inherited **value** is never inspected, because a value can only name a path and every
+path is enforced by the **mechanism** regardless. Exact names, never patterns. A **floor** plus
+per-**profile** entries, composable from **fragments**. A name on the list that is absent from the
+host env is simply absent: the one stated exception to **refusal**-never-silent-downgrade, earned
+because it fails *closed*.
+
+The child's environment is **constructed, never filtered** — nothing arrives that playpen did not
+put there, so there is no deny-list and nothing to strip.
+
+`SSH_AUTH_SOCK` is permanently denied and no policy may add it: unlike the path-shaped hazards
+(`NODE_OPTIONS`, `LD_PRELOAD`, `GIT_SSH_COMMAND`), it names a socket to an unconfined signing
+oracle — an egress channel the **proxy** cannot see and cannot deny.
+
+## Set entry
+
+An environment variable playpen *writes* rather than passes. Playpen's own six are mandatory and
+their absence is a **refusal**: `TMPDIR`, `NO_PROXY` (both spellings), `HTTPS_PROXY`,
+`PLAYPEN_MANIFEST`, `PLAYPEN_ACTIVE`, and the CA pair `SSL_CERT_FILE` + `NODE_EXTRA_CA_CERTS` —
+a pair because two disjoint TLS stacks live inside one boundary.
+
+**Policy** may author set entries too, with literal values, and they win over floor pass-through.
+Attached to the **profile**, never a workspace, since merging per-workspace values would silently
+produce one neither workspace justified. A **provisioned area** is named by typed reference
+(`!area <workspace>/<area>`) rather than a literal, because playpen owns the path. Any collision
+between a policy set entry and one playpen writes — including a **delivery** name — is a
+launch-time refusal, because two authors of one variable is "which rule won" in miniature.
 
 ## Agent state directory
 
@@ -235,10 +275,13 @@ what playpen would need to know about it. All per-agent knowledge is confined he
 
 ## Suppression table
 
-The per-**kind** set of environment entries playpen sets and strips so that an agent does not
-try to apply its own sandbox inside playpen's. Cooperative, and permitted to be: honouring it
-buys only usability, never confinement, so a guest that ignores it merely breaks rather than
-escapes.
+The per-**kind** set of environment entries playpen sets so that an agent does not try to apply
+its own sandbox inside playpen's. Cooperative, and permitted to be: honouring it buys only
+usability, never confinement, so a guest that ignores it merely breaks rather than escapes.
+
+It only ever *sets*. The **environment allow-list** is constructed rather than filtered, so
+there is nothing to strip; the case that looked like stripping is the **shim** case, where an
+outer playpen's entries must not reach a nested invocation — and that falls out of construction.
 
 ## Mechanism
 
