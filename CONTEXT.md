@@ -88,6 +88,33 @@ the invoked name. It selects the agent state directory, the manifest's presentat
 how playpen displaces that agent's own native sandboxing; an unrecognised kind is a
 **refusal**.
 
+## Mechanism
+
+The kernel facility that enforces confinement — Seatbelt on macOS, Landlock plus seccomp on
+Linux. There is one per platform, so playpen never chooses between siblings; it chooses only
+how far above the mechanism it sits.
+
+## Backend
+
+The implementation of a mechanism behind playpen's own interface. A backend is defined by
+the **enforcement tests** it passes, not by the API it exposes — which is what makes one
+replaceable by another.
+
+## Capability set
+
+The fully-resolved, enforcement-shaped description playpen hands a backend: absolute paths
+with access modes, a network mode, an environment allow-list. Nothing above that — no
+workspace names, no lifetimes, no profiles.
+
+Faces *outward*, at the kernel. Contrast the **manifest**, which faces inward, at the agent.
+_Avoid_: manifest, capability manifest.
+
+## Enforcement test
+
+An assertion, made from inside a live sandbox, that something is *not* reachable. The
+collected set of them is the contract a backend must satisfy — stated as negatives because
+the failure that matters is a boundary that silently stopped being enforced.
+
 ## Refusal
 
 playpen declining to launch. The standing alternative to any silent downgrade: where a
