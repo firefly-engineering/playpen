@@ -363,9 +363,52 @@ _Avoid_: manifest, capability manifest.
 
 ## Enforcement test
 
-An assertion, made from inside a live sandbox, that something is *not* reachable. The
-collected set of them is the contract a backend must satisfy — stated as negatives because
-the failure that matters is a boundary that silently stopped being enforced.
+A single assertion in the contract a backend must satisfy. Three classes: a **negative**,
+made from inside a live sandbox, that something is not reachable; a **positive**, likewise
+from inside, that something *is* — admissible only where the regression it would catch is
+silent, since anything else is an integration test wearing the suite's uniform; and a
+**refusal**, made where playpen declined to launch and there is no inside to assert from.
+
+A negative asserts two things, not one: that its target exists as seen from *outside*, and
+that the read from inside fails with a **denial**. A target that is merely absent makes the
+assertion pass for the wrong reason — the boundary that silently stopped being enforced,
+certified green — so absence outside is a setup failure. This is what the never-`ENOENT`
+law buys beyond its promise to the agent.
+
+The collected set of them *defines* the backend. Each carries the platform it must pass on,
+and a single-platform assertion costs a **named asymmetry**.
+
+## Liveness probe
+
+An assertion that a real agent binary, launched confined, still works — the only thing that
+catches an agent reintroducing a startup self-sandbox before its users do. Not an
+**enforcement test**: it tracks other people's release schedules rather than playpen's, so it
+gates an agent-version change and never a playpen one. What it needs to know about each
+agent — the binary, the invocation — is per-agent knowledge and so lives in the **kind**
+table with the rest, which makes a new kind a row rather than a test.
+
+## Policy fixture
+
+A real **policy** document a suite entry runs against — the unit a confined launch is batched
+by, since assertions sharing one **capability set** share one sandbox. Being a real document,
+it is incidentally a test of the parser.
+
+## Probe
+
+The binary the suite runs *as* the confined child to make an assertion from inside. It is an
+observer that perturbs what it observes: it needs its own path granted, so every negative it
+makes reads "unreachable even with the probe's own root present" — the weaker direction, and
+therefore the safe one. The one assertion it cannot make is the bare **floor**'s own, which
+admits no grant and so is made with OS-owned binaries alone.
+
+## Named asymmetry
+
+A place where the two platforms are not equals, written down rather than absorbed. The
+shared host loopback and the compiled-profile ceiling on macOS, the mechanism's deprecation
+clock, denial visibility (free on macOS, four preconditions on Linux), and namespaces for
+bind-mounting on Linux are the five so far. The ledger is kept honest by the **enforcement
+test** set: an assertion that runs on only one platform must name the asymmetry it encodes,
+and a backend that makes such an assertion inapplicable has retired one rather than passed it.
 
 ## Denial
 
