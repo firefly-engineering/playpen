@@ -394,11 +394,17 @@ from inside, that something *is* — admissible only where the regression it wou
 silent, since anything else is an integration test wearing the suite's uniform; and a
 **refusal**, made where playpen declined to launch and there is no inside to assert from.
 
-A negative asserts two things, not one: that its target exists as seen from *outside*, and
-that the read from inside fails with a **denial**. A target that is merely absent makes the
-assertion pass for the wrong reason — the boundary that silently stopped being enforced,
-certified green — so absence outside is a setup failure. This is what the never-`ENOENT`
-law buys beyond its promise to the agent.
+Every assertion is **two-part**, not one: it establishes the condition holds as seen from
+*outside* before asserting the boundary's behaviour from inside. For a negative that means the
+target exists outside and the read from inside fails with a **denial** — a target that is merely
+absent makes the assertion pass for the wrong reason, the boundary that silently stopped being
+enforced, certified green, so absence outside is a setup failure. This is what the never-`ENOENT`
+law buys beyond its promise to the agent. Positives take the same form: a capability that fails
+outside is a host condition, not a red.
+
+It has **three outcomes**, not two. It **runs**; or it is **`n/a` by platform**, which is a
+**named asymmetry** already on the ledger rather than a gap; or it is **skipped**, meaning it
+applies here and a precondition on *this* host is missing. A skip is always named, never inferred.
 
 The collected set of them *defines* the backend. Each carries the platform it must pass on,
 and a single-platform assertion costs a **named asymmetry**.

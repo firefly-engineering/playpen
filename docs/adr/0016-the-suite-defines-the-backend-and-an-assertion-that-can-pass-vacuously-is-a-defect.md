@@ -121,6 +121,13 @@ turns out to be *inexpressible* on one platform is a design bug to escalate, nev
   be green with skips; a **release requires the full set green on a reference host of each
   platform**.
 
+  _Amended by [#29](https://github.com/firefly-engineering/playpen/issues/29): **three outcomes,
+  not two.** A row **runs**; or it is **`n/a` by platform** — the Keychain Mach negative on Linux,
+  the compiled-profile-ceiling refusal on macOS — which is a **named asymmetry already on the
+  ledger and not a skip at all**; or it is **skipped**, meaning the row applies on this host and a
+  precondition here is missing. Reporting an `n/a` as a skip makes the ledger look like a gap;
+  reporting a skip as `n/a` retires an asymmetry that was never retired._
+
 - **A `nono` bump is a PR that is red until the suite says otherwise.** ADR 0003 gated the exact
   pin "not on compilation but on enforcement tests", and the Chromium investigation wanted a future
   `nono` gating `clone` to fail the version bump rather than silently kill browser automation.
@@ -137,3 +144,18 @@ turns out to be *inexpressible* on one platform is a design bug to escalate, nev
   assumption — Landlock availability, `sandbox_init` under a hosted macOS runner, the four
   preconditions the Linux audit trace needs, and Nix for the closure negatives. Graduated as its
   own research ticket rather than guessed at.
+
+  _Answered by [#29](https://github.com/firefly-engineering/playpen/issues/29): **20 of 22 rows run
+  on each hosted platform**, and the decoy rule above is what saves them — without it eleven of
+  thirteen negatives would be skips on a fresh runner. Three further amendments fall out. **The
+  two-part form extends from negatives to positives**: the `unshare(CLONE_NEWUSER)` positive must
+  assert the sequence succeeds *outside* before asserting it inside, since Ubuntu 24.04's
+  `default_allow` AppArmor profile permits the outer namespace and denies every capability inside
+  it — so the row **as specified passes vacuously** and must be strengthened to the nested
+  `clone` → `unshare` → `CLONE_NEWPID|CLONE_NEWNET` sequence rather than skipped. **The ceiling row
+  asserts playpen's refusal `code`, never a path count**: the limit is on compiled bytes (~64.7 per
+  rule, crossing between 1013 and 1014 rules on the reference host), reported in `errorbuf` with
+  `errno` **untouched**, so a refusal path reading `errno` gets `0` and has nothing to say. And one
+  operational law — **pin the runner label, never follow `-latest`**: the suite's row set is a
+  function of the kernel's Landlock ABI, so an unpinned floor is this ADR's forbidden hardcoded
+  platform assumption with the sign flipped._
