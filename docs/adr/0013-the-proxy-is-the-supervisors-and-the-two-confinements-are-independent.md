@@ -136,6 +136,12 @@ re-bound.
   and `none`, because a manifest that teaches an agent to interpret an event that cannot occur is
   stating something untrue about *this* boundary.
 
+  _Corrected by [ADR 0017](0017-an-endpoint-rule-restricts-the-credential-and-never-the-agent.md),
+  one condition finer: the rule is **omitted where no denial can fire**, not omitted under `open`.
+  An **endpoint rule set** can refuse a request through the unpinned broker, so under `open` the
+  vocabulary is stated iff some resolved route carries one. Under `none` there is no proxy and no
+  route, so it stands._
+
 - **ADR 0012's six mandatory set entries regrade into three tiers, each still refusal-if-unset
   within its condition.** Unconditional: `TMPDIR`, `PLAYPEN_MANIFEST`, `PLAYPEN_ACTIVE`. Iff a
   proxy exists: `HTTPS_PROXY` and `NO_PROXY` in both spellings — writing them with no proxy would
@@ -148,7 +154,12 @@ re-bound.
   environment is constructed, so with no proxy no proxy variable exists, `NO_PROXY` is moot rather
   than missing, and policy cannot author one — all six stay reserved under `refusal.env.reserved`.
 
-- **Any L7 endpoint rule forces interception, and therefore the CA pair.** Handed to the open
+- ~~**Any L7 endpoint rule forces interception, and therefore the CA pair.**~~ Handed to the open
   endpoint-rules work: a rule that restricts path or method cannot be enforced through an opaque
   `CONNECT`, so inventing one drags `SSL_CERT_FILE` and `NODE_EXTRA_CA_CERTS` into a profile that
   would otherwise have run without a CA in its trust bundle.
+
+  _Dissolved by [ADR 0017](0017-an-endpoint-rule-restricts-the-credential-and-never-the-agent.md):
+  an **endpoint rule set** lives only on a **credential route**, and ADR 0008 already intercepts
+  every credentialed host necessarily — so a rule adds interception to nothing that was not already
+  intercepted, and the CA tier above is untouched._

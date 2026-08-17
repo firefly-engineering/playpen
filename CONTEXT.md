@@ -131,6 +131,31 @@ extending the other, are ambiguous and playpen refuses.
 Attaches to the **workspace** when the credential minimizes to that workspace's **forge scope**,
 and to the **profile** otherwise. Both resolve into one table, provenance retained.
 
+May reference **endpoint rule sets**. Its own path prefix is a *selector* and never access
+control — the selector's job ends when the route is chosen.
+
+## Endpoint rule set
+
+A named, allow-only list of `{method, path}` rules bounding what a **credential route**'s secret
+may be used for. Referenced by name, never written inline, and only ever on a route: a host
+carrying no credential can carry no rule, because a rule there would restrict what the agent may
+*do*, which under an `open` **egress setting** cooperation alone would enforce. So a rule set is
+part of **credential confinement** and holds under every egress setting — a request that does not
+match never receives the secret, and gets the forge's own `401` instead.
+
+Exists for the credential a **minter** cannot minimize: a keystore lookup returns whatever the
+human already had, and a model API key is all-or-nothing. Where minting genuinely minimizes, the
+rule set is redundant.
+
+Paths are host-absolute and matched with a two-token segment glob — `*` one segment, `**` zero or
+more — which playpen parses itself, so a malformed rule is a **refusal** with a span rather than a
+second policy author's semantics. Both dimensions are load-bearing and neither alone suffices:
+path carries the read/write distinction for git, method for REST. The query string is matched
+never. Absent means unrestricted, not empty; there is no deny list and no ordering. playpen ships
+rule sets as data the operator names explicitly, on the same footing as an **allow-list fragment**
+and for the same reason — nobody writes "read-only forge" correctly from first principles, and
+getting it wrong fails open.
+
 ## Delivery
 
 How a route's **session phantom** reaches the agent — a named environment variable today. Named
@@ -451,8 +476,9 @@ silently inherited. It is not the same as **out of scope**: the surface is insid
 boundary's remit, and the decision is that closing it costs more than it buys. ACP's
 client-side execution, the shared host loopback on macOS, a browser running without its
 own renderer isolation, an agent orphaned by the death of its **supervisor** while still holding
-a released **provisioned area**, and the sequential cross-profile channel a `persistent` area
-opens are the five so far.
+a released **provisioned area**, the sequential cross-profile channel a `persistent` area
+opens, and git push *discovery* succeeding under a read-only **endpoint rule set** are the six so
+far.
 
 ## Supervisor
 

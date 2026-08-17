@@ -154,3 +154,9 @@ written down rather than left to be discovered in a source file.
   language is a separate question with its own trap — the never-a-regex law meeting glob syntax.
   Keeping them apart also stops a route selector from quietly becoming a security boundary
   nobody tested.
+
+  _Resolved by [ADR 0017](0017-an-endpoint-rule-restricts-the-credential-and-never-the-agent.md): a
+  route references named **endpoint rule sets**, allow-only, host-absolute, in a two-token segment
+  glob playpen parses itself. The selector stays a selector — nothing path-shaped is written
+  directly on a route — and the rule set exists for the credential a **minter** cannot minimize,
+  which the trivial keystore minter blessed above makes the common case rather than an edge one._
