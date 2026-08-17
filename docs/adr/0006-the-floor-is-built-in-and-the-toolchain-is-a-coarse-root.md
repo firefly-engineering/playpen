@@ -1,5 +1,15 @@
 # The floor is built in, and the toolchain is a coarse root with exclusions
 
+> **Status: superseded by [ADR 0014](0014-the-toolchain-is-a-declared-closure.md).**
+>
+> The floor half of this decision stands and is carried forward verbatim. The toolchain half is
+> wrong: the finding that closure-precise granting is "unrepresentable" was measured against the
+> operator's entire home-manager profile (1413 store paths) rather than an agent toolchain (108),
+> and the compiled-profile ceiling sits between 1000 and 1100 paths — an order of magnitude above
+> what a toolchain needs, not below it. The coarse `/nix/store` root it prescribes also leaks
+> every stale generation of the operator's dotfiles, which its single exclusion cannot close.
+> Read ADR 0014 instead.
+
 playpen always applies a **floor** — a built-in, non-subtractable grant of read and execute
 under OS-owned paths, plus a short enumerated set of Mach services — that no policy can widen
 or narrow. Everything else arrives as declared policy. The **toolchain** is a profile-level

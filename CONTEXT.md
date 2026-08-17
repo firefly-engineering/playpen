@@ -25,9 +25,11 @@ Contrast **provisioned area**, where playpen owns the path.
 
 A literal subpath subtracted from a **brought root** or **toolchain root**, with an optional
 set of access classes (`read`, `execute`, `write`) defaulting to all of them. Never a pattern.
-It is what makes a coarse root safe — the precise alternative, one root per closure path, does
-not fit the compiled-profile ceiling. Must exist or playpen refuses, because an exclusion whose
-path has gone is a leak that reopened silently.
+It is what makes a coarse root safe, and it applies to **mutable** trees only — a
+content-addressed tree is narrowed by declaring its **toolchain closure** instead, so there is
+nothing to subtract. Must exist or playpen refuses, because an exclusion whose path has gone is
+a leak that reopened silently — reasoning that holds for a path that moved and is why the
+content-addressed case is excluded from it rather than made an exception to it.
 
 ## Floor
 
@@ -46,7 +48,18 @@ brought rather than about the process.
 A read-only **brought root** naming what the agent works *with* rather than what it works *on*.
 Attached to the **profile**, not to a workspace — every workspace needs it equally. Where policy
 names a stable symlink, playpen resolves it and grants both link and target, because the
-mechanism enforces on the resolved path.
+mechanism enforces on the resolved path. A profile's toolchain is a *set* of these: a coarse
+root with **exclusions** where the tree is mutable, and a **toolchain closure** where it is
+content-addressed.
+
+## Toolchain closure
+
+The transitive closure of an operator-declared package set, emitted as one **toolchain root**
+per store path. The precise alternative to a coarse root, available wherever the tree is
+content-addressed. Because nothing outside the closure is granted, it needs no **exclusions** —
+the dotfile leak a coarse store root opens is absent rather than mitigated. Bounded by the
+compiled-profile ceiling, which a real toolchain uses about a tenth of; the count is known
+before launch, so overflow is caught where the closure is generated.
 
 ## Run scratch
 
@@ -285,6 +298,19 @@ A *single* document of keyed tables, never a directory — splitting it would gi
 syntax, because JSON is a subset of it and strict parsing leaves JSON no way to carry a
 comment. Strictly parsed throughout: an unknown field or version is a **refusal**. Its
 authored shape is distinct from the **capability set** it resolves to.
+
+It may be hand-written or generated, and playpen cannot tell which — a property rather than an
+accident, since it is what lets a **policy generator** exist without becoming a second author or
+a runtime dependency.
+
+## Policy generator
+
+Something that emits a **policy** on the operator's behalf — on a Nix host, a shipped
+home-manager module. It is a projection of what the operator declared, never an author: it
+contributes no defaults of its own, and any convenience it offers is a value the operator names
+explicitly. Its output is an ordinary file on the search path, indistinguishable from a
+hand-written one. It is how a **toolchain closure** gets written at all, since no human can
+correctly maintain a list of hashed store paths.
 
 ## Shim
 
