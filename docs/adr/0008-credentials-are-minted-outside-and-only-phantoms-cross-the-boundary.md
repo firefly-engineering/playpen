@@ -8,6 +8,12 @@ selects which real credential to inject by matching the request's **destination 
 path prefix** against a **route table**, strips the phantom, and injects the secret. There is no
 mode in which the real secret is placed in the sandbox's environment or filesystem.
 
+_Amended by [ADR 0013](0013-the-proxy-is-the-supervisors-and-the-two-confinements-are-independent.md):
+"the sibling proxy" is the **supervisor**, which hosts the proxy in-process. This ADR's guarantee
+is named **credential confinement** there and is enforced by construction rather than by the
+mechanism, so it holds under every egress setting — including `open`, where an agent may bypass
+the proxy entirely and thereby only fails to authenticate._
+
 ## Why
 
 **Minting is an exchange, not a lookup, and playpen must not know which forge it is talking to.**

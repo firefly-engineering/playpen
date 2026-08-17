@@ -137,7 +137,9 @@ keeps the shared host loopback on macOS from being a credential leak.
 
 ## Egress setting
 
-Which of `none`, `open` or `allowlist` governs a run's outbound network. A property of the
+Which of `none`, `open` or `allowlist` governs a run's outbound network — that is, whether
+**traffic confinement** is claimed at all. `open` means *no allow-list*, not *no proxy*: it leaves
+the **credential route** table and its **proxy** intact, unpinned. A property of the
 **profile**, never of a workspace — there is one boundary over one process tree, and no
 channel by which a connection could be attributed to a workspace that the agent could not
 forge. Independent of **forge scope**, which is stated in credential vocabulary; the two
@@ -145,14 +147,36 @@ lists can disagree, and playpen refuses rather than reconciling them.
 
 ## Proxy
 
-The process that enforces the egress allow-list, run **outside** the boundary as a detached
-sibling of the agent and reached over TCP loopback. Exists only under `allowlist` — `open`
-has no proxy rather than a permissive one. It is also the sole resolver: the sandbox gets no
-DNS. Terminates TLS only for hosts whose rule requires it, under an ephemeral per-session CA
-that never touches disk.
+The listener that serves the egress allow-list and the credential routes, run **outside** the
+boundary — in the **supervisor**, not as a separate process — and reached over TCP loopback. Binds
+`127.0.0.1` on an OS-assigned port before the confined child is forked, because the port is part
+of the **capability set**. Terminates TLS only for hosts whose rule requires it, under an ephemeral
+per-session CA that never touches disk.
 
-The **credential broker** is this same process wearing its other hat: one process, two
-lists, because "reachable" and "authenticated" are different facts.
+Exists under `allowlist` always, under `open` only where a **credential route** resolves, and under
+`none` never. Under `allowlist` it is also the sole resolver: the sandbox gets no DNS.
+
+The **credential broker** is this same listener wearing its other hat: one process, two lists,
+because "reachable" and "authenticated" are different facts.
+
+## Traffic confinement
+
+The guarantee that the **proxy** is the only way out, enforced by the **mechanism**. Claimed only
+under an `allowlist` **egress setting**; under `open` playpen claims it not at all, and an agent
+may reach the network directly.
+
+## Credential confinement
+
+The guarantee that no real credential is reachable inside the boundary — enforced by construction
+rather than by a mechanism, since the **environment allow-list** simply never builds the name. Holds
+under every **egress setting**, independently of **traffic confinement**: under `open` an agent may
+bypass the **proxy** freely, but only fails to authenticate, because the **session phantom** is the
+only credential it was given.
+
+The two confinements compose freely, and the pair is what decides whether cooperation is
+acceptable: a cooperative arrangement is a silent downgrade where it is the sole basis of a
+confinement playpen *claims*, and merely a convenience where honouring it decides only whether
+something works.
 
 ## Allow-list fragment
 
@@ -190,10 +214,13 @@ oracle — an egress channel the **proxy** cannot see and cannot deny.
 
 ## Set entry
 
-An environment variable playpen *writes* rather than passes. Playpen's own six are mandatory and
-their absence is a **refusal**: `TMPDIR`, `NO_PROXY` (both spellings), `HTTPS_PROXY`,
-`PLAYPEN_MANIFEST`, `PLAYPEN_ACTIVE`, and the CA pair `SSL_CERT_FILE` + `NODE_EXTRA_CA_CERTS` —
-a pair because two disjoint TLS stacks live inside one boundary.
+An environment variable playpen *writes* rather than passes. Playpen's own six are mandatory
+**relative to the boundary actually built**, and their absence within that condition is a
+**refusal**: `TMPDIR`, `PLAYPEN_MANIFEST` and `PLAYPEN_ACTIVE` unconditionally; `HTTPS_PROXY` and
+`NO_PROXY` (both spellings) wherever a **proxy** exists; and the CA pair `SSL_CERT_FILE` +
+`NODE_EXTRA_CA_CERTS` wherever the proxy intercepts at least one host — a pair because two disjoint
+TLS stacks live inside one boundary. All six are reserved names in every run, whether written or
+not.
 
 **Policy** may author set entries too, with literal values, and they win over floor pass-through.
 Attached to the **profile**, never a workspace, since merging per-workspace values would silently
@@ -365,3 +392,9 @@ whole run. It exists because playpen cannot be a pure `exec` shim — ephemeral 
 down and the credential proxy hosted — and it is *transparent*: it inherits stdio untouched,
 forwards signals, and exits with the child's status. Its lifetime is what an `exclusive`
 **concurrency** claim is pinned to, so a claim cannot outlive the run that took it.
+
+It stays unconfined, in the same trust class as the **minter** — it holds the real credentials the
+**proxy** injects — while the confined agent is the forked child that applies the **capability set**
+to itself and `exec`s. The **proxy** is hosted in it rather than detached, so the proxy cannot
+outlive the run either: killing the supervisor removes the credentials from the host and leaves the
+agent, if it survives, with no egress at all.

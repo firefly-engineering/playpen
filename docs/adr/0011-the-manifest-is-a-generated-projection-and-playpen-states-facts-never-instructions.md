@@ -42,6 +42,14 @@ hosts that can never be reached. The manifest's job is to make futile work visib
 Exclusions are the exception and are omitted: a subpath carved out of a granted root is
 discoverable only on denial, and enumerating those reads as a map of what is worth attacking.
 
+_Extended by [ADR 0013](0013-the-proxy-is-the-supervisors-and-the-two-confinements-are-independent.md):
+under `open` the resolved host list is **absent rather than empty**, since there is no list and
+fabricating one would state a fact playpen does not own. Credential routes are still listed, plus
+the fact that the proxy is not the sole exit and a routed destination is authenticated only for
+requests sent through it. ADR 0007's `403` + `X-Playpen-Denied` vocabulary is **omitted** under
+`open` and `none` — teaching an agent to interpret an event that cannot occur states something
+untrue about this boundary, which is the same test that omits exclusions._
+
 **The manifest describes the boundary and never constitutes it.** It sits in writable scratch, so
 an agent — or a prompt injection driving one — can rewrite it. Nothing moves when it does: the
 kernel's answer to the next `open()` is unchanged, and the agent has lied only to itself. This is

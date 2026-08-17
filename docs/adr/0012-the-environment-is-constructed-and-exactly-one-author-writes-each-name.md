@@ -62,6 +62,13 @@ exists, and passing the host `PATH` through is merely the *default*, not the mod
   them read `SSL_CERT_FILE`. Two TLS stacks inside one boundary is the same fact that already
   forced `NO_PROXY` to carry both spellings. This corrects ADR 0008.
 
+  _Regraded by [ADR 0013](0013-the-proxy-is-the-supervisors-and-the-two-confinements-are-independent.md)
+  into three tiers, each still refusal-if-unset within its condition: `TMPDIR`,
+  `PLAYPEN_MANIFEST` and `PLAYPEN_ACTIVE` unconditionally; `HTTPS_PROXY` and `NO_PROXY` iff a
+  proxy exists; the CA pair iff the resolved config intercepts at least one host. Four of the six
+  presupposed a proxy that ADR 0013 made conditional, and the CA pair turns out to be gated on
+  **interception** rather than on the proxy at all._
+
 - **Colliding with a name playpen sets is `refusal.env.reserved`.** Not because the value is
   dangerous — because two authors of one variable is ADR 0009's "which rule won" problem in its
   smallest possible package. The reserved set is exactly the six above plus every **delivery**

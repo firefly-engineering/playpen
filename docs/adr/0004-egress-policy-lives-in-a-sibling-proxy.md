@@ -7,6 +7,11 @@ three settings — `none`, `open`, `allowlist` — of which only `allowlist` has
 Transport is HTTPS-only, the sandbox gets no resolver, and where the kernel cannot pin the exit,
 playpen refuses.
 
+_Amended by [ADR 0013](0013-the-proxy-is-the-supervisors-and-the-two-confinements-are-independent.md):
+the proxy is not a detached sibling but runs in-process on the **supervisor** ADR 0010
+established, and `open` means **no allow-list, not no proxy** — it keeps the proxy whenever a
+credential route resolves. "The sandbox gets no resolver" holds under `allowlist` only._
+
 ## Why
 
 There was no design space here to speak of. **No mechanism on either platform can express
@@ -87,6 +92,12 @@ capabilities before launch, so the refusal names the missing capability rather t
   overhead and one more interception surface. Only `allowlist` has a moving part that can be
   absent, so only `allowlist` can fail to be enforceable.
 
+  _Amended by [ADR 0013](0013-the-proxy-is-the-supervisors-and-the-two-confinements-are-independent.md):
+  correct about the allow-list, wrong about the process. Written before ADR 0008 gave the proxy a
+  second job, so it read "no enforcement" as "no proxy". Under `open` the proxy runs unpinned
+  whenever a credential route resolves — not as a permissive allow-list, but as the credential
+  broker with its egress list absent._
+
 - **Named allow-list fragments, no built-in base list.** A registry is several CDN-fronted
   hostnames and an operator writing them from scratch debugs the result as "npm is broken". But
   an always-merged default list is what `nono-cli` does and what ADR 0003 walked away from,
@@ -106,6 +117,10 @@ capabilities before launch, so the refusal names the missing capability rather t
 
 - **Orphan cleanup is now certain rather than conditional.** A detached sibling's lifetime is not
   tied to the agent's by the process tree, so exit, crash and orphan cases must be designed.
+
+  _Resolved by [ADR 0013](0013-the-proxy-is-the-supervisors-and-the-two-confinements-are-independent.md)
+  by deletion: the proxy runs in the supervisor, so an orphaned proxy is structurally impossible
+  and there is nothing to detect at next launch._
 
 - **A client that ignores proxy environment variables fails closed.** That is correct behaviour,
   but Claude Code is Node and `undici` has historically ignored proxy environment variables

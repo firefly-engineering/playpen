@@ -76,3 +76,11 @@ transparency law forbids a live *ancestor*, not a live *process*. A supervisor i
 would hold the file descriptors ADR 0002 protects; a detached sibling holding a credential
 socket interprets nothing on the invocation path. This keeps a credential broker reachable
 at the cost of a sibling's lifetime no longer being tied to the agent's by the process tree.
+
+_Amended by [ADR 0010](0010-concurrency-is-a-property-of-a-provisioned-area.md) and
+[ADR 0013](0013-the-proxy-is-the-supervisors-and-the-two-confinements-are-independent.md):
+a live ancestor turned out to be unavoidable — an `exclusive` claim must be pinned to a live
+process and ephemeral areas must be torn down — so playpen has a **supervisor**, and transparency
+became an obligation it meets (stdio inherited untouched, signals forwarded, the child's status
+propagated) rather than a property obtained by not existing. With that parent already live, the
+proxy runs **in it** rather than detached, and the cost named in the last sentence is not paid._
