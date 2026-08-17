@@ -82,12 +82,24 @@ diagnosed from the kernel log afterwards. The status itself propagates untouched
   Landlock audit record names the path *and the exact missing right* — but only from kernel
   6.15 (ABI 7), only when `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON` is passed, since every
   denial after `execve` is otherwise dropped and post-`execve` is precisely playpen's shape.
-  The "privileged reader" fear did not survive contact: `CAP_AUDIT_READ` gates only the
-  direct netlink path, and on a journald host the records reach the ordinary system journal.
-  The current ceiling is the dependency's, not the kernel's — nono passes flags `0` and caps
-  its ABI probe at V6. So the refusal is **per-precondition with a distinct code**, never a
-  hardcoded "macOS only": macOS yields the trace with zero preconditions and Linux with four,
-  three of which an operator can fix.
+  The "privileged reader" fear did not survive contact **for the log**: `CAP_AUDIT_READ` gates
+  only the direct netlink path, and on a journald host the records reach the ordinary system
+  journal. It survives intact for the *status* — corrected by
+  [#32](https://github.com/firefly-engineering/playpen/issues/32), `AUDIT_GET` sits in the
+  `CAP_AUDIT_CONTROL` arm of `audit_netlink_ok()` beside `AUDIT_SET` and `AUDIT_ADD_RULE`, and
+  Linux offers **no read-only counterpart**, so reading whether auditing is on needs a strictly
+  *stronger* capability than reading what it logged. The current ceiling is the dependency's, not
+  the kernel's — nono passes flags `0` and caps its ABI probe at V6. So the refusal is
+  **per-precondition with a distinct code**, never a hardcoded "macOS only": macOS yields the
+  trace with zero preconditions and Linux with ~~four, three of which an operator can fix~~
+  **three probed preconditions and one channel self-test**. `audit_enabled` is unreadable rather
+  than merely privileged, so its precondition is settled by *provoking a known denial and looking
+  for its record* — an observation ("no record appeared", `refusal.trace.channel-silent`) and not
+  the inference ("auditing is off") that
+  [ADR 0016](0016-the-suite-defines-the-backend-and-an-assertion-that-can-pass-vacuously-is-a-defect.md)
+  forbids. The self-test is never cached, for the reason the floor self-test below is not. The
+  asymmetry against macOS is therefore **partly permanent**: nono's missing flag is fixable
+  upstream, but macOS's channel is certifiable *a priori* and Linux's only *a posteriori*.
 
 - **The floor self-test runs on every launch and is never cached.** Caching means keying on a
   proxy for "the floor still works" — an OS version, a hash — and every such key is a guess

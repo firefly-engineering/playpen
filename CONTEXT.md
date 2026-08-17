@@ -120,6 +120,13 @@ helps build.
 May be paired with a **revoker**, run best-effort when the run ends. Revocation is an
 optimization; the expiry the minter returned is the guarantee.
 
+Also the whole of playpen's answer to an interactively-obtained credential: the operator logs the
+agent in *outside* the boundary, where the browser is, and a minter reads the host's own store.
+Renewal is the minter's too — a minter that refreshes performs the exchange itself, since a real
+exchange is provider API surface and does not belong in the confinement binary. That a minter may
+read and write state a host-level agent instance also owns is the cost, and it is a **named
+residual**.
+
 ## Credential route
 
 The pairing of a destination — a host plus a literal path prefix — with the credential to
@@ -483,8 +490,9 @@ boundary's remit, and the decision is that closing it costs more than it buys. A
 client-side execution, the shared host loopback on macOS, a browser running without its
 own renderer isolation, an agent orphaned by the death of its **supervisor** while still holding
 a released **provisioned area**, the sequential cross-profile channel a `persistent` area
-opens, and git push *discovery* succeeding under a read-only **endpoint rule set** are the six so
-far.
+opens, git push *discovery* succeeding under a read-only **endpoint rule set**, and a refreshing
+**minter** racing a host-level agent instance over the credential store they share are the seven
+so far.
 
 ## Supervisor
 
