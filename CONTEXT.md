@@ -347,9 +347,22 @@ correctly maintain a list of hashed store paths.
 ## Shim
 
 A stand-in for an agent binary, placed on the operator's PATH so that invoking `claude`
-launches it confined. Thin by construction — it supplies a profile and a **kind** to the
-core CLI and nothing else. It finds the real binary by an absolute path the policy
-declares, never by searching PATH.
+launches it confined. Thin by construction — it supplies a profile, a **kind** and any
+**injected flags** to the core CLI, and nothing else. It finds the real binary by an
+absolute path the policy declares, never by searching PATH.
+
+## Injected flag
+
+A literal argv token a **shim** declares and playpen prepends to the child's arguments
+without reading it. Written as a list of tokens, never a shell string, because splitting
+one is a quoting parser. It can make the agent work or not work and can never move the
+boundary, so there is no *required* marker and no contradiction detection: prepending
+means a caller who repeats the flag overrides it, and across *different* flags playpen
+guarantees nothing, since the precedence is the agent's own.
+
+Per-agent knowledge is that a flag *exists*; policy is that this host *pins* it — which is
+why injected flags live on the shim declaration and the **kind** table learns no flag
+spellings.
 
 ## Kind
 
@@ -383,8 +396,8 @@ replaceable by another.
 ## Capability set
 
 The fully-resolved, enforcement-shaped description playpen hands a backend: absolute paths
-with access modes, a network mode, an environment allow-list. Nothing above that — no
-workspace names, no lifetimes, no profiles.
+with access modes, a network mode, an environment allow-list, the **injected flags**.
+Nothing above that — no workspace names, no lifetimes, no profiles.
 
 Faces *outward*, at the kernel. Contrast the **manifest**, which faces inward, at the agent.
 Dumpable without launching an agent, so that "which rule won" has an answer for the filesystem.

@@ -37,15 +37,40 @@ the invocation on the way through.
 
 ## Consequences
 
-Two exceptions are forced, and both are made loud rather than quiet.
+Two exceptions are forced, and both are made loud rather than quiet. Neither is an
+exception to *interpretation* — playpen adds argv without reading it, and reports its own
+failures without reading the child's.
 
-playpen must **inject** flags for some kinds, because an agent's own sandbox has to be
-displaced (macOS Seatbelt does not nest). Injection is strictly prepending, so under
-last-wins parsing the caller's own arguments still win, and every injected flag appears in
-`playpen resolve --json`. Where a flag is *required* for the sandbox to function at all,
-an explicit contradiction from the caller is a refusal at launch naming the conflict —
-this is the one place playpen inspects an argument, and it is narrow, declared in policy,
-and fails before exec rather than confusingly after it.
+A shim may **inject** flags, and playpen prepends them without understanding them. An
+injected flag is a list of literal argv tokens the operator declares in policy —
+`["--permission-mode", "plan"]`, never `"--permission-mode plan"`, because splitting a
+string is a shell-quoting parser whose mis-splits reach the agent as extra arguments and
+surface as agent errors with nothing pointing at playpen. The `kind` table learns no flag
+spellings: that a flag exists is per-agent knowledge, that this host pins it is policy.
+
+**An injected flag can make the agent work or not work, and can never make the boundary
+narrower or wider.** argv cannot widen a Seatbelt profile compiled before `exec`, so this
+is usability and not security — the same demotion ADR 0005 made for guest sandboxes, and
+for the same reason: confinement is the kernel's job.
+
+That is why there is no `required` marker and no contradiction detection. Deciding that a
+prepended `--dangerously-skip-permissions` contradicts a caller's `--permission-mode ask`
+needs that agent's flag grammar, which is the always-stale second copy this ADR exists to
+refuse — and nothing rests on the answer. **playpen does not inspect an argument
+anywhere.**
+
+What prepending buys is stated honestly rather than repaired: a caller who repeats an
+injected flag overrides it, under the near-universal last-wins convention. Across
+*different* flags playpen guarantees nothing, because the precedence is the agent's own
+and playpen does not model it. Appending would invert that single guarantee and buy no
+more.
+
+Visibility is therefore the whole of what playpen owes here. The injected argv is part of
+the **capability set**, so `playpen explain --json` reports it with `from:` provenance like
+every other resolved fact — the operator debugging *why is it still asking permission* gets
+the exact tokens rather than a guess. Nothing is projected inward: argv arrives in the
+process image at `exec`, so the agent already holds it, and a manifest copy could only
+disagree.
 
 playpen must **report its own failures**, and it cannot use stdout to do it. Refusals
 therefore go to stderr, and the exit code `125` is reserved for "playpen did not run the
@@ -64,6 +89,16 @@ death.
 **Detect ACP mode and behave accordingly.** Rejected because the detection can be wrong,
 and because the behaviour it would select is the behaviour that is correct in every case
 anyway. A mode flag here buys nothing and adds a way to fail.
+
+**A `required` marker on an injected flag, degraded to exact-duplicate detection.**
+Textually honest and needs no grammar, but it is anti-correlated with the failures it
+would be for: repeating a flag is the one case last-wins already handles correctly, so it
+would refuse on the input that works and stay silent on every input that breaks.
+
+**A per-`kind` table of contradicting flag pairs.** This is the always-stale second copy
+of someone else's CLI, arriving as declared data instead of parsing code — a maintenance
+treadmill against other people's release schedules, bought to prevent an outcome that is
+merely a broken agent.
 
 **Remap provisioned areas to tidy paths inside the boundary.** Attractive for presenting a
 stable layout to the agent, but it forfeits path identity, and a manifest that states
