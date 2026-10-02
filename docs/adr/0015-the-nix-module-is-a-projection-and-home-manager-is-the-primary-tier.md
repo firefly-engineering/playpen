@@ -116,3 +116,11 @@ that playpen requires Nix; it is that **Nix hosts require the module**.
 - **No module-shipped defaults, in any tier.** Every option defaults to empty. Convenience is
   reachable only by naming a `playpen.lib` value, which is the Nix-layer restatement of the law
   that playpen ships fragments and merges none.
+
+- _Complemented by [ADR 0019](0019-a-homebrew-toolchain-is-a-keg-list-and-a-shim-is-the-playpen-binary.md)
+  ([#28](https://github.com/firefly-engineering/playpen/issues/28)) for hosts without Nix: one
+  channel, a tap formula; a keg list closed by `brew deps` in place of `closureRoots`; no shipped
+  Homebrew fragment; `--no-filesystem` reachable from the CLI on its own. It also fixes what a
+  **shim** physically is — a symlink to playpen, looked up as `shims.<argv[0]>` — so "shim
+  installation is opt-in per `kind`" above means placing that link. The Homebrew paths cited
+  here are stale since writing (`claude-code@latest`; `omp` no longer brewed)._

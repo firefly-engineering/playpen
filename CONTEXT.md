@@ -49,8 +49,8 @@ A read-only **brought root** naming what the agent works *with* rather than what
 Attached to the **profile**, not to a workspace — every workspace needs it equally. Where policy
 names a stable symlink, playpen resolves it and grants both link and target, because the
 mechanism enforces on the resolved path. A profile's toolchain is a *set* of these: a coarse
-root with **exclusions** where the tree is mutable, and a **toolchain closure** where it is
-content-addressed.
+root with **exclusions** where the tree is mutable, a **toolchain closure** where it is
+content-addressed, and a **keg list** where a mutable tree offers stable per-package links.
 
 ## Toolchain closure
 
@@ -60,6 +60,16 @@ content-addressed. Because nothing outside the closure is granted, it needs no *
 the dotfile leak a coarse store root opens is absent rather than mitigated. Bounded by the
 compiled-profile ceiling, which a real toolchain uses about a tenth of; the count is known
 before launch, so overflow is caught where the closure is generated.
+
+## Keg list
+
+A **toolchain** written as one **toolchain root** per stable per-package link —
+`/opt/homebrew/opt/<keg>` — each resolved at launch so link and target are both granted. To a
+mutable package tree what a **toolchain closure** is to a content-addressed one: nothing
+outside the listed packages is granted, so no **exclusions** are needed, and an upgrade
+re-points the links rather than invalidating the policy. Closed over dependencies by the
+package manager's own tooling, never by playpen.
+_Avoid_: coarse root (for this shape), keg fragment.
 
 ## Run scratch
 
@@ -350,6 +360,11 @@ A stand-in for an agent binary, placed on the operator's PATH so that invoking `
 launches it confined. Thin by construction — it supplies a profile, a **kind** and any
 **injected flags** to the core CLI, and nothing else. It finds the real binary by an
 absolute path the policy declares, never by searching PATH.
+
+Physically a symlink to the playpen binary, named for its key in the policy's `shims` table,
+so the shim *is* playpen rather than a second artifact. It runs outside the boundary on the
+next launch, which is why playpen refuses when the shim, its directory, or the binary it
+resolves to is writable by the selected profile.
 
 ## Injected flag
 

@@ -189,3 +189,12 @@ process-transparency contract of ADR 0002 already promised to inherit untouched.
   `(literal "/")` trap but wants `/proc`, `/dev`, the loader and its cache. What makes them the
   same object is the enforcement suite: the loader canary and the fd negative are written once
   and must pass on both, and how the floor is spelled never appears in a test.
+
+- _Amended by [ADR 0019](0019-a-homebrew-toolchain-is-a-keg-list-and-a-shim-is-the-playpen-binary.md)
+  ([#28](https://github.com/firefly-engineering/playpen/issues/28)): **Homebrew is not the coarse
+  case after all.** A bottled binary links through stable `/opt/homebrew/opt/<keg>` symlinks, so a
+  **keg list** — one toolchain root per keg, resolved at launch — is to Homebrew what a closure is
+  to Nix, and a coarse `/opt/homebrew` root leaks SSH host private keys under `etc/ssh/`. The
+  reference-host paths cited above have also gone stale: the cask is now `claude-code@latest`
+  and `omp` is no longer brewed — true when written, and the reason a policy names the stable
+  link rather than the versioned path._
