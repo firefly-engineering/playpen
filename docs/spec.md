@@ -1,12 +1,11 @@
 # playpen — specification
 
-> **Status: draft.** Assembled from the resolved tickets of the
+> **Status: draft, complete.** Assembled from the resolved tickets of the
 > [playpen wayfinding map](https://github.com/firefly-engineering/playpen/issues/1) by
 > [Assemble the playpen spec](https://github.com/firefly-engineering/playpen/issues/9).
-> One decision is still open, so the draft is not ready to hand off:
-> [§5.6](#56-agent-state-directory) is **blocked** on
-> [Decide which agent state directory a multi-workspace profile gets](https://github.com/firefly-engineering/playpen/issues/36).
-> Everything else states decisions already made.
+> No section is blocked. Before hand-off, the reconciliations in
+> [Appendix B](#appendix-b--reconciliations-made-in-assembly) and the assembly choices in
+> [Appendix C](#appendix-c--assembly-choices) need review.
 
 This document is the **what**. The **why** lives in the ADRs under [`adr/`](adr/) and in the
 resolution comments of the tickets this spec cites. The vocabulary is
@@ -247,8 +246,7 @@ It has two halves that are kept apart in its structure, plus playpen-owned areas
 The workspace's **name** is what keeps the halves in sync. Nothing derives one half from the
 other: `~/src/<host>/<org>/<repo>` is the operator's convention, not playpen's, so playpen
 never infers an org from a path. A workspace also carries **workspace-attached credential
-routes** ([§7.4](#74-attachment)) and a per-kind **share list**
-([§5.6](#56-agent-state-directory)).
+routes** ([§7.4](#74-attachment)).
 
 ### 5.2 Brought roots
 
@@ -305,13 +303,14 @@ A **profile** is the unit an invocation selects. It holds:
 - `workspaces`: a **list** of workspace names;
 - `toolchain`: read-only roots for what the agent works *with* ([§8.3](#83-toolchain));
 - `env`: allow-list names, **environment fragments**, and literal `set:` values ([§9](#9-the-environment));
-- `credentials`: **profile-attached credential routes** ([§7.4](#74-attachment)).
+- `credentials`: **profile-attached credential routes** ([§7.4](#74-attachment));
+- `agent_state`: the per-kind **share list** ([§5.6](#56-agent-state-directory)).
 
 Across a profile's workspaces, **brought roots union, while provisioned areas and forge scope
 stay per workspace.** Not unioning forge scope is load-bearing: it stops the multi-workspace
 case from silently demanding a credential broader than either workspace justifies.
 
-Toolchain, `set:`, profile-attached routes and the run scratch attach to the **profile**, never to
+Toolchain, `set:`, profile-attached routes, agent state and the run scratch attach to the **profile**, never to
 a workspace. There is one boundary over one process tree, and no channel through which a request or
 a variable could be attributed to a workspace in a way the agent could not forge.
 
@@ -321,18 +320,27 @@ boundary. Where pinning is wanted, it belongs on the shim declaration.
 
 ### 5.6 Agent state directory
 
-Each workspace has its own **agent state directory** for each kind. playpen owns it and creates
-it under its state directory, and the agent is pointed at it by the kind's private redirect
-variable ([§12](#12-the-kind-table)). The real `~/.claude` or `~/.omp` is never granted. Entries
-named on the workspace's **share list**, keyed by kind, are made visible read-only inside the
-workspace's own directory. The share list is default-deny: it is empty unless entries are named.
+Each **profile** has its own **agent state directory** for each kind
+([ADR 0021](adr/0021-agent-state-belongs-to-the-profile.md)). playpen owns it and creates it under
+its state directory on first use, and never removes it. The agent is pointed at it by the kind's
+private redirect variable ([§12](#12-the-kind-table)). The real `~/.claude` or `~/.omp` is never
+granted.
 
-The cost is stated: a first launch in a new workspace has no MCP auth and no history.
+- **Keyed by profile × kind, never by workspace.** The directory holds transcripts, history and
+  memory, which contain whatever the writing run could read. Only runs whose reach is that
+  profile's write to it, so it can never carry one workspace's contents to a profile that cannot
+  reach them. Two profiles sharing a workspace do not share its agent history. Renaming a profile
+  starts a fresh directory.
+- **Shared** by every run of the profile, concurrently. The directory is the agent's, and the
+  agent handles its own concurrency (ADR 0010's cache case). There is no `concurrency` field.
+- **Share list.** Entries named in `profiles.<p>.agent_state.<kind>.share` are made visible
+  read-only inside the directory. The list is default-deny: empty unless entries are named.
+- **The presentation adapter owns the kind's instruction entry point** ([§13.3](#133-presentation)).
+  A share entry naming that same file is **composed by reference**: the rendered file ends with
+  the kind's import line pointing at the real file, which is granted read-only. For a kind with
+  no import mechanism, the collision is `refusal.state.collision`.
 
-> **Open — blocks hand-off:
-> [Decide which agent state directory a multi-workspace profile gets](https://github.com/firefly-engineering/playpen/issues/36).**
-> When a profile names more than one workspace, the record does not decide which workspace's
-> agent state directory the run receives. The redirect variable holds one value.
+The cost is stated: a first launch under a new profile has no MCP auth and no history.
 
 ### 5.7 Run scratch
 
@@ -783,8 +791,8 @@ Tables:
 | `definitions` | free-form anchors |
 | `minters` | `<name>: {command: [argv…], revoke?: [argv…]}` |
 | `fragments` | `env: {<name>: [NAME…]}`, `endpoints: {<name>: [{method, path}…]}` |
-| `workspaces` | `<name>: {roots, areas, forge?, credentials?, agent_state?}` |
-| `profiles` | `<name>: {prefixes?, workspaces, toolchain, env?, credentials?}` |
+| `workspaces` | `<name>: {roots, areas, forge?, credentials?}` |
+| `profiles` | `<name>: {prefixes?, workspaces, toolchain, env?, credentials?, agent_state?}` |
 | `shims` | `<name>: {target, kind, profile?, flags?}` |
 
 A worked example (illustrative values):
@@ -838,9 +846,6 @@ workspaces:
         minter: gh-app
         delivery: { env: GH_TOKEN }
         endpoints: [github-read-only]
-    agent_state:
-      claude: { share: [settings.json, skills] }
-      omp: { share: [] }
 
   notes:
     roots:
@@ -868,6 +873,9 @@ profiles:
         GIT_COMMITTER_EMAIL: agent@example.invalid
     credentials:
       - *anthropic-route
+    agent_state:
+      claude: { share: [CLAUDE.md, settings.json, skills] }   # CLAUDE.md is imported, not linked
+      omp: { share: [] }
 
   catch-all:
     prefixes: [/]                     # longest prefix wins, so `/` loses to everything
@@ -1096,8 +1104,20 @@ redirect `git`, `gh` and every other XDG-aware tool too.
 
 ### 13.3 Presentation
 
-The kind's **presentation adapter** renders the manifest into the idiom that kind reads,
-typically a file in the workspace's agent state directory. It may state facts about the boundary
+The kind's **presentation adapter** renders the manifest into the idiom that kind reads: the
+kind's instruction entry point in the profile's agent state directory (for `claude`,
+`$CLAUDE_CONFIG_DIR/CLAUDE.md`).
+
+- That directory is shared by every run of the profile, so the rendered file states **only facts
+  stable across those runs**: workspaces, roots and modes, persistent areas, credential routes and
+  their delivery variables, endpoint rule sets, and failure interpretation. It states, as a fact,
+  that this run's full layout is in the file named by `$PLAYPEN_MANIFEST`.
+- It is written to a temporary file and **renamed into place** on every launch. A policy edit made
+  during a live run shows up in that run's rendered file at the next launch; `$PLAYPEN_MANIFEST`
+  stays true for each run ([ADR 0021](adr/0021-agent-state-belongs-to-the-profile.md)).
+- A share entry naming the entry point is composed by reference ([§5.6](#56-agent-state-directory)).
+
+It may state facts about the boundary
 playpen built. It may **never** state what the agent should do about them. It is generated from
 the manifest's data, never hand-written, and carries no compatibility promise. Prompt fragments
 tuned per kind are ruled out permanently.
@@ -1490,9 +1510,17 @@ recorded as fog on the map that no current workload forces.
   confirm the desktop login survives.
 - Whether an access token survives another process's refresh.
 
+**Covered by the liveness probe:**
+
+- That `claude` loads `$CLAUDE_CONFIG_DIR/CLAUDE.md` and follows an absolute `@` import; and which
+  instruction entry point `omp` reads, and whether it has an import mechanism
+  ([§5.6](#56-agent-state-directory)).
+
 **Upstream:**
 
 - nono passing `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON`, and probing beyond ABI V6.
+- nono keeping unix sockets default-deny under `NetworkMode::AllowAll` on macOS, with explicit
+  grants. playpen refuses on macOS until a pinned release carries it ([§6.3](#63-credential-oracles)).
 
 ---
 
@@ -1548,6 +1576,7 @@ item C1). "Tier" is when the refusal can fire ([§10.5](#105-validation-tiers)).
 | `refusal.integrity.writable` | existence | the policy, the playpen executable, the shim link or its directory is profile-writable |
 | `refusal.cwd.ungranted` | existence | the CWD is not inside a granted root |
 | `refusal.area.busy` † | launch | an `exclusive` area is held; names the holding run id |
+| `refusal.state.collision` | coherence | a share entry names the kind's instruction entry point and the kind has no import mechanism |
 | `refusal.state.io` | launch | playpen cannot create its own state: run scratch, an area, the manifest, the record or the lock file |
 
 ### Mechanism
@@ -1624,11 +1653,11 @@ reconciled form.
 - **B8. ADR 0012's "No `refusal.env.*` code exists"** (the #31 amendment) refers to
   *value validation*. `refusal.env.reserved` remains minted, and the spec adds
   `refusal.env.forbidden` for `SSH_AUTH_SOCK`.
-- **B9. Open: the agent state directory of a multi-workspace profile.** The state directory is
-  per workspace ([#4](https://github.com/firefly-engineering/playpen/issues/4)), and a profile
-  names a *list* of workspaces. No ticket decides which directory the single redirect variable
-  points at. **Not reconciled; blocked on
-  [#36](https://github.com/firefly-engineering/playpen/issues/36).**
+- **B9. The agent state directory of a multi-workspace profile.** The state directory was per
+  workspace ([#4](https://github.com/firefly-engineering/playpen/issues/4)), and a profile names a
+  *list* of workspaces. **Resolved** by [ADR 0021](adr/0021-agent-state-belongs-to-the-profile.md)
+  ([#36](https://github.com/firefly-engineering/playpen/issues/36)): the directory is keyed by
+  profile × kind.
 - **B10. The Linux egress pin, loopback, and the network namespace.** ADR 0004 assumed a netns
   and wildcard-open loopback, and the backend chosen in ADR 0003 provides neither. **Resolved by
   deletion**: [ADR 0020](adr/0020-playpen-claims-credential-confinement-only.md) retired traffic
