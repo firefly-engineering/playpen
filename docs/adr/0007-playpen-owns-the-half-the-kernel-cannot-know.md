@@ -101,6 +101,40 @@ diagnosed from the kernel log afterwards. The status itself propagates untouched
   asymmetry against macOS is therefore **partly permanent**: nono's missing flag is fixable
   upstream, but macOS's channel is certifiable *a priori* and Linux's only *a posteriori*.
 
+  _Measured by [#34](https://github.com/firefly-engineering/playpen/issues/34)
+  ([report](https://github.com/firefly-engineering/playpen/blob/main/research/denial-selftest-latency.md)),
+  in a VM on kernel 7.0 with Landlock ABI 8: **the self-test fails by loss, never by lateness.** A
+  delivered record is queryable by polling within 2.9 ms at p99 (14 ms worst of 1,326), and every
+  miss was a lost record, so a longer timeout buys nothing. "On a journald host the records reach
+  the ordinary system journal" above holds only with `systemd-journald-audit.socket` enabled,
+  which stock Ubuntu 24.04 does not do; it also boots with auditing off, and installing `auditd`
+  sends records to its own log and none to the journal. The self-test is therefore specified as:_
+
+  - _**A 1 s budget, read by polling** the journal, never by `sd_journal_wait()` alone — journald
+    wakes waiters on a 250 ms timer, which put a reader at ~500 ms._
+  - _**Readability first**, so a journal the invoking user cannot read is its own refusal rather
+    than misreported as a silent channel._
+  - _**It passes only on `_TRANSPORT=audit`.** A record arriving with `_TRANSPORT=kernel` came
+    through the kernel's shared print rate limit (10 per 5 s), which dropped 40–50 % of
+    self-test records against a background agent denying at 5/s while `auditctl -s` still read
+    `lost 0`. That path is refused as **`refusal.trace.channel-lossy`**, distinct from
+    `channel-silent` because the remedy differs: enable `systemd-journald-audit.socket`. Accepting
+    it with a warning would hand back exactly the trace that reads as "nothing was denied"._
+  - _**It brackets the run.** A denial flood overran journald's receive buffer and journald
+    disabled its audit input permanently — surviving a journald restart, cleared only by
+    recreating the socket unit — and an agent denying in a tight loop is that flood. So the
+    self-test runs again after the agent exits, and if it fails the trace is marked
+    **unverified** rather than presented as complete._
+  - _**Its own denial is identifiable**: the record carries the probe's Landlock domain id, tied
+    by the `status=allocated` record to its pid and exe, and a unique path. Filtering it out of
+    the trace takes a key=value tokenizer over the record, not a pattern._
+
+  _**An eighth named residual follows**: an audit exclude rule scoped to the agent's binary or to
+  the Landlock message type empties the trace — 0 of 10 found, with no lost count — while the
+  self-test, which runs as a different binary, can still pass. playpen could see it only by
+  reading the rules, which needs the capability #32 showed it does not have. Backlog overflow
+  drops records too, but those are counted, behind the same capability._
+
 - **The floor self-test runs on every launch and is never cached.** Caching means keying on a
   proxy for "the floor still works" — an OS version, a hash — and every such key is a guess
   that fails **open and silently**, the exact failure class this decision exists to eliminate.

@@ -542,9 +542,10 @@ boundary's remit, and the decision is that closing it costs more than it buys. A
 client-side execution, the shared host loopback on macOS, a browser running without its
 own renderer isolation, an agent orphaned by the death of its **supervisor** while still holding
 a released **provisioned area**, the sequential cross-profile channel a `persistent` area
-opens, git push *discovery* succeeding under a read-only **endpoint rule set**, and an
+opens, git push *discovery* succeeding under a read-only **endpoint rule set**, an
 operator-written refreshing **minter** racing a host-level agent instance over the single-use
-login they share are the seven so far.
+login they share, and an audit exclude rule on Linux emptying a denial trace that playpen
+cannot see the rules behind are the eight so far.
 
 ## Supervisor
 

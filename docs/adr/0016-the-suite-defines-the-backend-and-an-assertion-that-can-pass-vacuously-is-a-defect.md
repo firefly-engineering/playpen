@@ -159,3 +159,10 @@ turns out to be *inexpressible* on one platform is a design bug to escalate, nev
   operational law — **pin the runner label, never follow `-latest`**: the suite's row set is a
   function of the kernel's Landlock ABI, so an unpinned floor is this ADR's forbidden hardcoded
   platform assumption with the sign flipped._
+
+- _Extended by [#34](https://github.com/firefly-engineering/playpen/issues/34): the Linux
+  `R-trace-denials` row gains two outcomes it must assert — the refusal
+  `refusal.trace.channel-lossy` on a host whose records arrive with `_TRANSPORT=kernel`, and a
+  trace marked **unverified** when the post-run self-test fails. Whether the hosted
+  `ubuntu-24.04` runner boots with auditing off and the journald audit socket disabled, as stock
+  Ubuntu does, is unmeasured; if so the row needs a setup step, not a skip._
