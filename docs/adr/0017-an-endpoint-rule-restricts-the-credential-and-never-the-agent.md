@@ -170,3 +170,10 @@ paths and leaves the most security-relevant object in the policy without a name 
   fetch already discloses, and the failure is a clean `403` rather than a hang — but git probes
   anonymously and retries on `401`, so a denial lands inside that retry dance and the operator sees
   git's own credential-failure wording before playpen's code.
+
+- _Amended by [ADR 0020](0020-playpen-claims-credential-confinement-only.md) ([#35](https://github.com/firefly-engineering/playpen/issues/35)): with traffic confinement retired, "under every egress setting" reads
+  "always", and the code is **`broker.endpoint.denied`** — the `egress.*` prefix is renamed
+  `broker.*`. The suite negative's fixture no longer needs a host-allow-list carve-out, since there
+  is no allow-list to pass for the wrong reason; the no-upstream-leg assertion stands unchanged.
+  Ruling rules off uncredentialed hosts is now doubly settled: there is no traffic claim for them to
+  belong to._

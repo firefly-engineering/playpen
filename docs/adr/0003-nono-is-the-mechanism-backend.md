@@ -84,3 +84,13 @@ process and ephemeral areas must be torn down — so playpen has a **supervisor*
 became an obligation it meets (stdio inherited untouched, signals forwarded, the child's status
 propagated) rather than a property obtained by not existing. With that parent already live, the
 proxy runs **in it** rather than detached, and the cost named in the last sentence is not paid._
+
+- _Amended by [ADR 0020](0020-playpen-claims-credential-confinement-only.md) ([#35](https://github.com/firefly-engineering/playpen/issues/35)): **the network mode is `NetworkMode::AllowAll`, with no seccomp
+  network filter.** Traffic confinement is retired, so nono's `ProxyOnly` — which pins loopback to
+  the proxy port and, on Linux, is address-blind without a seccomp user-notify `CONTINUE` the kernel
+  documents as unsafe for policy — is never used, and the declared surface stays `sandbox` +
+  `capability`. One upstream change is owed: under `AllowAll`, nono's macOS rendering grants every
+  unix socket (`(allow network-outbound)` unqualified), which reopens the `ssh-agent` and kindred
+  **credential oracles**; playpen pins a release that keeps unix sockets default-deny with explicit
+  grants, and refuses on macOS until one exists. nono's sandbox-extension rules
+  (`extensions_enabled`) stay off, per the no-runtime-expansion law above._

@@ -166,3 +166,10 @@ turns out to be *inexpressible* on one platform is a design bug to escalate, nev
   trace marked **unverified** when the post-run self-test fails. Whether the hosted
   `ubuntu-24.04` runner boots with auditing off and the journald audit socket disabled, as stock
   Ubuntu does, is unmeasured; if so the row needs a setup step, not a skip._
+
+- _Amended by [ADR 0020](0020-playpen-claims-credential-confinement-only.md) ([#35](https://github.com/firefly-engineering/playpen/issues/35)): the rows that asserted traffic confinement — every port but the
+  proxy's shut, no resolver inside — are removed. One row is added: **a decoy unix socket
+  listening outside every grant is reachable outside and refused inside**, two-part, running on
+  macOS and skipped by name on Linux below Landlock ABI 9. The asymmetry ledger stays at five: the
+  shared host loopback leaves it (neither platform confines the network) and **unix-socket
+  enforcement** joins it (every macOS version against Linux ABI ≥ 9)._

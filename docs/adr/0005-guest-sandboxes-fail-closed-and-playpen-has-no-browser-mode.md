@@ -84,3 +84,7 @@ workspace scoping: a buzz-class profile gets a thin workspace.
   permits `clone(CLONE_NEWUSER)` is unknown. This is a liveness question only — with
   `--no-sandbox` the need disappears — but it decides whether browser automation runs on Linux
   at all.
+
+- _Amended by [ADR 0020](0020-playpen-claims-credential-confinement-only.md) ([#35](https://github.com/firefly-engineering/playpen/issues/35)): the shared host loopback is no longer a macOS-only residual;
+  it is subsumed by **network-reachable credential sources**, since playpen confines no network on
+  either platform._

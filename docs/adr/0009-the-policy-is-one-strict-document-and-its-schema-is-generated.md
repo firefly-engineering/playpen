@@ -119,3 +119,7 @@ for allow-list fragments.
 - **Later decisions extend the route object additively.** Endpoint rules and any
   subscription-login state land as new fields on an existing table rather than a new shape,
   because the route table is already the discriminating object.
+
+- _Amended by [ADR 0020](0020-playpen-claims-credential-confinement-only.md) ([#35](https://github.com/firefly-engineering/playpen/issues/35)): the profile has **no `egress` field**, so the `none`-with-route
+  incoherence above no longer exists. "The egress list" in the resolved form is the **route
+  table**._

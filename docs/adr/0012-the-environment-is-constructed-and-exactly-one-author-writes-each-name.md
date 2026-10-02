@@ -150,3 +150,14 @@ exists, and passing the host `PATH` through is merely the *default*, not the mod
   proxy-traversing task would catch it, but liveness gates agent versions and never playpen
   changes, so **the gate is playpen's own unit and property tests** over every set entry's
   rendering: IPv4 and IPv6 proxy URLs and paths that round-trip through a real parser._
+
+- _Amended by [ADR 0020](0020-playpen-claims-credential-confinement-only.md) ([#35](https://github.com/firefly-engineering/playpen/issues/35)): **the proxy and CA tiers collapse into one.** `HTTPS_PROXY`,
+  `NO_PROXY` / `no_proxy`, `NODE_USE_ENV_PROXY=1` and the pair `SSL_CERT_FILE` +
+  `NODE_EXTRA_CA_CERTS` are written **iff a credential route resolves** — a proxy now exists exactly
+  then, and interception follows the route table. `NODE_USE_ENV_PROXY=1` joins the set as
+  [#24](https://github.com/firefly-engineering/playpen/issues/24) decided (it never reached this ADR
+  before): without it Node-written MCP servers and children on Bun ≥ 1.4.0 bypass the broker and
+  fail to authenticate. All stay reserved. `SSH_AUTH_SOCK` stays permanently forbidden, now
+  described as a **credential oracle** rather than an egress channel; banning the *name* is
+  necessary but not sufficient, and the socket itself is denied by the unix-socket default-deny of
+  ADR 0020._

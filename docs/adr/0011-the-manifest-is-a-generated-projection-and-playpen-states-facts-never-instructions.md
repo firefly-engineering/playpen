@@ -115,3 +115,10 @@ an unread manifest does.
 
 **A read-only carve-out for the manifest file.** Rejected above; the integrity it buys is against
 an adversary for whom the lie is worthless.
+
+- _Amended by [ADR 0020](0020-playpen-claims-credential-confinement-only.md) ([#35](https://github.com/firefly-engineering/playpen/issues/35)): the manifest states **no egress setting and no host list**. It
+  always states that the proxy is not the only way out and that a routed destination is
+  authenticated only for requests sent through it; the `403` vocabulary is stated iff some route
+  carries an **endpoint rule set**. On Linux below Landlock ABI 9, where unix-socket oracles stay
+  reachable, the regime is recorded **outward only** — run record and `playpen explain` — on the
+  same reasoning that omits exclusions here._

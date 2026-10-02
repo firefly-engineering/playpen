@@ -1,5 +1,15 @@
 # Egress policy lives in a sibling proxy, and the kernel's only job is to make it the sole exit
 
+> **Status: superseded by [ADR 0020](0020-playpen-claims-credential-confinement-only.md) ([#35](https://github.com/firefly-engineering/playpen/issues/35)).**
+>
+> Traffic confinement is retired: playpen claims nothing about what the agent may reach on the
+> network. The proxy survives only as the credential broker of
+> [ADR 0008](0008-credentials-are-minted-outside-and-only-phantoms-cross-the-boundary.md), running
+> iff a credential route resolves, passing uncredentialed traffic through as opaque `CONNECT`. The
+> analysis below — no mechanism expresses per-host egress, so name policy can only live at L7 — still
+> stands; what changed is that the operator does not want the claim it would have bought. Read
+> ADR 0020 instead.
+
 playpen enforces its egress allow-list in an **L7 proxy running outside the boundary**, spawned
 per run as a detached sibling and reached over TCP loopback. The kernel mechanism contributes
 exactly one thing: making that proxy the only way out. Egress is a **profile** property with

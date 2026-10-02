@@ -171,3 +171,13 @@ diagnosed from the kernel log afterwards. The status itself propagates untouched
   no-second-code-path goal is met by having no second code path rather than two that agree — and
   the command would have required playpen's own binary inside every profile's toolchain root. The
   section's content is per-platform, not per-`kind`; `kind` selects only the rendering._
+
+- _Amended by [ADR 0020](0020-playpen-claims-credential-confinement-only.md) ([#35](https://github.com/firefly-engineering/playpen/issues/35)): **the only broker denial left is an endpoint rule's.** With traffic
+  confinement retired there is no allow-list to refuse a host, so the `403` + `X-Playpen-Denied`
+  vocabulary above fires only for an **endpoint rule set**, coded `broker.endpoint.denied`. The
+  `egress.*` prefix is renamed **`broker.*`**; "the egress list" in the run record and in
+  `playpen explain` is the **route table**. The sandbox has a resolver again (the agent's own), and
+  a name-resolution failure is the network's, not playpen's. `502` for a genuine upstream failure
+  stands. Per [#24](https://github.com/firefly-engineering/playpen/issues/24) the `403` body is
+  self-describing — it names playpen, the code and the destination — since Bun's `fetch` surfaces a
+  proxy refusal as an ordinary `Response`._

@@ -177,3 +177,12 @@ written down rather than left to be discovered in a source file.
   re-entered shim `exec`s inside the same boundary, where the phantom, proxy and manifest are all
   still true. A nested agent of a *different* `kind` gets no suppression entries and no state
   directory, so it may break; it cannot escape, and it is documented rather than engineered._
+
+- _Amended by [ADR 0020](0020-playpen-claims-credential-confinement-only.md) ([#35](https://github.com/firefly-engineering/playpen/issues/35)): this ADR's guarantee — **credential confinement** — is now the only
+  network claim playpen makes. Its scope is widened from secrets to **credential oracles**: a unix
+  socket that signs or acts for its caller (`ssh-agent`, `gpg-agent`, a password manager's agent,
+  `docker.sock`) is default-deny on macOS and on Linux at Landlock ABI ≥ 9, and a named residual on
+  Linux below it; a network-reachable oracle (a cloud metadata endpoint, a host-loopback credential
+  service) is a named residual. "A missing credential is not an egress decision" now reads "is never
+  a `broker.*` code". The shared-loopback residual cited above is subsumed by **network-reachable
+  credential sources**, on both platforms._

@@ -163,3 +163,11 @@ re-bound.
   an **endpoint rule set** lives only on a **credential route**, and ADR 0008 already intercepts
   every credentialed host necessarily — so a rule adds interception to nothing that was not already
   intercepted, and the CA tier above is untouched._
+
+- _Amended by [ADR 0020](0020-playpen-claims-credential-confinement-only.md) ([#35](https://github.com/firefly-engineering/playpen/issues/35)): **traffic confinement is retired**, leaving credential confinement as
+  playpen's only network claim. The product of the two confinements collapses to its `open` +
+  routes cell: the proxy runs iff a route resolves, unpinned, with no allow-list. Everything above
+  that turns on `allowlist` or `none` — the pin, "the sandbox gets no resolver", DNS-rebinding
+  immunity, `none` + route as a refusal — no longer applies. Bind failure as a refusal, teardown on
+  proxy death, the teardown order and the absence of orphan detection all stand; teardown on proxy
+  death now rests on `HTTPS_PROXY` pointing every client at the dead port._

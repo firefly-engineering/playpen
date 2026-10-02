@@ -161,9 +161,9 @@ control — the selector's job ends when the route is chosen.
 A named, allow-only list of `{method, path}` rules bounding what a **credential route**'s secret
 may be used for. Referenced by name, never written inline, and only ever on a route: a host
 carrying no credential can carry no rule, because a rule there would restrict what the agent may
-*do*, which under an `open` **egress setting** cooperation alone would enforce. So a rule set is
-part of **credential confinement** and holds under every egress setting — a request that does not
-match never receives the secret, and gets the forge's own `401` instead.
+*do*, which playpen does not confine. So a rule set is part of **credential confinement** and
+always holds — a request that does not match never receives the secret, and gets the forge's own
+`401` instead.
 
 Exists for the credential a **minter** cannot minimize: a keystore lookup returns whatever the
 human already had, and a model API key is all-or-nothing. Where minting genuinely minimizes, the
@@ -174,7 +174,7 @@ more — which playpen parses itself, so a malformed rule is a **refusal** with 
 second policy author's semantics. Both dimensions are load-bearing and neither alone suffices:
 path carries the read/write distinction for git, method for REST. The query string is matched
 never. Absent means unrestricted, not empty; there is no deny list and no ordering. playpen ships
-rule sets as data the operator names explicitly, on the same footing as an **allow-list fragment**
+rule sets as data the operator names explicitly, on the same footing as an **environment fragment**
 and for the same reason — nobody writes "read-only forge" correctly from first principles, and
 getting it wrong fails open.
 
@@ -189,84 +189,65 @@ field rather than an assumption, so another transport can be added without distu
 The random bearer token that stands in for every real credential inside the boundary — one per
 run, not one per credential, since delivery cannot hand one tool a choice between two. The agent
 presents it; the **proxy** strips it and injects the real secret, which never crosses the
-boundary in any mode.
+boundary.
 
 It faces both ways. Inward it contains exfiltration — a secret that is not present cannot leak
 through a log line or a tool call. Outward it authenticates callers of the proxy, which is what
-keeps the shared host loopback on macOS from being a credential leak.
+keeps the proxy's port on the shared host loopback from being a credential leak.
 
 It belongs to the process tree, not to the agent: every process the agent spawns — a third-party
 MCP server included — inherits it and has full use of every **credential route**. That is a
 consequence of the unit of policy rather than a **named residual**, since nothing inside one
 boundary can separate a child from its parent; **endpoint rule sets** bound any holder alike.
 
-## Egress setting
-
-Which of `none`, `open` or `allowlist` governs a run's outbound network — that is, whether
-**traffic confinement** is claimed at all. `open` means *no allow-list*, not *no proxy*: it leaves
-the **credential route** table and its **proxy** intact, unpinned. A property of the
-**profile**, never of a workspace — there is one boundary over one process tree, and no
-channel by which a connection could be attributed to a workspace that the agent could not
-forge. Independent of **forge scope**, which is stated in credential vocabulary; the two
-lists can disagree, and playpen refuses rather than reconciling them.
-
 ## Proxy
 
-The listener that serves the egress allow-list and the credential routes, run **outside** the
+The credential broker: the listener that serves the **credential routes**, run **outside** the
 boundary — in the **supervisor**, not as a separate process — and reached over TCP loopback. Binds
-`127.0.0.1` on an OS-assigned port before the confined child is forked, because the port is part
-of the **capability set**. Terminates TLS only for hosts whose rule requires it, under an ephemeral
-per-session CA that never touches disk.
-
-Exists under `allowlist` always, under `open` only where a **credential route** resolves, and under
-`none` never. Under `allowlist` it is also the sole resolver: the sandbox gets no DNS.
-
-The **credential broker** is this same listener wearing its other hat: one process, two lists,
-because "reachable" and "authenticated" are different facts.
-
-## Traffic confinement
-
-The guarantee that the **proxy** is the only way out, enforced by the **mechanism**. Claimed only
-under an `allowlist` **egress setting**; under `open` playpen claims it not at all, and an agent
-may reach the network directly.
+`127.0.0.1` on an OS-assigned port before the confined child is forked. Exists iff a credential
+route resolves. Every client is pointed at it; it terminates TLS only for routed hosts, under an
+ephemeral per-session CA that never touches disk, and passes everything else through as an opaque
+tunnel with no check. It is never the only way out: playpen confines no network.
 
 ## Credential confinement
 
-The guarantee that no real credential is reachable inside the boundary — enforced by construction
-rather than by a mechanism, since the **environment allow-list** simply never builds the name. Holds
-under every **egress setting**, independently of **traffic confinement**: under `open` an agent may
-bypass the **proxy** freely, but only fails to authenticate, because the **session phantom** is the
-only credential it was given.
+playpen's only network claim: the *means* of using a credentialed resource stays inside the
+**proxy**. No real credential is reachable inside the boundary — enforced by construction, since the
+**environment allow-list** never builds the name, and by the **mechanism** for credentials at rest
+(the floor's Keychain denial, ungranted dotfiles). An agent may reach the network directly and
+merely fails to authenticate, because the **session phantom** is the only credential it was given.
 
-The two confinements compose freely, and the pair is what decides whether cooperation is
-acceptable: a cooperative arrangement is a silent downgrade where it is the sole basis of a
-confinement playpen *claims*, and merely a convenience where honouring it decides only whether
-something works.
+Covers **credential oracles** as well as secrets. A unix-socket oracle is denied unless it sits under
+a granted writable area — on macOS always, on Linux from Landlock ABI 9; below that it is a **named
+residual**, recorded outward and never in the **manifest**. A network-reachable oracle is a named
+residual on every platform.
 
-## Allow-list fragment
+What decides whether cooperation is acceptable: a cooperative arrangement is a silent downgrade
+where it is the sole basis of a confinement playpen *claims*, and merely a convenience where
+honouring it decides only whether something works.
 
-A named, composable set of **host entries** the operator references from a profile — `npm`,
-the forge, the model API. Data in the **policy**, never code, so the resolved allow-list is
-readable. playpen ships fragments but merges none by default; there is only ever one policy
-author.
+## Credential oracle
 
-The **environment allow-list** takes fragments of the same shape — a `rust` fragment carrying
-`CARGO_HOME`/`RUSTUP_HOME`, a `nix` fragment carrying `NIX_*` and `LOCALE_ARCHIVE`. A fragment
-carries *names* only and never a **set entry**'s value: a name is host-independent, a value is a
-fact about one host, and a value reaches the policy by generation instead.
+An endpoint that performs a credentialed operation for whoever reaches it, so that no secret has to
+cross the boundary for the means to escape: `ssh-agent`, `gpg-agent`, a password manager's agent and
+`docker.sock` over unix sockets; a cloud metadata endpoint or a credential service on host loopback
+over the network.
 
-## Host entry
+## Environment fragment
 
-One member of an allow-list: an exact hostname, or a left-anchored suffix matched on a label
-boundary. Never a regex. Port 443 is implied — transport is HTTPS-only, so an entry names a
-host, not a host and port.
+A named, composable set of environment variable *names* the operator references from a profile —
+a `rust` fragment carrying `CARGO_HOME`/`RUSTUP_HOME`, a `nix` fragment carrying `NIX_*` and
+`LOCALE_ARCHIVE`. Data in the **policy**, never code. playpen ships fragments but merges none by
+default; there is only ever one policy author. A fragment carries names only and never a **set
+entry**'s value: a name is host-independent, a value is a fact about one host, and a value reaches
+the policy by generation instead.
 
 ## Environment allow-list
 
 The set of environment variable *names* passed through from the host into the boundary. Names
 only — an inherited **value** is never inspected, because a value can only name a path and every
 path is enforced by the **mechanism** regardless. Exact names, never patterns. A **floor** plus
-per-**profile** entries, composable from **fragments**. A name on the list that is absent from the
+per-**profile** entries, composable from **environment fragments**. A name on the list that is absent from the
 host env is simply absent: the one stated exception to **refusal**-never-silent-downgrade, earned
 because it fails *closed*.
 
@@ -274,18 +255,19 @@ The child's environment is **constructed, never filtered** — nothing arrives t
 put there, so there is no deny-list and nothing to strip.
 
 `SSH_AUTH_SOCK` is permanently denied and no policy may add it: unlike the path-shaped hazards
-(`NODE_OPTIONS`, `LD_PRELOAD`, `GIT_SSH_COMMAND`), it names a socket to an unconfined signing
-oracle — an egress channel the **proxy** cannot see and cannot deny.
+(`NODE_OPTIONS`, `LD_PRELOAD`, `GIT_SSH_COMMAND`), it names a **credential oracle** the **proxy**
+cannot see. Banning the name is necessary but not sufficient; the socket itself falls under
+**credential confinement**'s unix-socket denial.
 
 ## Set entry
 
-An environment variable playpen *writes* rather than passes. Playpen's own six are mandatory
+An environment variable playpen *writes* rather than passes. Playpen's own are mandatory
 **relative to the boundary actually built**, and their absence within that condition is a
-**refusal**: `TMPDIR`, `PLAYPEN_MANIFEST` and `PLAYPEN_ACTIVE` unconditionally; `HTTPS_PROXY` and
-`NO_PROXY` (both spellings) wherever a **proxy** exists; and the CA pair `SSL_CERT_FILE` +
-`NODE_EXTRA_CA_CERTS` wherever the proxy intercepts at least one host — a pair because two disjoint
-TLS stacks live inside one boundary. All six are reserved names in every run, whether written or
-not.
+**refusal**: `TMPDIR`, `PLAYPEN_MANIFEST` and `PLAYPEN_ACTIVE` unconditionally; and, wherever a
+**proxy** exists — iff a **credential route** resolves — `HTTPS_PROXY`, `NO_PROXY` (both
+spellings), `NODE_USE_ENV_PROXY`, and the CA pair `SSL_CERT_FILE` + `NODE_EXTRA_CA_CERTS`, a pair
+because two disjoint TLS stacks live inside one boundary. All are reserved names in every run,
+whether written or not, as are the **kind**'s own entries.
 
 **Policy** may author set entries too, with literal values, and they win over floor pass-through.
 Attached to the **profile**, never a workspace, since merging per-workspace values would silently
@@ -313,11 +295,11 @@ strictly narrower: no selection trace, no policy provenance. playpen owns the fa
 how it reaches an agent's attention is a per-harness presentation concern.
 
 It is also the *only* thing playpen tells an agent about its own confinement, and it says so
-up front rather than at the moment of failure: alongside the layout it carries the **egress
-setting** and the hosts it resolves to, the destinations a **credential route** authenticates
-and the variable each is **delivered** in,
-how to read a **denial**, and that the boundary is fixed for the whole session. **Exclusions**
-are the one omission — enumerating them maps what is worth attacking. It is the sole
+up front rather than at the moment of failure: alongside the layout it carries the destinations a
+**credential route** authenticates and the variable each is **delivered** in, that the **proxy** is
+not the only way out, how to read a **denial**, and that the boundary is fixed for the whole session. **Exclusions**
+are omitted — enumerating them maps what is worth attacking — and so is whether unix-socket
+**credential oracles** are reachable, for the same reason. It is the sole
 inward-facing truth — nothing playpen offers inside the boundary may state a fact the manifest
 does not.
 
@@ -494,9 +476,10 @@ admits no grant and so is made with OS-owned binaries alone.
 ## Named asymmetry
 
 A place where the two platforms are not equals, written down rather than absorbed. The
-shared host loopback and the compiled-profile ceiling on macOS, the mechanism's deprecation
-clock, denial visibility (free on macOS, four preconditions on Linux), and namespaces for
-bind-mounting on Linux are the five so far. The ledger is kept honest by the **enforcement
+compiled-profile ceiling on macOS, the mechanism's deprecation clock, denial visibility (free on
+macOS, four preconditions on Linux), namespaces for bind-mounting on Linux, and unix-socket
+**credential oracle** denial (every macOS version, Linux only from Landlock ABI 9) are the five so
+far. The ledger is kept honest by the **enforcement
 test** set: an assertion that runs on only one platform must name the asymmetry it encodes,
 and a backend that makes such an assertion inapplicable has retired one rather than passed it.
 
@@ -507,8 +490,8 @@ a **refusal**. Observed in-band by the confined process as an errno, and out-of-
 operator in the kernel's own log. Always distinguishable from absence and from success:
 never `ENOENT`. playpen adds nothing to it at the moment it happens.
 
-An egress denial is the same event at L7 — the **proxy** refusing a host — and is likewise
-distinguishable in-band from a transport failure.
+A broker denial is the same event at L7 — the **proxy** refusing a request an **endpoint rule
+set** does not permit — and is likewise distinguishable in-band from a transport failure.
 
 ## Refusal
 
@@ -520,7 +503,7 @@ than running with less than was asked for. A capability that can only be enforce
 ## Code
 
 The stable, enumerated string naming *why* playpen said no. One namespace, two prefixes:
-`refusal.*` for a **refusal**, `egress.*` for an egress **denial** — different events, and
+`refusal.*` for a **refusal**, `broker.*` for a broker **denial** — different events, and
 conflating them would make "playpen refused" ambiguous to the consumers the enumeration exists
 to serve. The set is closed and versioned; consumers branch on the code, never on the prose
 beside it. Every backend error is translated into one, never leaked.
@@ -528,8 +511,8 @@ beside it. Every backend error is translated into one, never leaked.
 ## Run record
 
 What playpen knows and the kernel cannot: which policy produced this boundary. The resolved
-profile and the selection trace that chose it, the **capability set**, the egress list, the
-pid, the timestamps. Written *before* launch, since a run that refuses is the one whose record
+profile and the selection trace that chose it, the **capability set**, the **credential route**
+table, the pid, the timestamps. Written *before* launch, since a run that refuses is the one whose record
 is most wanted. Lives outside every workspace and is unreachable from inside the boundary — a
 record the agent could read is one it could be confused by. A bounded ring of recent runs: a
 debugging aid, not an audit log.
@@ -539,13 +522,16 @@ debugging aid, not an audit log.
 A reachable surface playpen consciously declines to close, written down rather than
 silently inherited. It is not the same as **out of scope**: the surface is inside the
 boundary's remit, and the decision is that closing it costs more than it buys. ACP's
-client-side execution, the shared host loopback on macOS, a browser running without its
+client-side execution, network-reachable **credential oracles** (a cloud metadata endpoint, a
+credential service on host loopback), unix-socket credential oracles on Linux below Landlock ABI 9,
+a browser running without its
 own renderer isolation, an agent orphaned by the death of its **supervisor** while still holding
 a released **provisioned area**, the sequential cross-profile channel a `persistent` area
 opens, git push *discovery* succeeding under a read-only **endpoint rule set**, an
 operator-written refreshing **minter** racing a host-level agent instance over the single-use
-login they share, and an audit exclude rule on Linux emptying a denial trace that playpen
-cannot see the rules behind are the eight so far.
+login they share, an audit exclude rule on Linux emptying a denial trace that playpen
+cannot see the rules behind, and a profile-writable directory earlier on the host's `PATH` than a
+**shim** are the ten so far.
 
 ## Supervisor
 
@@ -559,4 +545,11 @@ It stays unconfined, in the same trust class as the **minter** — it holds the 
 **proxy** injects — while the confined agent is the forked child that applies the **capability set**
 to itself and `exec`s. The **proxy** is hosted in it rather than detached, so the proxy cannot
 outlive the run either: killing the supervisor removes the credentials from the host and leaves the
-agent, if it survives, with no egress at all.
+agent, if it survives, with no credentials at all.
+
+## Retired terms
+
+- **Egress setting**, **traffic confinement**, **allow-list fragment**, **host entry** — retired by
+  [#35](https://github.com/firefly-engineering/playpen/issues/35): playpen claims nothing about
+  what the agent may reach on the network, so the vocabulary for an egress allow-list names nothing.
+  The environment's fragments survive as **environment fragment**.

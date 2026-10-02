@@ -130,3 +130,9 @@ are provider facts, whatever CLI mints it:_
 **Non-native credential storage is unreached.** A workload whose token lives somewhere the minter
 cannot read, or which reads only a config file rather than an environment variable, is the map's
 standing non-env-delivery question and is untouched here.
+
+_Amended by [ADR 0020](0020-playpen-claims-credential-confinement-only.md) ([#35](https://github.com/firefly-engineering/playpen/issues/35)): "on Linux the sandbox has its own netns and the callback is
+unroutable" was never true of the chosen backend — nono creates no namespaces
+([#20](https://github.com/firefly-engineering/playpen/issues/20)) — and no network is confined on
+either platform now. Login-from-inside stays out of scope on its remaining grounds: the floor
+denies the browser, and a minter reading the host's own store makes it buy nothing._
