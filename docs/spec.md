@@ -1256,7 +1256,7 @@ naming *which* precondition failed. That refusal is scoped to the flag, not to t
   entry points) and the `nono-proxy` crate (`ProxyConfig`, `server::start`), both
   **pinned exactly** to one revision of the maintained fork **`firefly-engineering/nono`**, as a
   Cargo `git` dependency with a fixed `rev`, never a branch ([ADR 0022](adr/0022-playpen-pins-a-maintained-fork-of-nono.md)). The fork carries playpen's
-  changes on a `playpen` branch, rebased onto upstream tags (`0.73.0` at writing). Upstreaming is
+  changes on a `playpen` branch, rebased onto upstream tags (cut from `v0.79.0`). Upstreaming is
   optional and later. `nono-cli` is structurally out of reach: its
   profiles, groups, always-merged default, forced denies and `command_policies` never enter the
   picture.
