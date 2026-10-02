@@ -122,3 +122,9 @@ an adversary for whom the lie is worthless.
   carries an **endpoint rule set**. On Linux below Landlock ABI 9, where unix-socket oracles stay
   reachable, the regime is recorded **outward only** — run record and `playpen explain` — on the
   same reasoning that omits exclusions here._
+
+- _Amended by [ADR 0021](0021-agent-state-belongs-to-the-profile.md) ([#36](https://github.com/firefly-engineering/playpen/issues/36)): the agent state directory is shared by every run of a profile, so the
+  rendered view states **profile-stable facts only**, plus the fact that this run's full layout is
+  in `$PLAYPEN_MANIFEST`, written to a temporary file and renamed into place on every launch. The
+  adapter owns the kind's instruction entry point, and a share entry naming that file is
+  **composed by reference** through the kind's import line, never merged._

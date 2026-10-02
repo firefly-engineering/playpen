@@ -278,13 +278,17 @@ launch-time refusal, because two authors of one variable is "which rule won" in 
 
 ## Agent state directory
 
-The directory an agent binary keeps its own state and configuration in. Per workspace,
-with an explicit read-only **share list** naming what is carried over from the real one.
+The directory an agent binary keeps its own state and configuration in. One per **profile** and
+**kind**, never per workspace, because it is written only by runs whose reach is that profile's;
+keyed any finer, it would carry one workspace's contents to a profile that cannot reach them.
+Persistent and shared by every run of the profile, since the agent handles its own concurrency. It
+carries an explicit read-only **share list** naming what is carried over from the real one.
 
 ## Share list
 
 The entries of the real agent state directory made visible, read-only, inside a
-workspace's own. Default-deny: empty unless named.
+profile's own. Default-deny: empty unless named. An entry naming the file the **presentation
+adapter** renders into is composed by reference, never merged.
 
 ## Manifest
 
@@ -309,7 +313,9 @@ agent can rewrite it; nothing moves when it does, and the agent has lied only to
 ## Presentation adapter
 
 The per-**kind** renderer that puts the **manifest**'s facts into the idiom that kind's binary
-reads — typically a file in that workspace's **agent state directory**, which playpen owns. Bound
+reads — the kind's instruction entry point in the profile's **agent state directory**, which
+playpen owns. That directory is shared by every run of the profile, so the adapter states only
+facts stable across them and names `PLAYPEN_MANIFEST` for the rest. Bound
 by one law: it may state facts about the boundary playpen built, and may never state what the
 agent should do about them. Generated from the manifest's own data, never hand-written prose, and
 carrying no compatibility promise — its consumer is a model, not a parser.

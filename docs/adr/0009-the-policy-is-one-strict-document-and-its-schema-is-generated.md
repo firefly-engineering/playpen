@@ -123,3 +123,7 @@ for allow-list fragments.
 - _Amended by [ADR 0020](0020-playpen-claims-credential-confinement-only.md) ([#35](https://github.com/firefly-engineering/playpen/issues/35)): the profile has **no `egress` field**, so the `none`-with-route
   incoherence above no longer exists. "The egress list" in the resolved form is the **route
   table**._
+
+- _Amended by [ADR 0021](0021-agent-state-belongs-to-the-profile.md) ([#36](https://github.com/firefly-engineering/playpen/issues/36)): `agent_state.share` moves from the workspace to the **profile**, still keyed
+  by `kind`. A state directory written by a multi-workspace profile would otherwise carry one
+  workspace's contents to profiles that cannot reach it._
