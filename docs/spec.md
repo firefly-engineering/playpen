@@ -391,11 +391,12 @@ escape with no secret crossing the boundary.
 - **Unix-socket oracles** (`ssh-agent`, `gpg-agent`, a password manager's agent, `docker.sock`)
   are **denied by default**. A `connect()` to a pathname socket is refused unless the socket sits
   under a granted writable area, so the agent's own sockets (tmux, language servers) work.
-  - **macOS**: Seatbelt treats a unix-socket connect as a network operation. nono's `AllowAll`
-    currently grants every unix socket, so playpen requires an upstream nono change that keeps
-    unix sockets default-deny under `AllowAll`, pins a release carrying it, and **refuses on
-    macOS until one exists** (`refusal.mechanism.unavailable`).
-  - **Linux, Landlock ABI ≥ 9**: enforced by Landlock's `FS_RESOLVE_UNIX` right.
+  - **macOS**: Seatbelt treats a unix-socket connect as a network operation. Upstream nono's
+    `AllowAll` grants every unix socket. The pinned fork renders `AllowAll` outbound as IP-only and
+    sends unix sockets through its explicit-grant path, keeping the `mDNSResponder` grant that DNS
+    needs ([ADR 0022](adr/0022-playpen-pins-a-maintained-fork-of-nono.md)).
+  - **Linux, Landlock ABI ≥ 9**: enforced by Landlock's `FS_RESOLVE_UNIX` right, which the fork's
+    ABI probe negotiates. Upstream nono stops at V6 and could never reach it.
   - **Linux, Landlock ABI < 9**: unenforceable, so this is a **named residual**
     ([§18](#18-named-residuals)). The regime that applied is recorded **outward only**, in the run
     record and `playpen explain`, and never in the manifest, because it maps what is worth
@@ -1220,8 +1221,9 @@ naming *which* precondition failed. That refusal is scoped to the flag, not to t
   - The self-test's own record is identified by its Landlock domain id and unique path, filtered
     with a key=value tokenizer, never a pattern. The self-test is never cached.
 
-  With the current pin, `refusal.trace.backend-no-logging` always fires: nono passes flags `0`
-  and caps its ABI probe at V6. That ceiling belongs to the dependency, not the kernel.
+  Upstream nono passes flags `0` and caps its ABI probe at V6, so with it this refusal would
+  always fire. The pinned fork passes the flag and probes further ([ADR 0022](adr/0022-playpen-pins-a-maintained-fork-of-nono.md)), so
+  `refusal.trace.backend-no-logging` fires only for a pin that lacks it.
 
 ---
 
@@ -1234,7 +1236,10 @@ naming *which* precondition failed. That refusal is scoped to the flag, not to t
 
 - The dependency is the `nono` crate (`sandbox` and `capability` modules, plus the ABI-probe
   entry points) and the `nono-proxy` crate (`ProxyConfig`, `server::start`), both
-  **pinned exactly** (`0.73.0` at writing). `nono-cli` is structurally out of reach: its
+  **pinned exactly** to one revision of the maintained fork **`firefly-engineering/nono`**, as a
+  Cargo `git` dependency with a fixed `rev`, never a branch ([ADR 0022](adr/0022-playpen-pins-a-maintained-fork-of-nono.md)). The fork carries playpen's
+  changes on a `playpen` branch, rebased onto upstream tags (`0.73.0` at writing). Upstreaming is
+  optional and later. `nono-cli` is structurally out of reach: its
   profiles, groups, always-merged default, forced denies and `command_policies` never enter the
   picture.
 - playpen owns the **capability type**, the only thing a backend receives. playpen also owns the
@@ -1252,9 +1257,18 @@ naming *which* precondition failed. That refusal is scoped to the flag, not to t
 The network mode is `AllowAll` on both platforms
 ([ADR 0020](adr/0020-playpen-claims-credential-confinement-only.md)), so the dependency surface
 stays `sandbox` + `capability`. `ProxyOnly` and its seccomp proxy filter are never used. nono's
-sandbox-extension rules stay off. **One upstream change is owed**: under `AllowAll`, nono's macOS
-rendering grants every unix socket, and playpen needs it to keep unix sockets default-deny with
-explicit grants ([§6.3](#63-credential-oracles)).
+sandbox-extension rules stay off.
+
+**The fork's changes** are a deliberate set; each needs a demonstrated need and a suite row:
+
+1. macOS: unix sockets default-deny under `AllowAll`, via the explicit-grant path (`N-unix-socket`).
+2. Linux: the ABI probe extends to V9, with pathname-socket `connect()` gated by `FS_RESOLVE_UNIX`
+   (`N-unix-socket` on a kernel ≥ 7.1).
+3. Linux: `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON` passed where ABI 7 is available
+   (`R-trace-denials`).
+
+Every rebase of the fork, and every new revision, is a playpen PR that stays red until the
+enforcement suite passes.
 
 ### 15.2 Capability matrix
 
@@ -1270,7 +1284,7 @@ Measured on macOS 26.5 and source-read for Linux
 | Path canonicalization sound (symlink, hardlink, traversal, firmlink) | yes, measured | yes |
 | Deny network wholesale | yes | TCP via Landlock ABI ≥ 4; UDP ungated below ABI 10, covered by seccomp's TCP-only baseline |
 | Per-host egress | no | no (Landlock network rules see ports, never addresses) |
-| Block Keychain / agent sockets | yes (Mach allow-list; unix sockets pending the upstream nono change) | abstract sockets: ABI 6; pathname sockets: ABI 9 |
+| Block Keychain / agent sockets | yes (Mach allow-list; unix sockets via the fork) | abstract sockets: ABI 6; pathname sockets: ABI 9 (via the fork) |
 | Nestable | **no**: a nested `sandbox_init` returns `EPERM` | stacks (Landlock layers intersect) |
 | Denial errno | `EPERM` | `EACCES`, `EXDEV`, `EPERM` (+ `ENOSYS` if a user-notify supervisor dies) |
 | Out-of-band denial log | kernel log, free | Landlock audit: ABI 7 (6.15+), with preconditions ([§14.5](#145---trace-denials)) |
@@ -1516,11 +1530,10 @@ recorded as fog on the map that no current workload forces.
   instruction entry point `omp` reads, and whether it has an import mechanism
   ([§5.6](#56-agent-state-directory)).
 
-**Upstream:**
+**In the nono fork** ([ADR 0022](adr/0022-playpen-pins-a-maintained-fork-of-nono.md)):
 
-- nono passing `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON`, and probing beyond ABI V6.
-- nono keeping unix sockets default-deny under `NetworkMode::AllowAll` on macOS, with explicit
-  grants. playpen refuses on macOS until a pinned release carries it ([§6.3](#63-credential-oracles)).
+- Writing the three changes listed in [§15.1](#151-the-backend), each with its suite row.
+- Upstreaming them is optional, once playpen works.
 
 ---
 
@@ -1583,7 +1596,7 @@ item C1). "Tier" is when the refusal can fire ([§10.5](#105-validation-tiers)).
 
 | Code | Tier | Fires when |
 |---|---|---|
-| `refusal.mechanism.unavailable` | launch | a capability the resolved profile requires is missing (names it; on macOS this includes unix-socket default-deny until a pinned nono release carries it) |
+| `refusal.mechanism.unavailable` | launch | a capability the resolved profile requires is missing (names it) |
 | `refusal.floor.self-test` | launch | the floor canary failed |
 | `refusal.budget.exceeded` | launch | the compiled profile exceeds the backend budget |
 
