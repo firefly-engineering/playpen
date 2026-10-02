@@ -95,6 +95,15 @@ an adversary who is already inside and gains nothing from the lie, at the cost o
 - **ADR 0007 is amended** where it introduced `playpen explain --self`. The outward-facing
   `playpen explain` for the operator is untouched.
 
+- **Each credential route names its delivery variable.** _Added by
+  [#30](https://github.com/firefly-engineering/playpen/issues/30)._ playpen wrote that variable,
+  so its name is a fact playpen owns, and naming it makes the credential recognisable as one —
+  less likely to be logged or copied into a config file — without instructing anything. Two
+  neighbouring statements are deliberately absent: *"the processes you spawn inherit your
+  environment"* is a fact about the agent's behaviour, which playpen neither owns nor can know per
+  `kind` without the per-harness knowledge ADR 0002 refuses; and *"the phantom is inert outside
+  this run's proxy"* bears on no work the agent does and only invites reasoning about attack.
+
 ## Rejected alternatives
 
 **A pointer-only adapter** — the adapter makes the manifest's *location* discoverable and nothing

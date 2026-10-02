@@ -160,3 +160,20 @@ written down rather than left to be discovered in a source file.
   glob playpen parses itself. The selector stays a selector — nothing path-shaped is written
   directly on a route — and the rule set exists for the credential a **minter** cannot minimize,
   which the trivial keystore minter blessed above makes the common case rather than an edge one._
+
+- _Amended by [#30](https://github.com/firefly-engineering/playpen/issues/30): **the session
+  phantom belongs to the process tree, not to the agent.** [#24](https://github.com/firefly-engineering/playpen/issues/24)
+  measured a stdio MCP server inheriting its agent's environment whole, so every third-party
+  process the agent spawns holds the phantom and has full use of every credential route. This is
+  stated as a consequence of the unit of policy and **not** as a named residual: a residual is a
+  surface playpen could close and declines to, and this one cannot be closed at playpen's
+  altitude — separating a child from its parent inside one boundary is per-process confinement,
+  the tool-call unit the effort rejects. Nor is it wider than what the agent already holds: an
+  agent running with every permission enabled can `env | curl` on its own. Outside the boundary
+  the phantom is near-inert — it works only through this run's proxy, on loopback, for this run —
+  and the one exception, other host processes on macOS, is the shared-loopback residual already
+  on the ledger. **Endpoint rule sets** are what bound any holder, agent or child alike. No deny
+  side is added to the environment (ADR 0012 stands), and a nested run is not a distinct case: a
+  re-entered shim `exec`s inside the same boundary, where the phantom, proxy and manifest are all
+  still true. A nested agent of a *different* `kind` gets no suppression entries and no state
+  directory, so it may break; it cannot escape, and it is documented rather than engineered._

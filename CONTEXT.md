@@ -190,6 +190,11 @@ It faces both ways. Inward it contains exfiltration — a secret that is not pre
 through a log line or a tool call. Outward it authenticates callers of the proxy, which is what
 keeps the shared host loopback on macOS from being a credential leak.
 
+It belongs to the process tree, not to the agent: every process the agent spawns — a third-party
+MCP server included — inherits it and has full use of every **credential route**. That is a
+consequence of the unit of policy rather than a **named residual**, since nothing inside one
+boundary can separate a child from its parent; **endpoint rule sets** bound any holder alike.
+
 ## Egress setting
 
 Which of `none`, `open` or `allowlist` governs a run's outbound network — that is, whether
@@ -304,7 +309,8 @@ how it reaches an agent's attention is a per-harness presentation concern.
 
 It is also the *only* thing playpen tells an agent about its own confinement, and it says so
 up front rather than at the moment of failure: alongside the layout it carries the **egress
-setting** and the hosts it resolves to, the destinations a **credential route** authenticates,
+setting** and the hosts it resolves to, the destinations a **credential route** authenticates
+and the variable each is **delivered** in,
 how to read a **denial**, and that the boundary is fixed for the whole session. **Exclusions**
 are the one omission — enumerating them maps what is worth attacking. It is the sole
 inward-facing truth — nothing playpen offers inside the boundary may state a fact the manifest
