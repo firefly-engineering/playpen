@@ -96,6 +96,37 @@ logged out of their own desktop agent by running playpen. This is recorded as an
 question and it does not change the decision, only the guidance shipped alongside the reference
 minter.
 
+_Answered by [#33](https://github.com/firefly-engineering/playpen/issues/33)
+([report](https://github.com/firefly-engineering/playpen/blob/main/research/subscription-refresh-rotation.md)):
+**hostile.** Anthropic rotates refresh tokens single-use, access tokens live about 8 h and the
+whole login about 30 days, and of two concurrent refreshes one loses with `invalid_grant` — so a
+minter refresh that does not write back logs the host out within one access-token lifetime, every
+time. Two sentences above no longer hold: not writing back is a **defect**, not the operator's
+choice, and writing back correctly means taking the host harness's own refresh lock, whose
+protocol is private and changes between versions. The consequence is on the minter, not the
+mechanism, and it is chosen **per provider, never per `kind`** — a grant's lifetime and rotation
+are provider facts, whatever CLI mints it:_
+
+- _**Reference minter: a keystore lookup of a dedicated, non-refreshing grant** where the provider
+  offers one. For Anthropic that is the one-year, inference-only token `claude setup-token`
+  mints, stored in the operator's own keystore item rather than the host harness's. There is no
+  refresh token, so no race; it serves any `kind` run against Anthropic, `omp` included; and its
+  scope (`user:inference`, against the interactive login's `org:create_api_key`) very likely
+  closes the `create_api_key` escalation before the endpoint rule set is consulted, which stays
+  as the second layer._
+- _**Fallback: a read-only minter** that returns the host login's current access token and never
+  refreshes, for a provider with no dedicated grant. Its cost is a run outliving the token's
+  remaining lifetime._
+- _**A refreshing minter is never shipped**, and a warning ships beside the minter interface:
+  a refresh that does not write back logs the host out. The race stays the seventh named
+  residual, now for operator-written minters only._
+- _Neither remaining unknown — whether a setup-token is independent of the interactive login,
+  and whether an access token survives another process's refresh — can move a spec decision, so
+  both are implementation-time checks, safe on a real account: mint once and confirm the
+  desktop login survives; reuse a copied access token after the host's own natural refresh.
+  Calling `create_api_key` with a setup-token is not a check worth running — success would mint
+  a real key._
+
 **Non-native credential storage is unreached.** A workload whose token lives somewhere the minter
 cannot read, or which reads only a config file rather than an environment variable, is the map's
 standing non-env-delivery question and is untouched here.

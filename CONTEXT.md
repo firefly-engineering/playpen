@@ -137,6 +137,11 @@ exchange is provider API surface and does not belong in the confinement binary. 
 read and write state a host-level agent instance also owns is the cost, and it is a **named
 residual**.
 
+Chosen per **provider**, never per **kind**. Where the provider offers a dedicated grant that
+does not refresh, the minter is a keystore lookup of it; otherwise it reads the host login's
+current token and never refreshes. A minter that refreshes a shared single-use login without
+writing it back logs the host out, so playpen ships none.
+
 ## Credential route
 
 The pairing of a destination — a host plus a literal path prefix — with the credential to
@@ -387,10 +392,23 @@ spellings.
 
 ## Kind
 
-Which agent binary is being wrapped (`claude`, `omp`). Always stated, never inferred from
+Which agent **harness** is being wrapped (`claude`, `omp`). Always stated, never inferred from
 the invoked name. It selects the agent state directory, the manifest's presentation, and the
 **suppression table**; an unrecognised kind is a **refusal**, because there is nowhere to put
 what playpen would need to know about it. All per-agent knowledge is confined here.
+
+A kind is never a **provider**. A harness may be tied to one provider and ship that
+provider's tooling in the same CLI, as `claude` does, but nothing about credentials is
+keyed by kind.
+_Avoid_: agent (when the provider is meant).
+
+## Provider
+
+The service whose API a **credential route** authenticates against: the model API, a
+forge. What kinds of grant exist, how long they last and whether they refresh are facts
+about the provider, never about the harness that happens to mint or use them, so a
+**minter** is chosen per provider. `claude setup-token` is an Anthropic grant that the
+`claude` CLI happens to mint; an `omp` run against Anthropic can be served by the same minter.
 
 ## Suppression table
 
@@ -524,9 +542,9 @@ boundary's remit, and the decision is that closing it costs more than it buys. A
 client-side execution, the shared host loopback on macOS, a browser running without its
 own renderer isolation, an agent orphaned by the death of its **supervisor** while still holding
 a released **provisioned area**, the sequential cross-profile channel a `persistent` area
-opens, git push *discovery* succeeding under a read-only **endpoint rule set**, and a refreshing
-**minter** racing a host-level agent instance over the credential store they share are the seven
-so far.
+opens, git push *discovery* succeeding under a read-only **endpoint rule set**, and an
+operator-written refreshing **minter** racing a host-level agent instance over the single-use
+login they share are the seven so far.
 
 ## Supervisor
 
