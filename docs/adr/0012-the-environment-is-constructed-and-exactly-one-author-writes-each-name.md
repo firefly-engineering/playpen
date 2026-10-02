@@ -127,3 +127,26 @@ exists, and passing the host `PATH` through is merely the *default*, not the mod
   allow-list is part of the **capability set** per ADR 0003, so `playpen explain --json` shows it
   in full with fragment provenance. This is the manifest/capability-set split doing exactly what
   it was built for.
+
+- _Amended by [#31](https://github.com/firefly-engineering/playpen/issues/31): **there is no
+  validation gate for environment values, because each producer is answered elsewhere.**
+  [#24](https://github.com/firefly-engineering/playpen/issues/24) found that `NODE_USE_ENV_PROXY=1`
+  plus a malformed proxy URL throws `Invalid URL` out of `require("node:http")` in both Bun and
+  Node, killing every Node child before its first request. playpen's **own** set entries are
+  therefore **correct by construction**: each is rendered from a typed value (the bound socket
+  address, a path playpen just created) through a real URL or path type, never by string
+  formatting, so a malformed value is a playpen bug rather than a runtime condition. Re-parsing it
+  before launch would check playpen against a second parser that may disagree with Bun's and
+  Node's anyway. A policy `set:` literal is **not** validated semantically: the
+  values-name-only-paths argument above does not cover a value that is a grammar
+  (`NODE_OPTIONS`, a proxy URL, `RUSTFLAGS`), but validating one needs per-name knowledge of
+  which third-party parser reads it, which is ADR 0002's always-stale second copy. The one
+  constraint playpen does own is the OS's: a value containing NUL cannot reach `execve`, so the
+  strict parser rejects it as an ordinary policy parse failure. A typed `!area` reference that
+  dangles is already a coherence refusal, and once resolved it is a playpen-owned path in the
+  first class. No `refusal.env.*` code exists, since nothing could trigger it. No enforcement row
+  either: a refusal row would need a hook that makes playpen emit a malformed value, which tests
+  the hook, and a positive is inadmissible because this regression is loud. The liveness probe's
+  proxy-traversing task would catch it, but liveness gates agent versions and never playpen
+  changes, so **the gate is playpen's own unit and property tests** over every set entry's
+  rendering: IPv4 and IPv6 proxy URLs and paths that round-trip through a real parser._
