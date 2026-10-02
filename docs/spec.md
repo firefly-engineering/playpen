@@ -3,12 +3,10 @@
 > **Status: draft.** Assembled from the resolved tickets of the
 > [playpen wayfinding map](https://github.com/firefly-engineering/playpen/issues/1) by
 > [Assemble the playpen spec](https://github.com/firefly-engineering/playpen/issues/9).
-> Two decisions are still open, so the draft is not ready to hand off.
-> [§6.3](#63-the-pin) is **blocked** on
-> [Reconcile the egress pin with a backend that has no network namespace](https://github.com/firefly-engineering/playpen/issues/35),
-> and [§5.6](#56-agent-state-directory) is **blocked** on
-> [Decide which agent state directory a multi-workspace profile gets](https://github.com/firefly-engineering/playpen/issues/36). Everything else
-> states decisions already made.
+> One decision is still open, so the draft is not ready to hand off:
+> [§5.6](#56-agent-state-directory) is **blocked** on
+> [Decide which agent state directory a multi-workspace profile gets](https://github.com/firefly-engineering/playpen/issues/36).
+> Everything else states decisions already made.
 
 This document is the **what**. The **why** lives in the ADRs under [`adr/`](adr/) and in the
 resolution comments of the tickets this spec cites. The vocabulary is
@@ -30,7 +28,7 @@ unreviewed.
 3. [Standing laws](#3-standing-laws)
 4. [Architecture](#4-architecture)
 5. [Workspace and profile model](#5-workspace-and-profile-model)
-6. [Enforcement surface: network egress](#6-enforcement-surface-network-egress)
+6. [The network](#6-the-network)
 7. [Enforcement surface: credentials](#7-enforcement-surface-credentials)
 8. [Enforcement surface: filesystem](#8-enforcement-surface-filesystem)
 9. [The environment](#9-the-environment)
@@ -54,14 +52,16 @@ unreviewed.
 ## 1. What playpen is
 
 playpen is a micro-container around **one coding-agent process tree**: `claude`, `omp`, or any
-binary run under a **profile**. It enforces three things on that tree:
+binary run under a **profile**. It enforces two things on that tree:
 
 - **filesystem confinement**: an allow-list of named workspace roots, a built-in **floor**, and
   a declared toolchain;
-- **egress control**: an HTTPS allow-list served by a **proxy** outside the boundary, which the
-  kernel makes the only way out;
-- **credential brokering**: real secrets are minted outside the boundary, and only a
-  **session phantom** crosses it.
+- **credential confinement**: real secrets are minted outside the boundary and held by a
+  **proxy** that injects them, only a **session phantom** crosses the boundary, and
+  **credential oracles** such as `ssh-agent` are unreachable.
+
+The network itself is **not** confined. The agent may reach any host; it simply cannot
+authenticate anywhere except through the proxy ([ADR 0020](adr/0020-playpen-claims-credential-confinement-only.md)).
 
 Which confinement applies is chosen by **policy**, a single system-wide document, selected from
 invocation context. The two downstream consumers, herdr and buzz, invoke agent binaries directly
@@ -75,8 +75,10 @@ Per-tool permissioning stays the agent's job. playpen confines the whole process
 
 ## 2. Threat model
 
-**One invariant: the worst case is complete destruction *inside* the sandbox, with no valuable
-data compromised.**
+**One invariant: the worst case is complete destruction *inside* the sandbox, and no means of
+using a credentialed resource escapes the broker.** Workspace contents leaving the machine is
+accepted: playpen protects the *means* to act on the operator's behalf, not the data the agent
+was given to work on ([ADR 0020](adr/0020-playpen-claims-credential-confinement-only.md)).
 
 Two tiers, both held by that invariant:
 
@@ -120,27 +122,24 @@ explicitly.
    syntax. It is never merged and never a directory. Nix is a good way to generate it, and never
    a runtime dependency
    ([ADR 0009](adr/0009-the-policy-is-one-strict-document-and-its-schema-is-generated.md)).
-6. **Loopback stays open unconditionally.** *Under review by
-   [#35](https://github.com/firefly-engineering/playpen/issues/35): the chosen backend does not
-   implement this law as stated. See [§6.3](#63-the-pin).*
-7. **No homegrown regex parsers.** Pattern languages are refused wherever a literal will do:
-   host entries, environment names, `set:` values, injected flags, the query string. Where a
+6. **No homegrown regex parsers.** Pattern languages are refused wherever a literal will do:
+   environment names, `set:` values, injected flags, the query string. Where a
    small grammar is unavoidable (the endpoint path glob), playpen parses it itself as a total
    matcher.
-8. **playpen does not interpret. It confines, then gets out of the way**
+7. **playpen does not interpret. It confines, then gets out of the way**
    ([ADR 0002](adr/0002-playpen-does-not-interpret.md)). It does not parse argv, interpose on
    stdio, remap paths, or interpret the child's exit status.
-9. **No runtime capability expansion.** Every capability is fixed at launch, and a missing one
+8. **No runtime capability expansion.** Every capability is fixed at launch, and a missing one
    is a refusal, never a prompt
    ([ADR 0003](adr/0003-nono-is-the-mechanism-backend.md)). Re-minting a credential for a
    route already declared is renewal, not expansion
    ([ADR 0018](adr/0018-playpen-authenticates-outside-the-boundary.md)).
-10. **All per-agent knowledge is confined to the kind table** ([§12](#12-the-kind-table)).
-11. **One policy author.** playpen ships fragments and merges none by default. The floor is the
+9. **All per-agent knowledge is confined to the kind table** ([§12](#12-the-kind-table)).
+10. **One policy author.** playpen ships fragments and merges none by default. The floor is the
     one built-in default, and it earns that exception by deciding whether `exec` returns, never
     what is reachable.
-12. **A denial is never `ENOENT`.** A denial is always distinguishable in-band from absence and
-    from success, on the filesystem and on the network alike
+11. **A denial is never `ENOENT`.** A denial is always distinguishable in-band from absence and
+    from success, on the filesystem and at the broker alike
     ([ADR 0007](adr/0007-playpen-owns-the-half-the-kernel-cannot-know.md)).
 
 ---
@@ -168,7 +167,7 @@ explicitly.
   *before* the fork, because the OS-assigned port is part of the **capability set**
   ([ADR 0013](adr/0013-the-proxy-is-the-supervisors-and-the-two-confinements-are-independent.md)).
   An orphaned proxy is structurally impossible: killing the supervisor removes the credentials
-  from the host and leaves any surviving agent with no egress.
+  from the host and leaves any surviving agent with no credentials.
 - The **confined child** closes every file descriptor except 0, 1 and 2, applies the capability
   set to itself through the backend, and `exec`s the target. The backend is linked in-process;
   there is no helper binary ([ADR 0003](adr/0003-nono-is-the-mechanism-backend.md)).
@@ -199,8 +198,8 @@ including a failure to find a policy or select a profile, leaves a record.
    `refusal.area.busy`.
 9. **Provision** the run scratch and every area.
 10. **Mint** every resolved credential route ([§7.2](#72-minters)).
-11. **Start the proxy** if one is needed ([§6.2](#62-egress-settings)): bind, then generate the
-    ephemeral CA if any host is intercepted and write its certificate into the run scratch.
+11. **Start the proxy** iff a credential route resolves ([§6.2](#62-the-broker)): bind, generate
+    the ephemeral CA, and write its certificate into the run scratch.
 12. **Compile the capability set**, including the proxy port. Check it against the backend's
     budget ([§15.3](#153-the-compiled-profile-ceiling)).
 13. **Write the manifest** and render the kind's presentation
@@ -222,20 +221,14 @@ including a failure to find a policy or select a profile, leaves a record.
 A proxy that stops serving mid-run **tears the run down**, so the agent never runs on with no
 exit. A panic in the proxy is caught at the runtime boundary and routed into teardown.
 
-### 4.3 The two confinements
+### 4.3 The one network claim
 
-The proxy serves two independent confinements
-([ADR 0013](adr/0013-the-proxy-is-the-supervisors-and-the-two-confinements-are-independent.md)):
-
-| | **Traffic confinement** | **Credential confinement** |
-|---|---|---|
-| Guarantee | the proxy is the only way out | no real credential is reachable inside |
-| Enforced by | the mechanism (kernel) | construction (the environment is built from nothing) |
-| Claimed under | `allowlist` only | every egress setting |
-
-They compose freely. `allowlist` with credential routes claims both. `allowlist` alone claims
-traffic confinement only. `open` with routes claims credential confinement only. `open` alone
-claims neither.
+playpen claims **credential confinement** and nothing else about the network
+([ADR 0020](adr/0020-playpen-claims-credential-confinement-only.md), which retired the
+*traffic confinement* of ADR 0004 and ADR 0013). It is enforced by construction (the environment
+is built from nothing, so no real secret is ever written into it) and by the mechanism (credentials
+at rest and unix-socket **credential oracles** are unreachable). An agent that bypasses the proxy
+reaches the network and merely fails to authenticate.
 
 ---
 
@@ -311,17 +304,16 @@ A **profile** is the unit an invocation selects. It holds:
 - `prefixes`: the CWD prefixes it is selected by ([§11.4](#114-profile-selection));
 - `workspaces`: a **list** of workspace names;
 - `toolchain`: read-only roots for what the agent works *with* ([§8.3](#83-toolchain));
-- `egress`: the egress setting and its allow-list ([§6](#6-enforcement-surface-network-egress));
-- `env`: allow-list names, fragments, and literal `set:` values ([§9](#9-the-environment));
+- `env`: allow-list names, **environment fragments**, and literal `set:` values ([§9](#9-the-environment));
 - `credentials`: **profile-attached credential routes** ([§7.4](#74-attachment)).
 
 Across a profile's workspaces, **brought roots union, while provisioned areas and forge scope
 stay per workspace.** Not unioning forge scope is load-bearing: it stops the multi-workspace
 case from silently demanding a credential broader than either workspace justifies.
 
-Toolchain, egress, `set:` and the run scratch attach to the **profile**, never to a workspace.
-There is one boundary over one process tree, and no channel through which a connection or a
-variable could be attributed to a workspace in a way the agent could not forge.
+Toolchain, `set:`, profile-attached routes and the run scratch attach to the **profile**, never to
+a workspace. There is one boundary over one process tree, and no channel through which a request or
+a variable could be attributed to a workspace in a way the agent could not forge.
 
 **A profile is purely confinement and does not pin a binary.** Any binary may run under any
 profile: `playpen run --profile work --agent claude -- bash` drops a shell into a live
@@ -351,108 +343,73 @@ CA's certificate. The host's own temp, including macOS's `/var/folders/…` reac
 
 ---
 
-## 6. Enforcement surface: network egress
+## 6. The network
 
-### 6.1 Design
+### 6.1 What is not confined
 
-**The allow-list lives in a proxy outside the boundary, and the kernel's only job is to make
-that proxy the sole exit**
-([ADR 0004](adr/0004-egress-policy-lives-in-a-sibling-proxy.md)). Neither platform's mechanism
-can express per-host egress:
+playpen confines no network traffic ([ADR 0020](adr/0020-playpen-claims-credential-confinement-only.md)).
+The backend's network mode is nono's `AllowAll`, and on Linux no seccomp network filter is
+installed, so TCP, UDP, DNS and QUIC all work and the agent resolves names itself. There is no
+egress setting, no allow-list and no pin. Loopback is open because nothing is closed.
 
-- SBPL rejects it: `host must be * or localhost`.
-- Landlock's `landlock_net_port_attr` has no address field.
-- seccomp cannot dereference a `sockaddr`.
+The retired design is worth one sentence, because it explains what remains: neither platform's
+mechanism can express per-host egress, so name-based policy could only ever live in an L7 proxy,
+and the proxy survives as the place credentials live.
 
-So name-based policy can live only at L7, and it is enforcement only if the kernel makes
-bypassing the proxy impossible.
+### 6.2 The broker
 
-### 6.2 Egress settings
+The **proxy** exists **iff at least one credential route resolves**. When it exists:
 
-`egress.mode` is a property of the **profile**:
-
-| Mode | Allow-list | Proxy exists | Pinned to proxy | Sandbox resolver |
-|---|---|---|---|---|
-| `none` | — | never | — (all external network denied; loopback *pending #35*) | none |
-| `open` | absent | **iff ≥ 1 credential route resolves**, running unpinned | no | the agent's own |
-| `allowlist` | required | always | yes | none: the proxy is the only resolver |
-
-- `open` means **no allow-list, not no proxy**. Under `open` the proxy exists only as the
-  credential broker. An agent that bypasses it defeats nothing: it fails to authenticate and
-  receives the provider's own `401`.
-- `none` with any credential route is a **coherence refusal**
-  (`refusal.egress.none-with-route`). Under `none` the credential could never be used.
-- Immunity to DNS rebinding is an **`allowlist` property** and is not claimed under `open`.
-- Raw TCP, `git+ssh`, UDP/QUIC and every non-HTTP protocol are unavailable under `allowlist`.
-  `open` exists as the escape hatch for workloads `allowlist` cannot serve.
-
-### 6.3 The pin
-
-> **Blocked on [Reconcile the egress pin with a backend that has no network namespace and pins
-> loopback to one port](https://github.com/firefly-engineering/playpen/issues/35).** The
-> decided record assumes a Linux network namespace and wildcard-open loopback. The chosen
-> backend provides neither: `NetworkMode::ProxyOnly` allows outbound TCP to the proxy port only,
-> on both platforms. On Linux, the library-level pin is a Landlock port rule that cannot see
-> addresses, and the destination check is a seccomp user-notify filter served by the
-> supervisor. This section is written once that ticket resolves. Until then, the following
-> clauses of the record are **suspended rather than restated**:
->
-> - "loopback stays wildcard-open" (standing law 6, [ADR 0004](adr/0004-egress-policy-lives-in-a-sibling-proxy.md));
-> - "on Linux the agent gets its own loopback inside the netns", and the refusal on hosts
->   without unprivileged user namespaces;
-> - the **shared host loopback** as a *macOS-only* named residual and named asymmetry;
-> - the `N-egress-port` row's statement "every port but the proxy's shut".
-
-What does *not* depend on #35 is stated here:
-
-- Under `allowlist` the pin is **kernel-enforced**. A configuration where the pin would rest only
-  on proxy environment variables is a refusal.
-- Under `none`, all network is denied by the mechanism.
-- Under `open`, no pin is applied.
-- playpen probes every capability the pin requires **before launch**, so the refusal names the
-  missing capability rather than the symptom.
-
-### 6.4 Transport
-
-- **HTTPS only.** Clients reach the proxy through `HTTPS_PROXY`. Each **host entry** names a
-  host, and port 443 is implied.
-- **Opaque `CONNECT` by default.** The allow-list is enforced at hostname granularity, which is
-  the granularity it is written in.
-- **TLS is terminated only where a credential route requires it.** You cannot strip a phantom
-  through a tunnel you cannot read, so every credentialed host is intercepted, and **only**
-  those hosts. An endpoint rule set adds interception nowhere, because it lives only on a route
-  ([ADR 0017](adr/0017-an-endpoint-rule-restricts-the-credential-and-never-the-agent.md)).
+- **Every client is pointed at it.** `HTTPS_PROXY` is global, because `NO_PROXY` can only exclude
+  hosts, so there is no standard way to route only credentialed hosts through it.
+- **TLS is terminated only for routed hosts.** You cannot strip a phantom through a tunnel you
+  cannot read. Every other host gets an **opaque `CONNECT`, with no check**.
 - The interception CA is **ephemeral, in-memory, and per-session**. Its private key never leaves
   the supervisor. Its certificate, which is public, is written into the run scratch and named by
   both `SSL_CERT_FILE` and `NODE_EXTRA_CA_CERTS`.
 - **A TLS-interception failure is a refusal**, never a fallback to an opaque tunnel.
+- **A dead proxy tears the run down.** Every client points at it, and a loud end beats credentials
+  lapsing silently.
 
-### 6.5 Allow-list
+A credential works **only over HTTPS through the broker**. Credentialed `git+ssh` is therefore
+unavailable: there is no way to inject a secret into a raw TCP stream, and `SSH_AUTH_SOCK` is
+forbidden ([§6.3](#63-credential-oracles)).
 
-The allow-list is the union of the profile's `egress.hosts` and the **allow-list fragments** it
-names in `egress.fragments`.
+### 6.3 Credential oracles
 
-- A **host entry** is either an exact hostname or a left-anchored suffix matched on a label
-  boundary (written `.example.com`). Never a regex.
-- Fragments are **data in the policy**, named and composed explicitly by the operator. playpen
-  ships fragments (`npm`, the forge, the model API, …) as documented data, and merges none of
-  them by default.
-- **Forge scope and the allow-list are independent lists in two vocabularies.** If a profile
-  resolves a credential route whose host the allow-list cannot reach, playpen refuses at launch
-  (`refusal.route.unreachable`) rather than reconciling the two.
+A **credential oracle** performs a credentialed operation for whoever reaches it, so the means can
+escape with no secret crossing the boundary.
 
-### 6.6 Egress denial
+- **Unix-socket oracles** (`ssh-agent`, `gpg-agent`, a password manager's agent, `docker.sock`)
+  are **denied by default**. A `connect()` to a pathname socket is refused unless the socket sits
+  under a granted writable area, so the agent's own sockets (tmux, language servers) work.
+  - **macOS**: Seatbelt treats a unix-socket connect as a network operation. nono's `AllowAll`
+    currently grants every unix socket, so playpen requires an upstream nono change that keeps
+    unix sockets default-deny under `AllowAll`, pins a release carrying it, and **refuses on
+    macOS until one exists** (`refusal.mechanism.unavailable`).
+  - **Linux, Landlock ABI ≥ 9**: enforced by Landlock's `FS_RESOLVE_UNIX` right.
+  - **Linux, Landlock ABI < 9**: unenforceable, so this is a **named residual**
+    ([§18](#18-named-residuals)). The regime that applied is recorded **outward only**, in the run
+    record and `playpen explain`, and never in the manifest, because it maps what is worth
+    attacking.
+  - Abstract-namespace sockets are covered by the Landlock ABI 6 scoping playpen requests
+    explicitly ([ADR 0003](adr/0003-nono-is-the-mechanism-backend.md)).
+- **Network-reachable oracles** (a cloud metadata endpoint, a credential service on host loopback)
+  are a **named residual** on every platform. Under standing law 1, the layer that exposes one owns
+  protecting it.
 
-- **A host not on the allow-list**: the proxy *answers* rather than dropping the connection. It
-  returns `403` with `X-Playpen-Denied: <host>` and the code `egress.host.denied`, and the same
-  status rides the `CONNECT` response for opaque tunnels.
-- **The response body is self-describing**: it names playpen, the code, and the refused host.
-  Bun's `fetch`, which both flagship agents use, hands the proxy's refusal to the application as
-  an ordinary `Response`, indistinguishable from an origin `403` by status alone
+### 6.4 Broker denial
+
+- **An endpoint rule refusal** ([§7.6](#76-endpoint-rule-sets)) is the only denial the broker
+  makes. The proxy *answers* rather than dropping the connection: `403` with
+  `X-Playpen-Denied: <host>` and the code `broker.endpoint.denied`.
+- **The response body is self-describing**: it names playpen, the code, and the destination.
+  Bun's `fetch`, which both flagship agents use, hands a proxy refusal to the application as an
+  ordinary `Response`, indistinguishable from an origin `403` by status alone
   ([#24](https://github.com/firefly-engineering/playpen/issues/24)).
-- **A genuine upstream failure** is `502`, and carries no `egress.*` code.
-- **A missing credential is never an `egress.*` code.** A request to an allow-listed host with
-  no route goes out unauthenticated, and the provider's own `401` is the answer.
+- **A genuine upstream failure** is `502`, and carries no code.
+- **A missing credential is never a `broker.*` code.** A request to a host with no route goes out
+  unauthenticated, and the provider's own `401` is the answer.
 
 ---
 
@@ -565,14 +522,14 @@ store ([ADR 0018](adr/0018-playpen-authenticates-outside-the-boundary.md), amend
 - A rule set is a **named**, allow-only list of `{method, path}`. It is referenced from a route
   by name and never written inline.
 - A rule set exists **only on a credential route**. A host carrying no credential can carry no
-  rule. Restricting what the agent may *do* to such a host would rest on cooperation alone
-  under `open`, so it is unexpressible, permanently.
+  rule. Restricting what the agent may *do* to such a host would rest on cooperation alone,
+  because playpen confines no network, so it is unexpressible, permanently.
 - `path` is **host-absolute** and matched with a two-token segment glob: `*` matches exactly one
   segment and `**` matches zero or more. playpen parses the glob itself. Anything richer
   (alternation, character classes, anchors) is a parse refusal with file, line and column.
 - **The query string is never matched.** **No deny list, no ordering.** An absent `endpoints:`
   means unrestricted, not empty.
-- A request matching no rule gets `403` with the code `egress.endpoint.denied`. **No upstream
+- A request matching no rule gets `403` with the code `broker.endpoint.denied`. **No upstream
   leg occurs**, so the secret is never sent to a destination the rule refused. The `403` names
   no rule set, because the manifest already states them.
 - Coherence refusals: `refusal.endpoint.unknown` for a reference to a rule set that does not
@@ -585,8 +542,8 @@ store ([ADR 0018](adr/0018-playpen-authenticates-outside-the-boundary.md), amend
 ### 7.7 Consequences
 
 - A credential works **only over the proxy**, which retires `git+ssh` a second time.
-- **One logical credential is four policy objects**: a minter, its routes, their delivery, and a
-  matching allow-list fragment. The verbosity is the price of a single policy author.
+- **One logical credential is three policy objects**: a minter, its routes, and their delivery.
+  The verbosity is the price of a single policy author.
 - The Keychain is unreachable inside the boundary ([§8.2](#82-the-floor)), so
   `git-credential-osxkeychain`, `gh auth`, and npm and docker credential helpers **fail loudly**
   inside it.
@@ -721,8 +678,9 @@ Rules:
   in an env-var costume.
 - **Fragments carry names, never values.** A value is a fact about one host, so it reaches the
   policy through generation.
-- **`SSH_AUTH_SOCK` is permanently forbidden** (`refusal.env.forbidden`). It is a socket to an
-  unconfined signing oracle, an egress channel the proxy cannot see. Path-shaped hazards
+- **`SSH_AUTH_SOCK` is permanently forbidden** (`refusal.env.forbidden`). It names a
+  **credential oracle** the proxy cannot see. Banning the name is necessary but not sufficient;
+  the socket itself is denied by [§6.3](#63-credential-oracles). Path-shaped hazards
   (`NODE_OPTIONS`, `LD_PRELOAD`, `GIT_SSH_COMMAND`, …) are *not* banned: they can only name a
   path, and an unreachable path fails `EPERM`.
 - `set:` is **profile-level only**. Per-workspace values would need merging.
@@ -732,17 +690,19 @@ Rules:
 ### 9.2 Set entries
 
 Every set entry is **mandatory relative to the boundary actually built**. Its absence within its
-condition is a refusal, and with no proxy no proxy variable exists at all.
+condition is a refusal, and with no proxy no proxy variable exists at all. A proxy exists iff a
+credential route resolves, and interception happens exactly then, so the proxy and CA entries
+share one condition ([ADR 0020](adr/0020-playpen-claims-credential-confinement-only.md)).
 
 | Name | Value | Condition |
 |---|---|---|
 | `TMPDIR` | the run scratch | always |
 | `PLAYPEN_MANIFEST` | the manifest path | always |
 | `PLAYPEN_ACTIVE` | the profile name | always |
-| `HTTPS_PROXY` | `http://127.0.0.1:<port>` | iff a proxy exists |
-| `NO_PROXY`, `no_proxy` | `localhost,127.0.0.1,::1` (enumerated, never CIDR) | iff a proxy exists |
-| `NODE_USE_ENV_PROXY` | `1` | iff a proxy exists |
-| `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS` | the CA certificate in the run scratch | iff at least one host is intercepted |
+| `HTTPS_PROXY` | `http://127.0.0.1:<port>` | iff a route resolves |
+| `NO_PROXY`, `no_proxy` | `localhost,127.0.0.1,::1` (enumerated, never CIDR) | iff a route resolves |
+| `NODE_USE_ENV_PROXY` | `1` | iff a route resolves |
+| `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS` | the CA certificate in the run scratch | iff a route resolves |
 | each route's `delivery.env` | the session phantom | iff that route resolves |
 | the kind's state-dir redirect | the agent state directory | always ([§12](#12-the-kind-table)) |
 | the kind's suppression entries | per kind | always ([§12](#12-the-kind-table)) |
@@ -750,10 +710,9 @@ condition is a refusal, and with no proxy no proxy variable exists at all.
 - **The CA pair covers two TLS stacks in one boundary.** Both flagship binaries are Bun and
   honour `NODE_EXTRA_CA_CERTS`, while `git` and `curl` read `SSL_CERT_FILE`.
 - **`NODE_USE_ENV_PROXY=1`** makes Node-written stdio MCP servers, and children on Bun ≥ 1.4.0,
-  proxy their `node:http` and `fetch` traffic. Without it they go direct and fail under
-  `allowlist`, while the agent itself works
-  ([#24](https://github.com/firefly-engineering/playpen/issues/24); see
-  [Appendix B](#appendix-b--reconciliations-made-in-assembly), item B1).
+  proxy their `node:http` and `fetch` traffic. Without it they go direct, bypass the broker, and
+  fail to authenticate, while the agent itself works
+  ([#24](https://github.com/firefly-engineering/playpen/issues/24)).
 - **Correct by construction.** Each value playpen writes is rendered from a typed value (the
   bound socket address, a path playpen just created) through a real URL or path type, never by
   string formatting. The gate on this is playpen's own unit and property tests, not a runtime
@@ -823,9 +782,9 @@ Tables:
 | `version` | integer; `1` |
 | `definitions` | free-form anchors |
 | `minters` | `<name>: {command: [argv…], revoke?: [argv…]}` |
-| `fragments` | `hosts: {<name>: [host entry…]}`, `env: {<name>: [NAME…]}`, `endpoints: {<name>: [{method, path}…]}` |
+| `fragments` | `env: {<name>: [NAME…]}`, `endpoints: {<name>: [{method, path}…]}` |
 | `workspaces` | `<name>: {roots, areas, forge?, credentials?, agent_state?}` |
-| `profiles` | `<name>: {prefixes?, workspaces, toolchain, egress, env?, credentials?}` |
+| `profiles` | `<name>: {prefixes?, workspaces, toolchain, env?, credentials?}` |
 | `shims` | `<name>: {target, kind, profile?, flags?}` |
 
 A worked example (illustrative values):
@@ -849,10 +808,6 @@ minters:
     command: [/etc/playpen/minters/keychain-read, playpen-anthropic-setup-token]
 
 fragments:
-  hosts:
-    github: [github.com, api.github.com, codeload.github.com, .githubusercontent.com]
-    anthropic: [api.anthropic.com]
-    crates: [crates.io, static.crates.io, index.crates.io]
   env:
     rust: [CARGO_HOME, RUSTUP_HOME]
   endpoints:
@@ -902,10 +857,6 @@ profiles:
       - { path: /nix/store/…-git-2.51.2 }
       - { path: /nix/store/…-jujutsu-0.33.0 }
       # …one root per store path in the closure
-    egress:
-      mode: allowlist
-      fragments: [github, anthropic, crates]
-      hosts: [docs.rs]
     env:
       fragments: [rust]
       allow: [COLORTERM]
@@ -922,7 +873,6 @@ profiles:
     prefixes: [/]                     # longest prefix wins, so `/` loses to everything
     workspaces: [notes]
     toolchain: []
-    egress: { mode: none }
 
 shims:
   claude:
@@ -947,7 +897,7 @@ Field notes:
 
 The resolved form is **a different object, not a unioned policy**. It speaks enforcement
 vocabulary: absolute paths with access classes, a network mode, the constructed environment, the
-injected argv, the egress list and the route table. It contains no workspace names, no lifetimes
+injected argv and the route table. It contains no workspace names, no lifetimes
 and no profiles. **Every entry carries a `from:` provenance string** naming its authored source
 (`floor`, `profile:firefly.toolchain[3]`, `workspace:playpen.roots[0].exclude[0]`,
 `fragment:github`, `kind:claude`, `run-scratch`). That provenance is the only bridge back to the
@@ -1124,22 +1074,22 @@ redirect `git`, `gh` and every other XDG-aware tool too.
 
 - **Layout**, in workspace vocabulary: each workspace's roots and modes, its provisioned areas
   (purpose, lifetime, path), its forge scope, the agent state directory, and the run scratch.
-- **The egress setting**, and the resolved host list under `allowlist`. Under `open` the list is
-  **absent rather than empty**. Instead, the manifest states that the proxy is not the sole exit
-  and that a routed destination is authenticated only for requests sent through it.
+- **That the proxy is not the only way out**, and that a routed destination is authenticated only
+  for requests sent through it. There is no egress setting and no host list to state.
 - **Each credential route**: its destination (host and prefix), its **delivery variable**, and
   its endpoint rule sets by name together with their rules.
 - **Failure interpretation**, per platform in content:
   - the denial errno set: `EPERM` on macOS; `EACCES`, `EXDEV` or `EPERM` on Linux, plus
     `ENOSYS` if a user-notify supervisor has died;
   - that `ENOENT` means absent;
-  - the `403` + `X-Playpen-Denied` vocabulary, **stated only where a denial can fire**: under
-    `allowlist`, or under `open` when some route carries endpoint rules;
+  - the `403` + `X-Playpen-Denied` vocabulary, **stated only where a denial can fire**: when some
+    route carries an endpoint rule set;
   - that the boundary is **fixed for the whole session**.
 
 **Omitted:**
 
 - exclusions;
+- whether unix-socket credential oracles are reachable ([§6.3](#63-credential-oracles));
 - the environment and the injected argv, which the agent already holds;
 - the selection trace and all policy provenance;
 - any statement about what the agent's children inherit, or about the phantom's inertness.
@@ -1167,7 +1117,8 @@ The run record holds:
 - the policy path;
 - the resolved profile and the selection trace;
 - the capability set;
-- the egress list and route table, with provenance;
+- the route table, with provenance;
+- the unix-socket regime that applied ([§6.3](#63-credential-oracles));
 - minted `expires_at` values, never tokens;
 - the pid and timestamps;
 - teardown failures.
@@ -1183,8 +1134,8 @@ runs; it is a debugging aid, not an audit log.
 
 1. the **selection trace**;
 2. the resolved **capability set**: paths, network, environment and injected argv;
-3. the resolved **egress list** and **route table**, including endpoint rule sets, with fragment
-   provenance.
+3. the resolved **route table**, including endpoint rule sets, with fragment provenance, and the
+   unix-socket regime.
 
 `explain` launches nothing. `explain --run <id>` replays a stored record and prints the exact
 platform command that pulls that run's denials, with the pid filled in. The run id appears on
@@ -1206,7 +1157,7 @@ Consumers branch on the code, never on the prose.
 There is one namespace with two prefixes:
 
 - `refusal.*`: playpen declined to launch.
-- `egress.*`: a live agent was denied one request.
+- `broker.*`: the broker denied a live agent one request.
 
 The set is **closed and versioned**, and every backend error is translated into a code, never
 leaked. The full registry is in [Appendix A](#appendix-a--code-registry).
@@ -1278,9 +1229,12 @@ naming *which* precondition failed. That refusal is scoped to the flag, not to t
   change in nono's defaults.
 - Every nono denial is an errno, never `SIGSYS`: the crate defines no kill action.
 
-The extent of the dependency surface on Linux is **under review by
-[#35](https://github.com/firefly-engineering/playpen/issues/35)**: the seccomp destination check
-is installed post-fork by the caller.
+The network mode is `AllowAll` on both platforms
+([ADR 0020](adr/0020-playpen-claims-credential-confinement-only.md)), so the dependency surface
+stays `sandbox` + `capability`. `ProxyOnly` and its seccomp proxy filter are never used. nono's
+sandbox-extension rules stay off. **One upstream change is owed**: under `AllowAll`, nono's macOS
+rendering grants every unix socket, and playpen needs it to keep unix sockets default-deny with
+explicit grants ([§6.3](#63-credential-oracles)).
 
 ### 15.2 Capability matrix
 
@@ -1295,9 +1249,8 @@ Measured on macOS 26.5 and source-read for Linux
 | Survives `exec`, grandchildren, orphaning | yes; irrevocable | yes; irrevocable |
 | Path canonicalization sound (symlink, hardlink, traversal, firmlink) | yes, measured | yes |
 | Deny network wholesale | yes | TCP via Landlock ABI ≥ 4; UDP ungated below ABI 10, covered by seccomp's TCP-only baseline |
-| Per-host egress | **no** (proxy required) | **no** (proxy required) |
-| Pin outbound to one loopback port | yes | **port only, address-blind** at the Landlock level; *see #35* |
-| Block Keychain / agent sockets | yes (Mach allow-list) | abstract sockets: ABI 6; pathname sockets: ABI 9 |
+| Per-host egress | no | no (Landlock network rules see ports, never addresses) |
+| Block Keychain / agent sockets | yes (Mach allow-list; unix sockets pending the upstream nono change) | abstract sockets: ABI 6; pathname sockets: ABI 9 |
 | Nestable | **no**: a nested `sandbox_init` returns `EPERM` | stacks (Landlock layers intersect) |
 | Denial errno | `EPERM` | `EACCES`, `EXDEV`, `EPERM` (+ `ENOSYS` if a user-notify supervisor dies) |
 | Out-of-band denial log | kernel log, free | Landlock audit: ABI 7 (6.15+), with preconditions ([§14.5](#145---trace-denials)) |
@@ -1322,7 +1275,7 @@ than absorbed. Each has a row in the enforcement suite.
 
 | # | Asymmetry | Favours | Suite row |
 |---|---|---|---|
-| 1 | shared host loopback | *under review by [#35](https://github.com/firefly-engineering/playpen/issues/35)* | `N-egress-port` |
+| 1 | unix-socket credential oracles: denied on every macOS version, on Linux only from Landlock ABI 9 | macOS | `N-unix-socket` (skipped by name on Linux below ABI 9) |
 | 2 | the mechanism's deprecation clock | Linux | — |
 | 3 | the compiled-profile ceiling | Linux | `R-ceiling` (`n/a` on Linux) |
 | 4 | denial visibility: zero preconditions on macOS, four on Linux. Partly permanent: macOS's channel is certifiable *a priori*, Linux's only *a posteriori* | macOS | `R-trace-denials` (`n/a` on macOS) |
@@ -1420,15 +1373,14 @@ Row ids are provisional. The implementation owns the final ids.
 | `N-hosttemp` | negative | the host temp is unreachable | both |
 | `N-keychain` | negative | Keychain Mach services unreachable | macOS (`n/a` Linux) |
 | `N-fd` | negative | an inherited credential fd reads as `EBADF` | both |
-| `N-egress-port` | negative | *pending #35* | both |
-| `N-resolver` | negative | no resolver inside under `allowlist` | both |
+| `N-unix-socket` | negative | a decoy unix socket listening outside every grant is refused | both; skip `skip.host.landlock-below-abi-9` |
 | `N-errno-law` | negative | a denial errno is in the platform set, never `ENOENT` | both |
-| `N-endpoint` | negative | a non-matching request to an allow-listed, credentialed host gets `403` + `egress.endpoint.denied` | both |
+| `N-endpoint` | negative | a non-matching request to a credentialed host gets `403` + `broker.endpoint.denied` | both |
 | `N-endpoint-no-leg` | negative | for that request, **no upstream leg occurred** (instrumented upstream) | both |
 | `P-canary` | positive | a dynamically linked OS binary exits 0 under the bare floor | both |
 | `P-unshare` | positive | the **nested** `CLONE_NEWUSER` → `CLONE_NEWPID\|CLONE_NEWNET` sequence succeeds inside; checked outside first, else `skip.host.userns-restricted` | Linux (`n/a` macOS) |
-| `P-open-bypass` | positive | an `open`-mode bypass arrives **unauthenticated** | both |
-| `P-manifest` | positive | "the manifest is true": every stated host reachable, every path at its stated mode, nothing outside; skip `skip.host.no-egress` | both |
+| `P-open-bypass` | positive | a request that bypasses the proxy arrives **unauthenticated** | both |
+| `P-manifest` | positive | "the manifest is true": every stated route authenticates through the proxy, every path is accessible at its stated mode, and nothing outside them is; skip `skip.host.no-egress` | both |
 | `P-argv` | positive | the injected argv in `explain --json` matches the argv the child received | both |
 | `P-endpoint` | positive | a matching request reaches upstream authenticated, with the phantom stripped and the secret injected | both |
 | `R-missing-cap` | refusal | a missing mechanism capability → `125` + code | both |
@@ -1454,13 +1406,15 @@ down rather than inherited silently.
 
 1. **ACP client-side execution.** An ACP client outside the boundary may execute file reads and
    terminal commands on the confined agent's behalf. The client is owner-controlled.
-2. **Shared host loopback.** *Its platform scope is under review by
-   [#35](https://github.com/firefly-engineering/playpen/issues/35).* The agent can reach the
-   operator's local services. The phantom keeps this from becoming a credential leak.
+2. **Network-reachable credential sources.** A cloud metadata endpoint, or a credential service
+   on host loopback, hands out credentials to whatever reaches its address, and playpen confines
+   no network. The layer that exposes one owns protecting it. The phantom keeps the proxy's own
+   port on loopback from being a leak.
 3. **A browser without its own renderer isolation** runs at full workspace privilege. The
    operator's lever is workspace scoping: a buzz-class profile gets a thin workspace.
 4. **An orphaned agent holding a released area.** `SIGKILL` the supervisor without its process
-   group and the agent keeps writing an area whose lock has released. It has lost all egress.
+   group and the agent keeps writing an area whose lock has released. It has lost all
+   credentials.
 5. **The sequential cross-profile channel** a `persistent` area opens. The same channel exists
    through any brought root granted to two profiles.
 6. **git push *discovery* succeeds under a read-only rule set.**
@@ -1469,6 +1423,9 @@ down rather than inherited silently.
 8. **A Linux audit exclude rule** emptying the denial trace, with rules playpen cannot read.
 9. **A profile-writable directory earlier on the host's `PATH`** than the shim can shadow it for
    the next host-side invocation. Keeping `PATH` order safe is the operator's responsibility.
+10. **Unix-socket credential oracles on Linux below Landlock ABI 9.** `ssh-agent`, `gpg-agent` and
+    kindred sockets are reachable if their path is known. Recorded outward only
+    ([§6.3](#63-credential-oracles)); the residual closes as kernels move.
 
 ---
 
@@ -1487,6 +1444,11 @@ down rather than inherited silently.
   proxy. This is named as residual 1.
 - **Whether reusing a refresh token revokes the whole login.** This matters only to a minter
   that refreshes, and playpen ships none.
+
+**Traffic confinement**: what the agent may reach on the network, including an egress allow-list,
+a `none` setting, a kernel pin to the proxy, and a sandbox with no resolver. Retired by
+[ADR 0020](adr/0020-playpen-claims-credential-confinement-only.md): the operator's concern is the
+means of using credentialed resources, not where traffic goes.
 
 Ruled out permanently as *shapes*, though inside the domain:
 
@@ -1557,12 +1519,10 @@ item C1). "Tier" is when the refusal can fire ([§10.5](#105-validation-tiers)).
 | Code | Tier | Fires when |
 |---|---|---|
 | `refusal.workspace.unknown` | coherence | a profile names an undeclared workspace |
-| `refusal.fragment.unknown` | coherence | a reference to an undeclared host or env fragment |
+| `refusal.fragment.unknown` | coherence | a reference to an undeclared environment fragment |
 | `refusal.minter.unknown` | coherence | a route names an undeclared minter |
 | `refusal.area.unknown` | coherence | an `!area` reference dangles |
 | `refusal.workspace.worktree-on-read-root` | coherence | a worktree area while every source root is `read` |
-| `refusal.egress.none-with-route` | coherence | `egress.mode: none` with a resolved credential route |
-| `refusal.route.unreachable` | coherence | a route's host is not reachable under the allow-list |
 | `refusal.route.ambiguous` | coherence | two routes on one host, neither prefix extending the other |
 | `refusal.endpoint.unknown` † | coherence | a reference to an undeclared endpoint rule set |
 | `refusal.endpoint.unsatisfiable` † | coherence | a rule set that no path under the route's prefix can match |
@@ -1594,7 +1554,7 @@ item C1). "Tier" is when the refusal can fire ([§10.5](#105-validation-tiers)).
 
 | Code | Tier | Fires when |
 |---|---|---|
-| `refusal.mechanism.unavailable` | launch | a capability the resolved profile requires is missing (names it; *the Linux set is pending #35*) |
+| `refusal.mechanism.unavailable` | launch | a capability the resolved profile requires is missing (names it; on macOS this includes unix-socket default-deny until a pinned nono release carries it) |
 | `refusal.floor.self-test` | launch | the floor canary failed |
 | `refusal.budget.exceeded` | launch | the compiled profile exceeds the backend budget |
 
@@ -1620,12 +1580,11 @@ These fire before launch and refuse the `--trace-denials` flag, not the run.
 | `refusal.trace.channel-silent` † | launch | the self-test's record never appeared |
 | `refusal.trace.channel-lossy` † | launch | the record arrived only via `_TRANSPORT=kernel` |
 
-### Egress
+### Broker
 
 | Code | Fires when |
 |---|---|
-| `egress.host.denied` | a host is not on the allow-list (`403` + `X-Playpen-Denied`) |
-| `egress.endpoint.denied` † | no endpoint rule matched; no upstream leg occurred |
+| `broker.endpoint.denied` † | no endpoint rule matched; no upstream leg occurred. Minted as `egress.endpoint.denied` and renamed by ADR 0020 |
 
 **Deliberately absent:** `refusal.flag.*` was never minted, and `required` was dropped
 ([#27](https://github.com/firefly-engineering/playpen/issues/27)). There is no
@@ -1641,16 +1600,15 @@ reconciled form.
 
 - **B1. `NODE_USE_ENV_PROXY=1` is a set entry.**
   [#24](https://github.com/firefly-engineering/playpen/issues/24) decided it is mandatory, and
-  the map records that. It never reached ADR 0012, ADR 0013 or `CONTEXT.md`, which still list
-  six set entries. The spec carries it in the "iff a proxy exists" tier, because it only ever
-  points clients at the proxy. **ADR 0012 and the set-entry glossary entry need a follow-up
-  amendment.**
+  the map records that. It never reached ADR 0012, ADR 0013 or `CONTEXT.md`. **Landed** with
+  [ADR 0020](adr/0020-playpen-claims-credential-confinement-only.md)'s amendment to ADR 0012 and the
+  set-entry glossary entry.
 - **B2. The `403` body is self-describing.**
   [#24](https://github.com/firefly-engineering/playpen/issues/24) found that Bun's `fetch`
   surfaces the proxy's refusal as an ordinary `Response`, so a status code alone is ambiguous.
-  ADR 0007 specifies the status and header only. The spec adds the body requirement.
-- **B3. Nine named residuals, not eight.** ADR 0019 named the `PATH`-shadowing residual, and
-  `CONTEXT.md`'s count of eight predates it.
+  ADR 0007 specified the status and header only. **Landed** in ADR 0007 with ADR 0020's amendment.
+- **B3. The residual count.** ADR 0019 named the `PATH`-shadowing residual, and `CONTEXT.md`'s count
+  of eight predated it. **Landed** in `CONTEXT.md`, which now lists ten, including ADR 0020's two.
 - **B4. `explain`, not `resolve`.** [#5](https://github.com/firefly-engineering/playpen/issues/5)'s
   `playpen resolve` was folded into `explain` by ADR 0007, and its last mention was retired by
   [#27](https://github.com/firefly-engineering/playpen/issues/27).
@@ -1671,9 +1629,10 @@ reconciled form.
   names a *list* of workspaces. No ticket decides which directory the single redirect variable
   points at. **Not reconciled; blocked on
   [#36](https://github.com/firefly-engineering/playpen/issues/36).**
-- **B10. The Linux egress pin, loopback, and the network namespace.** ADR 0004 assumes a netns
-  and wildcard-open loopback. The backend chosen in ADR 0003 provides neither. **Not
-  reconciled; blocked on [#35](https://github.com/firefly-engineering/playpen/issues/35).**
+- **B10. The Linux egress pin, loopback, and the network namespace.** ADR 0004 assumed a netns
+  and wildcard-open loopback, and the backend chosen in ADR 0003 provides neither. **Resolved by
+  deletion**: [ADR 0020](adr/0020-playpen-claims-credential-confinement-only.md) retired traffic
+  confinement ([#35](https://github.com/firefly-engineering/playpen/issues/35)).
 
 ---
 
@@ -1686,8 +1645,9 @@ Choices this spec makes that no ticket decided. Each is a proposal for review.
   one code per distinct reason, and `refusal.<subject>.<reason>`. Some reasons were merged into
   one code with the offending value carried on the line: every self-integrity path, every
   playpen state-I/O failure, and every missing mechanism capability.
-- **C2. The `fragments` table** holds three sub-tables (`hosts`, `env`, `endpoints`). ADR 0009
-  named `fragments` before env fragments (ADR 0012) and rule sets (ADR 0017) existed.
+- **C2. The `fragments` table** holds two sub-tables (`env`, `endpoints`). ADR 0009 named
+  `fragments` before environment fragments (ADR 0012) and rule sets (ADR 0017) existed, and host
+  fragments retired with ADR 0020.
 - **C3. `forge` carries no `kind` field.** The prototype's `forge.kind` collided with **Kind**
   in the glossary, and the minter is already named on each route.
 - **C4. Minter stdin.** The spec states only "the declared scope as JSON". Its exact shape for
