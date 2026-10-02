@@ -1,11 +1,12 @@
 # playpen — specification
 
-> **Status: draft, complete.** Assembled from the resolved tickets of the
+> **Status: final.** Assembled from the resolved tickets of the
 > [playpen wayfinding map](https://github.com/firefly-engineering/playpen/issues/1) by
-> [Assemble the playpen spec](https://github.com/firefly-engineering/playpen/issues/9).
-> No section is blocked. Before hand-off, the reconciliations in
-> [Appendix B](#appendix-b--reconciliations-made-in-assembly) and the assembly choices in
-> [Appendix C](#appendix-c--assembly-choices) need review.
+> [Assemble the playpen spec](https://github.com/firefly-engineering/playpen/issues/9). No section
+> is blocked, and the reconciliations in [Appendix B](#appendix-b--reconciliations-made-in-assembly)
+> and the assembly choices in [Appendix C](#appendix-c--assembly-choices) have been reviewed and
+> accepted. Questions that no current workload forces are handed off in
+> [§20](#20-handed-off-questions).
 
 This document is the **what**. The **why** lives in the ADRs under [`adr/`](adr/) and in the
 resolution comments of the tickets this spec cites. The vocabulary is
@@ -41,7 +42,7 @@ unreviewed.
 17. [The enforcement suite](#17-the-enforcement-suite)
 18. [Named residuals](#18-named-residuals)
 19. [Out of scope](#19-out-of-scope)
-20. [Implementation-time checks](#20-implementation-time-checks)
+20. [Handed-off questions](#20-handed-off-questions)
 - [Appendix A — code registry](#appendix-a--code-registry)
 - [Appendix B — reconciliations made in assembly](#appendix-b--reconciliations-made-in-assembly)
 - [Appendix C — assembly choices](#appendix-c--assembly-choices)
@@ -447,18 +448,32 @@ credential.
 ### 7.2 Minters
 
 A **minter** is an operator-declared executable (`command`, as an argv list), optionally paired
-with a **revoker** (`revoke`). playpen runs it unconfined and passes the declared scope as JSON
-on stdin. On stdout it returns:
+with a **revoker** (`revoke`). playpen runs it unconfined, bounded by `timeout` (default 30 s), and
+passes the declared scope as JSON on stdin:
+
+```json
+{"version": 1,
+ "route": {"host": "api.github.com", "path_prefix": "/repos/firefly-engineering/"},
+ "scope": {"org": "firefly-engineering"}}
+```
+
+`scope` is the workspace's forge scope (`{"org": …}` or `{"repos": […]}`) for a workspace route,
+and `null` for a profile route. On stdout the minter returns:
 
 ```json
 {"token": "<secret>", "expires_at": "<RFC 3339 timestamp>"}
 ```
 
+`expires_at` is required. A revoker receives the same stdin.
+
 - **Stdout is a secret channel.** It is held in `Zeroizing` memory from the moment it is read,
   never logged, and never shown in `playpen explain`. The run record holds `expires_at` and
   never the token.
-- **Failure before launch refuses the whole run**, with `refusal.minter.failed` or
-  `refusal.minter.malformed` naming the minter and the scope. Launching without the credential
+- **Failure before launch refuses the whole run**, with `refusal.minter.failed`,
+  `refusal.minter.malformed` or `refusal.minter.timeout` naming the minter and the scope. A minter
+  that hangs must not hang the launch: herdr and buzz expect a process or an error. The default
+  timeout decides how long playpen waits, never what is reachable, so it is not a second policy
+  author. Launching without the credential
   would produce a run that works for ten minutes and then fails at the first push.
 - **Renewal.** As a credential nears `expires_at`, the supervisor re-invokes its minter. A
   re-mint failure mid-run cannot be a refusal: the credential lapses, and the provider's `401`
@@ -492,9 +507,12 @@ policy; it is not a residual. **Endpoint rule sets** bound every holder alike
 ([ADR 0008](adr/0008-credentials-are-minted-outside-and-only-phantoms-cross-the-boundary.md),
 amended by [#30](https://github.com/firefly-engineering/playpen/issues/30)).
 
-How a route presents the injected secret upstream (for example `Authorization: Bearer` with a
-beta header, versus `x-api-key`) is **not yet specified**. That question is in the map's fog
-of war ([§20](#20-implementation-time-checks)).
+**Injection substitutes in place.** The proxy finds the phantom in whichever header the client
+sent it in (`Authorization: Bearer`, `x-api-key`, …) and replaces it there with the real secret,
+so the request's shape is whatever the harness already sends. A request on a route that carries
+no phantom is forwarded unauthenticated. Serving a credential of one shape to a harness
+configured for another (an OAuth token to a harness that sends an API key) is **not specified**
+([§20](#20-handed-off-questions)).
 
 ### 7.4 Attachment
 
@@ -790,7 +808,7 @@ Tables:
 |---|---|
 | `version` | integer; `1` |
 | `definitions` | free-form anchors |
-| `minters` | `<name>: {command: [argv…], revoke?: [argv…]}` |
+| `minters` | `<name>: {command: [argv…], revoke?: [argv…], timeout?: <seconds>}` |
 | `fragments` | `env: {<name>: [NAME…]}`, `endpoints: {<name>: [{method, path}…]}` |
 | `workspaces` | `<name>: {roots, areas, forge?, credentials?}` |
 | `profiles` | `<name>: {prefixes?, workspaces, toolchain, env?, credentials?, agent_state?}` |
@@ -1495,22 +1513,23 @@ Ruled out permanently as *shapes*, though inside the domain:
 
 ---
 
-## 20. Implementation-time checks
+## 20. Handed-off questions
 
-These are not spec decisions. Each is a fact to establish during implementation, or a question
-recorded as fog on the map that no current workload forces.
+These are not spec decisions. Each is a question that no current workload forces, or a fact to
+establish during implementation. The wayfinding map closed with them handed off here.
 
-**Fog on the map:**
+**Open design questions** — to decide when a real workload demands one:
 
 - **Non-env credential delivery.** This is for a workload that reads only `~/.netrc` or its own
-  config file. `delivery` is a field, so adding a transport will not reopen the route table.
-- **How a route declares the shape of injection**: `Authorization: Bearer` plus a beta header,
-  versus `x-api-key`.
+  config file. The three candidate shapes (a written config file, an injected `PATH` helper, a
+  mounted `~/.netrc`) each pull playpen toward knowing file formats. `delivery` is a field, so
+  adding a transport will not reopen the route table.
+- **Cross-shape injection.** Whether a credential route can carry an injection shape, so that a
+  harness configured for one credential kind can be served another through the proxy
+  ([§7.3](#73-session-phantom)).
 
 **Needs a confined run or CI:**
 
-- What a third-party MCP server prints when the boundary refuses its direct connect. The manifest
-  wording may need it.
 - Whether Seatbelt functions inside a Virtualization.framework guest, which affects hosted macOS
   runners. A single 15-line `macos-15` job settles it.
 - Whether the hosted `ubuntu-24.04` runner boots with auditing off and the journald audit socket
@@ -1606,6 +1625,7 @@ item C1). "Tier" is when the refusal can fire ([§10.5](#105-validation-tiers)).
 |---|---|---|
 | `refusal.minter.failed` † (family) | launch | a minter exited non-zero |
 | `refusal.minter.malformed` † (family) | launch | a minter's stdout is not `{token, expires_at}` |
+| `refusal.minter.timeout` † (family) | launch | a minter did not exit within its `timeout` |
 | `refusal.proxy.bind` † | launch | the listener could not bind |
 | `refusal.proxy.ca` | launch | the interception CA could not be created or written |
 
@@ -1638,7 +1658,7 @@ and no catch-all backend code: a backend failure that maps to no listed code is 
 ## Appendix B — reconciliations made in assembly
 
 Places where the decided record disagreed with itself. In each case the spec states the
-reconciled form.
+reconciled form. **Reviewed and accepted** in [#9](https://github.com/firefly-engineering/playpen/issues/9).
 
 - **B1. `NODE_USE_ENV_PROXY=1` is a set entry.**
   [#24](https://github.com/firefly-engineering/playpen/issues/24) decided it is mandatory, and
@@ -1680,7 +1700,8 @@ reconciled form.
 
 ## Appendix C — assembly choices
 
-Choices this spec makes that no ticket decided. Each is a proposal for review.
+Choices this spec made that no ticket decided. **Reviewed and accepted** in
+[#9](https://github.com/firefly-engineering/playpen/issues/9).
 
 - **C1. Code names.** Every code without † in [Appendix A](#appendix-a--code-registry) was named
   here, following the rules of [#13](https://github.com/firefly-engineering/playpen/issues/13):
@@ -1692,10 +1713,9 @@ Choices this spec makes that no ticket decided. Each is a proposal for review.
   fragments retired with ADR 0020.
 - **C3. `forge` carries no `kind` field.** The prototype's `forge.kind` collided with **Kind**
   in the glossary, and the minter is already named on each route.
-- **C4. Minter stdin.** The spec states only "the declared scope as JSON". Its exact shape for
-  workspace and profile routes is left to the implementation, together with an `expires_at`
-  format: RFC 3339 is proposed. The prototype's `timeout_ms` was not ratified by any ticket and
-  is dropped.
+- **C4. The minter contract** ([§7.2](#72-minters)): a versioned stdin carrying the route and
+  the scope (`null` for a profile route), a required RFC 3339 `expires_at`, and a per-minter
+  `timeout` defaulting to 30 s with `refusal.minter.timeout`.
 - **C5. `explain` flags.** `--shim`, `--cwd` and `--policy` on `explain` are the surface needed
   to show the selection trace and the injected argv for a given invocation.
 - **C6. `refusal.state.io`** for playpen's own state I/O failures. The record requires these to
@@ -1709,3 +1729,6 @@ Choices this spec makes that no ticket decided. Each is a proposal for review.
   and grant both link and target *for a toolchain root*. No ticket says whether a shim's
   `target` is granted on its own. The spec requires policy to cover it, so the floor stays the
   only built-in grant. The cost is that a cask-installed `claude` needs its own toolchain root.
+- **C10. Injection substitutes in place** ([§7.3](#73-session-phantom)): the real secret replaces
+  the phantom in whichever header the client used. Serving a credential across shapes is handed
+  off ([§20](#20-handed-off-questions)).
