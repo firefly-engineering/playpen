@@ -181,3 +181,7 @@ diagnosed from the kernel log afterwards. The status itself propagates untouched
   stands. Per [#24](https://github.com/firefly-engineering/playpen/issues/24) the `403` body is
   self-describing — it names playpen, the code and the destination — since Bun's `fetch` surfaces a
   proxy refusal as an ordinary `Response`._
+
+- _Amended by [ADR 0022](0022-playpen-pins-a-maintained-fork-of-nono.md): the fork passes `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON` and probes past
+  V6, so `refusal.trace.backend-no-logging` is no longer permanent. It stays in the registry as the
+  refusal a pin without the flag would produce._

@@ -130,3 +130,9 @@ literal form, and on macOS closing them is a small upstream change.
 - **An upstream change is owed to nono**: under `AllowAll`, keep unix sockets default-deny with
   explicit grants. Until a pinned release carries it, playpen refuses on macOS. A refusal costs
   nothing yet, because nothing is implemented.
+
+- _Amended by [ADR 0022](0022-playpen-pins-a-maintained-fork-of-nono.md): the upstream change this ADR owed is carried by a **maintained fork**
+  instead, so **the macOS refusal is gone**. Checking it also found that the Linux half of this
+  decision was unreachable: nono's ABI probe stops at V6, so `FS_RESOLVE_UNIX` (ABI 9) could never be
+  negotiated through upstream nono. The fork extends the probe, and Linux enforcement now holds on
+  kernels ≥ 7.1._

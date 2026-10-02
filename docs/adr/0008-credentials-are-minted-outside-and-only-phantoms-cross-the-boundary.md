@@ -186,3 +186,6 @@ written down rather than left to be discovered in a source file.
   service) is a named residual. "A missing credential is not an egress decision" now reads "is never
   a `broker.*` code". The shared-loopback residual cited above is subsumed by **network-reachable
   credential sources**, on both platforms._
+
+- _Amended by [ADR 0022](0022-playpen-pins-a-maintained-fork-of-nono.md): `nono-proxy` comes from the same fork revision as `nono`, not from
+  crates.io._

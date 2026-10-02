@@ -94,3 +94,9 @@ proxy runs **in it** rather than detached, and the cost named in the last senten
   **credential oracles**; playpen pins a release that keeps unix sockets default-deny with explicit
   grants, and refuses on macOS until one exists. nono's sandbox-extension rules
   (`extensions_enabled`) stay off, per the no-runtime-expansion law above._
+
+- _Amended by [ADR 0022](0022-playpen-pins-a-maintained-fork-of-nono.md): the exact pin is to a **maintained fork**, `firefly-engineering/nono`, at a
+  fixed git `rev`, with `nono` and `nono-proxy` from the same revision, rather than to a crates.io
+  release. The narrow surface, the seam and the suite gate are unchanged. The fork carries three
+  changes: macOS unix-socket default-deny under `AllowAll`, a Linux ABI probe to V9 with
+  `FS_RESOLVE_UNIX`, and `LOG_NEW_EXEC`._
