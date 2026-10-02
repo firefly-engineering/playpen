@@ -600,15 +600,26 @@ The floor is built in, always applied, and **neither widenable nor narrowable by
 
 - read and execute only, only under OS-owned paths;
 - never anything under `$HOME`, never a package store, never anything writable;
-- on macOS, a short enumerated set of Mach services (`trustd`/`trustd.agent` and the
-  dyld/notify essentials). `com.apple.SecurityServer`, `securityd` and the XPC variant are
+- one exception to read-only: the null device `/dev/null` is read-write. It is a **sink**, not
+  storage: a write to it reveals and keeps nothing, and a program that cannot open it for writing
+  breaks in ways unrelated to its boundary;
+- on macOS, a short enumerated set of Mach services, and nothing else by global or per-user
+  lookup: `com.apple.trustd` and `com.apple.trustd.agent` (trust evaluation),
+  `com.apple.system.notification_center` (notify), and
+  `com.apple.system.opendirectoryd.libinfo` (directory lookup, without which `getpwuid` resolves
+  the user to a bare uid). `com.apple.SecurityServer`, `securityd` and the XPC variant are
   therefore denied, with no knob to re-add them. No explicit deny list ships, because shipping
   one would imply the allow-list is permissive.
 
+Amended by [#48](https://github.com/firefly-engineering/playpen/issues/48), which measured what an
+ordinary dynamically linked binary needs.
+
 The floor is **one object with per-platform contents**. On macOS it must include
 `(allow file-read* (literal "/"))`: without it, every dynamically linked binary aborts with
-`rc=134` and empty stderr. On Linux it includes `/proc`, `/dev`, the loader and its cache. How
-the floor is spelled never appears in a test; the loader canary and the fd negative must pass on
+`rc=134` and empty stderr. It must also include `file-read*` on the literal
+`/System/Volumes/Data`: libSystem stats that mount point at startup, and when the stat is denied it
+reports the denial over the syslog socket, which the process then holds for its lifetime. On
+Linux it includes `/proc`, `/dev`, the loader and its cache. How the floor is spelled never appears in a test; the loader canary and the fd negative must pass on
 both platforms.
 
 ### 8.3 Toolchain
@@ -1567,6 +1578,7 @@ item C1). "Tier" is when the refusal can fire ([§10.5](#105-validation-tiers)).
 | Code | Tier | Fires when |
 |---|---|---|
 | `refusal.policy.not-found` | launch | no policy on the search path |
+| `refusal.policy.unreadable` † | launch | the policy is present but cannot be read: permissions, or a directory where the file should be |
 | `refusal.policy.ambiguous-location` | launch | `policy.yaml` and `policy.json` at one location |
 | `refusal.policy.syntax` | parser | malformed YAML/JSON, or a multi-document stream |
 | `refusal.policy.unknown-field` | parser | an undeclared key |
@@ -1588,11 +1600,13 @@ item C1). "Tier" is when the refusal can fire ([§10.5](#105-validation-tiers)).
 | `refusal.endpoint.unsatisfiable` † | coherence | a rule set that no path under the route's prefix can match |
 | `refusal.env.reserved` † | coherence | a policy entry collides with a reserved name ([§9.2](#92-set-entries)) |
 | `refusal.env.forbidden` | coherence | `SSH_AUTH_SOCK` in `env.allow`, an env fragment, or `set:` |
+| `refusal.root.relative` † | coherence | a brought root's path is not absolute |
 
 ### Invocation and selection
 
 | Code | Tier | Fires when |
 |---|---|---|
+| `refusal.invocation.usage` † | launch | the command line does not parse: a missing `--profile` or `--agent`, no `--` wall, an unknown subcommand |
 | `refusal.shim.unknown` | launch | `argv[0]` is not a key of `shims` |
 | `refusal.kind.unknown` | launch | an unrecognised kind |
 | `refusal.selection.unknown-profile` | launch | an explicit or `PLAYPEN_PROFILE` profile is not in the policy |
@@ -1610,6 +1624,8 @@ item C1). "Tier" is when the refusal can fire ([§10.5](#105-validation-tiers)).
 | `refusal.area.busy` † | launch | an `exclusive` area is held; names the holding run id |
 | `refusal.state.collision` | coherence | a share entry names the kind's instruction entry point and the kind has no import mechanism |
 | `refusal.state.io` | launch | playpen cannot create its own state: run scratch, an area, the manifest, the record or the lock file |
+| `refusal.process.fork` † | launch | the supervisor could not fork the child |
+| `refusal.process.wait` † | launch | the supervisor could not wait for the child |
 
 ### Mechanism
 
@@ -1618,6 +1634,7 @@ item C1). "Tier" is when the refusal can fire ([§10.5](#105-validation-tiers)).
 | `refusal.mechanism.unavailable` | launch | a capability the resolved profile requires is missing (names it) |
 | `refusal.floor.self-test` | launch | the floor canary failed |
 | `refusal.budget.exceeded` | launch | the compiled profile exceeds the backend budget |
+| `refusal.target.exec` † | launch | the target could not be `exec`ed inside the boundary: absent, or not covered by policy ([Appendix C](#appendix-c--assembly-choices), item C9) |
 
 ### Credentials and proxy
 

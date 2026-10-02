@@ -1,0 +1,10 @@
+//! playpen confines an agent's process tree to a declared boundary, then gets out of the way.
+
+pub mod backend;
+pub mod capability;
+pub mod child;
+pub mod code;
+pub mod floor;
+pub mod launch;
+pub mod policy;
+pub mod refusal;
