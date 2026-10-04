@@ -13,6 +13,21 @@ use tempfile::TempDir;
 pub const PLAYPEN: &str = env!("CARGO_BIN_EXE_playpen");
 pub const PROBE: &str = env!("CARGO_BIN_EXE_playpen-probe");
 
+/// An OS-owned command binary by name, as the floor of this host spells it: inside the dedicated
+/// floor where there is one, else `/bin`. A test names the binary it needs and never a path, so a
+/// non-FHS host needs no special case of its own.
+///
+/// Every binary this returns is inside the floor, so a target that uses one is confined by the
+/// floor alone and needs no root of its own.
+pub fn os_bin(name: &str) -> String {
+    let dir = playpen::floor::dedicated().unwrap_or_else(|| PathBuf::from("/"));
+    dir.join("bin")
+        .join(name)
+        .to_str()
+        .expect("utf-8 path")
+        .to_owned()
+}
+
 /// The denial errnos of this platform ([spec §15.2]); `ENOENT` is never one.
 ///
 /// [spec §15.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#152-capability-matrix

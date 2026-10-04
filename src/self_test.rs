@@ -14,6 +14,7 @@ use std::fs::File;
 use std::io::Read;
 use std::mem::MaybeUninit;
 use std::os::fd::AsRawFd;
+use std::path::PathBuf;
 use std::process::Command;
 
 use crate::capability::CapabilitySet;
@@ -21,20 +22,32 @@ use crate::child::{self, Started};
 use crate::code::Code;
 use crate::refusal::Refusal;
 
-/// The canary: an OS-owned binary, dynamically linked against the platform's C library, that
-/// needs no grant beyond the floor. The suite's bare-floor row admits OS-owned binaries only.
+/// The canary on an FHS host: an OS-owned binary, dynamically linked against the platform's C
+/// library, that needs no grant beyond the floor. The suite's bare-floor row admits OS-owned
+/// binaries only.
 #[cfg(target_os = "macos")]
-pub const CANARY: &str = "/usr/bin/true";
+const FHS_CANARY: &str = "/usr/bin/true";
 /// `/bin/true` rather than `/usr/bin/true`: it is present with and without a merged `/usr`.
 #[cfg(target_os = "linux")]
-pub const CANARY: &str = "/bin/true";
+const FHS_CANARY: &str = "/bin/true";
+
+/// The canary this host's floor can run. A dedicated floor carries its own ([`floor::dedicated`]),
+/// because on such a host no path outside that floor is both OS-owned and runnable; otherwise it
+/// is the FHS one. Resolved per call rather than once, for the same reason the self-test's verdict
+/// is never cached: the answer is a property of the host as it is now.
+pub fn canary_path() -> PathBuf {
+    match crate::floor::dedicated() {
+        Some(dir) => dir.join(crate::floor::DEDICATED_CANARY),
+        None => PathBuf::from(FHS_CANARY),
+    }
+}
 
 /// Run [`CANARY`] under the bare floor. A failure is `refusal.floor.self-test`.
 ///
 /// The caller must be single-threaded, as for [`child::run_confined`]: the throwaway child
 /// allocates between `fork` and `exec`.
 pub fn floor() -> Result<(), Refusal> {
-    canary(&crate::floor::floor())
+    canary(&crate::floor::floor()?)
 }
 
 /// Run [`CANARY`] confined under `caps`, with its stdin and stdout on the null device, and assert
@@ -49,7 +62,22 @@ pub fn canary(caps: &CapabilitySet) -> Result<(), Refusal> {
         .map_err(|e| prepare_refusal("open /dev/null", e))?;
     let (mut stderr, writer) = std::io::pipe().map_err(|e| prepare_refusal("pipe", e))?;
     let _reapable = Reapable::new()?;
-    let mut command = Command::new(CANARY);
+    let path = canary_path();
+    let named = path.display();
+    // A host with no canary has no floor to test. Said here rather than left to surface as an
+    // `exec` that found nothing, because the remedy is a floor, not anything about this run.
+    if !path.exists() {
+        return Err(Refusal::new(
+            Code::FloorUnavailable,
+            format!(
+                "this host has no floor canary at {named}: its OS is not an FHS tree, so the \
+                 floor must be a dedicated one (build it with `nix build .#floor` and name it \
+                 in {})",
+                crate::floor::FLOOR_ENV
+            ),
+        ));
+    }
+    let mut command = Command::new(&path);
     // The canary's refusal is carried inside the self-test's own line, which names the run.
     let started = child::spawn_confined(caps, &mut command, None, || {
         redirect(&null, 0)?;
@@ -62,7 +90,7 @@ pub fn canary(caps: &CapabilitySet) -> Result<(), Refusal> {
             return Err(Refusal::new(
                 Code::FloorSelfTest,
                 format!(
-                    "the floor canary {CANARY} could not start when confined: {}: {}",
+                    "the floor canary {named} could not start when confined: {}: {}",
                     refusal.code,
                     refusal.message()
                 ),
@@ -90,7 +118,7 @@ pub fn canary(caps: &CapabilitySet) -> Result<(), Refusal> {
     };
     Err(Refusal::new(
         Code::FloorSelfTest,
-        format!("the floor canary {CANARY} {how} when confined, {said}"),
+        format!("the floor canary {named} {how} when confined, {said}"),
     ))
 }
 

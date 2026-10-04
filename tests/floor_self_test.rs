@@ -10,7 +10,7 @@ use std::process::Command;
 
 use playpen::capability::{Access, CapabilitySet, PathGrant, Scope};
 use playpen::code::Code;
-use playpen::self_test::{self, CANARY};
+use playpen::self_test::{self, canary_path};
 
 fn main() {
     let tests: &[(&str, fn())] = &[
@@ -39,8 +39,13 @@ fn main() {
 }
 
 fn the_canary_exits_zero_outside() {
-    let status = Command::new(CANARY).status().expect("run the canary");
-    assert!(status.success(), "{CANARY} fails outside: {status}");
+    let canary = canary_path();
+    let status = Command::new(&canary).status().expect("run the canary");
+    assert!(
+        status.success(),
+        "{} fails outside: {status}",
+        canary.display()
+    );
 }
 
 fn the_bare_floor_passes_the_self_test() {
@@ -68,7 +73,11 @@ fn a_canary_that_cannot_be_confined_fails_the_self_test() {
     let refusal = self_test::canary(&unappliable()).expect_err("the child cannot confine itself");
     assert_eq!(refusal.code, Code::FloorSelfTest, "{refusal}");
     let line = refusal.to_string();
-    assert!(line.contains(CANARY), "the canary is named: {line}");
+    let canary = canary_path();
+    assert!(
+        line.contains(&*canary.to_string_lossy()),
+        "the canary is named: {line}"
+    );
     assert!(
         line.contains("/nonexistent/playpen-self-test"),
         "the child's own reason is carried: {line}"

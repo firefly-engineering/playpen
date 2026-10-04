@@ -10,7 +10,7 @@ use std::process::Output;
 
 use serde_json::Value;
 
-use common::{Fixture, assert_refused};
+use common::{Fixture, assert_refused, os_bin};
 
 /// `explain` with `args` succeeded, wrote nothing to stderr, and opened no record of its own.
 /// Returns its stdout.
@@ -44,7 +44,7 @@ fn assert_explain_refused(output: &Output, code: &str) {
 fn explain_run_replays_a_stored_record_in_both_forms() {
     let fx = Fixture::new();
     let output = fx
-        .run(&["/bin/sh", "-c", "echo $$; exit 3"])
+        .run(&[&os_bin("sh"), "-c", "echo $$; exit 3"])
         .output()
         .expect("playpen");
     assert_eq!(output.status.code(), Some(3), "{output:?}");
@@ -108,7 +108,7 @@ fn explain_list_lists_recent_runs_most_recent_first() {
     let fx = Fixture::new();
     assert_eq!(explain(&fx, &["--list"]), "", "no runs yet");
     assert!(
-        fx.run(&["/usr/bin/true"])
+        fx.run(&[&os_bin("true")])
             .status()
             .expect("playpen")
             .success()
@@ -182,7 +182,7 @@ fn the_ring_keeps_the_most_recent_runs() {
         std::fs::write(fx.runs().join(format!("{id}.json")), "{}").expect("plant");
     }
     assert!(
-        fx.run(&["/usr/bin/true"])
+        fx.run(&[&os_bin("true")])
             .status()
             .expect("playpen")
             .success()

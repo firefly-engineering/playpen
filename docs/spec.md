@@ -621,6 +621,26 @@ The floor is built in, always applied, and **neither widenable nor narrowable by
 Amended by [#48](https://github.com/firefly-engineering/playpen/issues/48), which measured what an
 ordinary dynamically linked binary needs.
 
+**On a host whose OS is not an FHS tree, the floor is a dedicated one**
+([ADR 0023](adr/0023-the-floor-on-a-non-fhs-host-is-a-declared-closure.md)). A list of FHS
+directories cannot be that host's floor: a NixOS binary names its interpreter and every library
+it needs by store path, so on such a host `/bin` holds a single symlink, `/lib64` holds the loader
+stub alone, and no path the list can name is both OS-owned and runnable. A **dedicated floor** is
+a generated directory holding the OS's own command binaries and, beside them, the **declared
+closure** they need, one store path per line. The floor is then one read-and-execute root per
+line — never a coarse `/nix/store` root, which would be the leak [§8.3](#83-toolchain) describes.
+The generator is the closure's only author, as for a toolchain closure
+([§16.1](#161-nix)), and playpen only ever reads the list, so it keeps **no runtime Nix
+dependency**.
+
+A dedicated floor is named by `PLAYPEN_FLOOR`, else taken from the floor the Nix module installed
+in the running system generation. That variable states **where this host keeps its OS**; it is not
+policy, and no policy document can name or reach it, so the floor stays neither widenable nor
+narrowable by policy ([ADR 0014](adr/0014-the-toolchain-is-a-declared-closure.md)): every grant
+still comes from the floor's own generated closure, and nothing hand-written can add a path to it.
+A host that has neither a dedicated floor nor an FHS canary has no floor to test, which is
+`refusal.floor.unavailable`, naming the remedy.
+
 The floor is **one object with per-platform contents**. On macOS it must include
 `(allow file-read* (literal "/"))`: without it, every dynamically linked binary aborts with
 `rc=134` and empty stderr. It must also include `file-read*` on the literal
@@ -678,6 +698,13 @@ Before every launch, playpen applies the floor to a throwaway child and asserts 
 dynamically linked OS binary exits 0. A failure is `refusal.floor.self-test`. The result is
 **never cached**: every cache key is a guess that fails open and silently. The self-test and the
 suite's `P-canary` row are **one implementation with two callers**.
+
+The canary is that binary, and it comes from whatever the floor is on this host: `/usr/bin/true`
+or `/bin/true` on an FHS host, and the one the dedicated floor carries where there is one
+([§8.2](#82-the-floor)). It is **resolved per call**, never once, for the same reason the verdict
+is never cached: which binary the floor can run is a property of the host as it is now. The canary
+stays **dynamically linked** on every host, because a static one would exit 0 without ever
+exercising the loader, which is the half of `exec` this test exists to prove.
 
 ### 8.7 File descriptors
 
@@ -1400,8 +1427,15 @@ playpen ships a flake ([ADR 0015](adr/0015-the-nix-module-is-a-projection-and-ho
 - Parse and coherence checks run at build time via `playpen check --no-filesystem`, and the
   closure's size is checked against the ceiling.
 - Shim installation is **opt-in per kind**.
+- The flake's `floor` package is the **dedicated floor** for a non-FHS host
+  ([§8.2](#82-the-floor)): the OS's own command binaries, and the closure they need as a
+  `closureInfo` store-path list. The NixOS module installs it inside the system generation, where
+  it is the default without any variable set, so the floor rolls back with the system that built
+  it. The list is read as plain text and never recomputed at launch: enumerating the system
+  closure costs a `nix-store` query and some 3300 roots on the reference host, and the self-test's
+  verdict is never cached, so that price would fall on every launch.
 - playpen has **no runtime Nix dependency**. The emitted file is indistinguishable from a
-  hand-written one.
+  hand-written one, and a dedicated floor is a directory and a text file.
 
 ### 16.2 Homebrew
 
@@ -1666,6 +1700,7 @@ item C1). "Tier" is when the refusal can fire ([§10.5](#105-validation-tiers)).
 | Code | Tier | Fires when |
 |---|---|---|
 | `refusal.mechanism.unavailable` | launch | a capability the resolved profile requires is missing (names it) |
+| `refusal.floor.unavailable` | launch | this host has no floor to test: no dedicated floor and no FHS canary, or a dedicated floor whose declared closure is missing or empty |
 | `refusal.floor.self-test` | launch | the floor canary failed |
 | `refusal.budget.exceeded` | launch | the compiled profile exceeds the backend budget |
 | `refusal.target.exec` † | launch | the target could not be `exec`ed inside the boundary: absent, or not covered by policy ([Appendix C](#appendix-c--assembly-choices), item C9) |

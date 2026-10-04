@@ -11,7 +11,9 @@ use std::process::Command;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use common::{DENIAL_ERRNOS, Fixture, PLAYPEN, PROBE, assert_refused, probe_outside, verdict};
+use common::{
+    DENIAL_ERRNOS, Fixture, PLAYPEN, PROBE, assert_refused, os_bin, probe_outside, verdict,
+};
 
 fn assert_denied(v: &Value) {
     assert_eq!(v["ok"], false, "{v}");
@@ -128,7 +130,7 @@ fn a_cwd_outside_every_granted_root_refuses() {
     let fx = Fixture::new();
     let elsewhere = TempDir::new().expect("cwd");
     let output = fx
-        .run_from(elsewhere.path(), &["/usr/bin/true"])
+        .run_from(elsewhere.path(), &[&os_bin("true")])
         .output()
         .expect("playpen");
     let run = assert_refused(&output, "refusal.cwd.ungranted");
@@ -139,7 +141,7 @@ fn a_cwd_outside_every_granted_root_refuses() {
 fn success_writes_nothing_and_passes_the_status_through() {
     let fx = Fixture::new();
     let output = fx
-        .run(&["/bin/sh", "-c", "exit 3"])
+        .run(&[&os_bin("sh"), "-c", "exit 3"])
         .output()
         .expect("playpen");
     assert_eq!(output.status.code(), Some(3));
@@ -152,7 +154,7 @@ fn success_writes_nothing_and_passes_the_status_through() {
 #[test]
 fn a_caller_that_ignores_sigchld_still_gets_a_launch() {
     let fx = Fixture::new();
-    let mut command = fx.run(&["/bin/sh", "-c", "exit 3"]);
+    let mut command = fx.run(&[&os_bin("sh"), "-c", "exit 3"]);
     // SAFETY: signal is async-signal-safe. Linux keeps an ignored SIGCHLD across `exec`, and with
     // it the kernel reaps children before playpen can wait for them.
     unsafe {

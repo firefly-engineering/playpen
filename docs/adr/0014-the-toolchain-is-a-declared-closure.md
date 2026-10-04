@@ -198,3 +198,12 @@ process-transparency contract of ADR 0002 already promised to inherit untouched.
   reference-host paths cited above have also gone stale: the cask is now `claude-code@latest`
   and `omp` is no longer brewed — true when written, and the reason a policy names the stable
   link rather than the versioned path._
+
+- _Amended by [ADR 0023](0023-the-floor-on-a-non-fhs-host-is-a-declared-closure.md): **on a host
+  whose OS is a package store, the floor is a declared closure too.** "Only under paths the OS
+  owns" names nothing runnable on NixOS — `/bin` holds one symlink, `/lib64` the loader stub, and
+  every library is reached by absolute store path — so the per-platform contents of the floor
+  cannot be a literal list there. Such a host supplies a generated floor carrying the OS commands
+  and their closure, 10 store paths on the reference host, which is the same shape this ADR gave
+  the toolchain and for the same reason. The content bound is unchanged: one root per declared
+  path, never a coarse `/nix/store` root._

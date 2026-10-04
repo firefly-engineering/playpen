@@ -17,7 +17,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use common::Fixture;
+use common::{Fixture, os_bin};
 
 /// The (device, inode) of an open file, as the probe's `stdio` action reports it.
 fn identity(file: &File) -> Value {
@@ -30,7 +30,7 @@ fn identity(file: &File) -> Value {
 fn a_piped_run_passes_bytes_through_untouched() {
     let fx = Fixture::new();
     let mut playpen = fx
-        .run(&["/bin/cat"])
+        .run(&[&os_bin("cat")])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -95,7 +95,7 @@ fn a_child_killed_by_signal_n_exits_128_plus_n() {
     let fx = Fixture::new();
     for (signal, name) in [(libc::SIGTERM, "TERM"), (libc::SIGKILL, "KILL")] {
         let output = fx
-            .run(&["/bin/sh", "-c", &format!("kill -{name} $$")])
+            .run(&[&os_bin("sh"), "-c", &format!("kill -{name} $$")])
             .output()
             .expect("playpen");
         assert_eq!(output.status.code(), Some(128 + signal), "{output:?}");
@@ -110,7 +110,7 @@ fn a_child_killed_by_signal_n_exits_128_plus_n() {
 fn a_signal_the_caller_ignores_stays_ignored_in_the_child() {
     let fx = Fixture::new();
     // The child hangs itself up: it survives only if it inherited the caller's `nohup`.
-    let mut command = fx.run(&["/bin/sh", "-c", "kill -HUP $$; exit 7"]);
+    let mut command = fx.run(&[&os_bin("sh"), "-c", "kill -HUP $$; exit 7"]);
     // SAFETY: signal is async-signal-safe.
     unsafe {
         command.pre_exec(|| {
@@ -316,7 +316,11 @@ fn at_an_interactive_shell_ctrl_c_arrives_once_and_ctrl_z_stops_the_whole_job() 
     let (master, slave) = pty();
     // A job-control shell runs playpen as a foreground job, reports when the job stops, and
     // resumes it with `fg`. dash, because a non-interactive bash never returns from a stopped job.
-    let mut command = Command::new("/bin/dash");
+    //
+    // By name, not by path: this shell runs outside the boundary, as part of the harness rather
+    // than as a confined target, so it is a host tool like the C toolchain and the dev shell
+    // supplies it. A host that keeps it somewhere other than `/bin` then needs no special case.
+    let mut command = Command::new("dash");
     command
         .args([
             "-c",

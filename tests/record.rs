@@ -8,7 +8,7 @@ mod common;
 use serde_json::Value;
 use tempfile::TempDir;
 
-use common::{Fixture, assert_refused, probe_outside};
+use common::{Fixture, assert_refused, os_bin, probe_outside};
 
 fn the_only_record(fx: &Fixture) -> Value {
     let ids = fx.run_ids();
@@ -21,7 +21,7 @@ fn a_successful_run_records_policy_profile_capabilities_pid_and_timestamps() {
     let fx = Fixture::new();
     // `exec` keeps the pid, so the shell's `$$` is the confined child's pid.
     let output = fx
-        .run(&["/bin/sh", "-c", "echo $$; exit 3"])
+        .run(&[&os_bin("sh"), "-c", "echo $$; exit 3"])
         .output()
         .expect("playpen");
     assert_eq!(output.status.code(), Some(3), "{output:?}");
@@ -56,7 +56,7 @@ fn a_successful_run_records_policy_profile_capabilities_pid_and_timestamps() {
 #[test]
 fn the_record_directory_is_denied_from_inside_the_boundary() {
     let fx = Fixture::new();
-    let status = fx.run(&["/usr/bin/true"]).status().expect("playpen");
+    let status = fx.run(&[&os_bin("true")]).status().expect("playpen");
     assert!(status.success());
     let ids = fx.run_ids();
     let earlier = fx.runs().join(format!("{}.json", ids[0]));
@@ -84,7 +84,7 @@ fn a_state_directory_that_cannot_be_created_refuses_with_state_io() {
     let file = blocker.path().join("a-file");
     std::fs::write(&file, "").expect("a file where the state directory goes");
     let output = fx
-        .run(&["/usr/bin/true"])
+        .run(&[&os_bin("true")])
         .env("XDG_STATE_HOME", &file)
         .output()
         .expect("playpen");
@@ -95,7 +95,7 @@ fn a_state_directory_that_cannot_be_created_refuses_with_state_io() {
 fn no_state_directory_at_all_refuses_with_state_io() {
     let fx = Fixture::new();
     let output = fx
-        .run(&["/usr/bin/true"])
+        .run(&[&os_bin("true")])
         .env_remove("XDG_STATE_HOME")
         .env_remove("HOME")
         .output()
@@ -114,7 +114,7 @@ fn a_relative_policy_path_is_recorded_absolute() {
     let output = fx
         .playpen(&["run", "--profile", "p", "--agent", "claude", "--policy"])
         .arg(&relative)
-        .args(["--", "/usr/bin/true"])
+        .args(["--", &os_bin("true")])
         .output()
         .expect("playpen");
     assert!(output.status.success(), "{output:?}");

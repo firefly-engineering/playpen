@@ -202,7 +202,7 @@ fn run(
     probe().require(mechanism::REQUIRED)?;
     floor_self_test()?;
 
-    let mut caps = floor();
+    let mut caps = floor()?;
     caps.paths.extend(roots);
     record.launch(&caps)?;
     let run = record.id().clone();

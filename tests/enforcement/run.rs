@@ -4,7 +4,7 @@
 //!
 //! [spec §17.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#171-form
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::DirBuilderExt;
@@ -14,7 +14,7 @@ use std::process::{Command, Output, Stdio};
 
 use playpen::mechanism::Mechanism;
 use playpen::record::Record;
-use playpen::self_test::{self, CANARY};
+use playpen::self_test::{self, canary_path};
 use serde_json::Value;
 use tempfile::{NamedTempFile, TempDir};
 
@@ -113,7 +113,7 @@ fn decline(invocation: Invocation) -> Declined {
                 .arg(fixture.state_home())
                 .args(["run", "--profile", "p", "--agent", "claude", "--policy"])
                 .arg(&fixture.policy)
-                .args(["--", CANARY])
+                .args([OsStr::new("--"), canary_path().as_os_str()])
                 .current_dir(fixture.root());
             command
         }
@@ -148,7 +148,9 @@ fn refusal_line(line: &str) -> Option<(String, String)> {
 }
 
 fn canary_outside() -> Seen {
-    let status = Command::new(CANARY)
+    let canary = canary_path();
+    let named = canary.display();
+    let status = Command::new(&canary)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -157,11 +159,11 @@ fn canary_outside() -> Seen {
         Ok(status) if status.success() => Seen::Succeeded,
         Ok(status) => Seen::Failed {
             cause: None,
-            detail: format!("{CANARY}: {status}"),
+            detail: format!("{named}: {status}"),
         },
         Err(err) => Seen::Failed {
             cause: err.raw_os_error().map(Cause::Errno),
-            detail: format!("{CANARY}: {err}"),
+            detail: format!("{named}: {err}"),
         },
     }
 }

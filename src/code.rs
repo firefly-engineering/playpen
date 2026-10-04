@@ -71,6 +71,7 @@ registry! {
     ProcessWait => "refusal.process.wait",
     // Mechanism
     MechanismUnavailable => "refusal.mechanism.unavailable",
+    FloorUnavailable => "refusal.floor.unavailable",
     FloorSelfTest => "refusal.floor.self-test",
     BudgetExceeded => "refusal.budget.exceeded",
     TargetExec => "refusal.target.exec",
