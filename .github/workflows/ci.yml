@@ -29,3 +29,17 @@ jobs:
         run: cargo build --all-targets --locked
       - name: Test
         run: cargo test --locked
+
+  # The dev shell takes its Rust version from rust-toolchain.toml; evaluating it on every system
+  # fails if toolbox does not ship that version, so the two can never drift apart unnoticed.
+  flake:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Evaluate the dev shell
+        run: |
+          for system in x86_64-linux aarch64-linux aarch64-darwin; do
+            nix eval --raw ".#devShells.$system.default.drvPath"
+            echo
+          done
