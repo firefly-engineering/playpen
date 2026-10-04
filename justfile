@@ -5,3 +5,7 @@ build:
 # Run the whole test suite, enforcement rows included, as CI does.
 test:
     cargo test --locked
+
+# Remove everything cargo built.
+clean:
+    cargo clean
