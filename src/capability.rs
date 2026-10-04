@@ -6,15 +6,19 @@
 
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 /// What a grant allows. Execution follows readability: every readable path is executable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Access {
     Read,
     ReadWrite,
 }
 
 /// How much of the filesystem a path grant covers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Scope {
     /// The path and, for a directory, everything beneath it.
     Subtree,
@@ -22,7 +26,7 @@ pub enum Scope {
     Literal,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PathGrant {
     pub path: PathBuf,
     pub access: Access,
@@ -31,7 +35,7 @@ pub struct PathGrant {
     pub from: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilitySet {
     pub paths: Vec<PathGrant>,
     /// macOS Mach services the child may look up; every other service is denied.

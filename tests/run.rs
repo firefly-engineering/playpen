@@ -6,12 +6,12 @@ mod common;
 use std::fs::File;
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
-use std::process::{Command, Output};
+use std::process::Command;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use common::{Fixture, PLAYPEN, PROBE, probe_outside, verdict};
+use common::{Fixture, PLAYPEN, PROBE, assert_refused, probe_outside, verdict};
 
 /// A denial errno on this platform ([spec §15.2]); `ENOENT` is never one.
 #[cfg(target_os = "macos")]
@@ -29,26 +29,6 @@ fn assert_denied(v: &Value) {
     assert!(
         DENIAL_ERRNOS.contains(&errno),
         "errno {errno} is not a denial errno: {v}"
-    );
-}
-
-/// Exactly one stderr line `playpen: <code>: …`, exit 125, and nothing on stdout.
-fn assert_refused(output: &Output, code: &str) {
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(125), "stderr={stderr}");
-    assert!(
-        output.stdout.is_empty(),
-        "stdout is sacred: {:?}",
-        output.stdout
-    );
-    let lines: Vec<_> = stderr.lines().collect();
-    assert_eq!(lines.len(), 1, "a refusal is one line: {stderr:?}");
-    assert!(stderr.ends_with('\n'));
-    let prefix = format!("playpen: {code}: ");
-    assert!(
-        lines[0].starts_with(&prefix),
-        "expected {prefix:?}, got {:?}",
-        lines[0]
     );
 }
 
@@ -148,7 +128,8 @@ fn a_cwd_outside_every_granted_root_refuses() {
         .run_from(elsewhere.path(), &["/usr/bin/true"])
         .output()
         .expect("playpen");
-    assert_refused(&output, "refusal.cwd.ungranted");
+    let run = assert_refused(&output, "refusal.cwd.ungranted");
+    assert_eq!(fx.record(&run)["refusal"]["code"], "refusal.cwd.ungranted");
 }
 
 #[test]
@@ -194,7 +175,9 @@ fn a_target_that_cannot_be_executed_refuses() {
         .run(&[missing.to_str().unwrap()])
         .output()
         .expect("playpen");
-    assert_refused(&output, "refusal.target.exec");
+    // Refused in the child, after the fork, and still recorded by the supervisor.
+    let run = assert_refused(&output, "refusal.target.exec");
+    assert_eq!(fx.record(&run)["refusal"]["code"], "refusal.target.exec");
 }
 
 /// `playpen run` of `true` under `policy`, with the given profile and kind.
@@ -211,13 +194,7 @@ fn run_args<'a>(profile: &'a str, kind: &'a str, policy: &'a str) -> Vec<&'a str
 fn every_refusal_is_one_line_and_exit_125() {
     let fx = Fixture::new();
     let root = fx.root();
-    let run = |args: &[&str]| {
-        Command::new(PLAYPEN)
-            .args(args)
-            .current_dir(root)
-            .output()
-            .expect("playpen")
-    };
+    let run = |args: &[&str]| fx.playpen(args).output().expect("playpen");
     let policy = fx.policy.to_str().unwrap();
     let write_policy = |name: &str, document: Value| {
         let path = fx.policy_dir.path().join(name);
@@ -288,6 +265,9 @@ fn every_refusal_is_one_line_and_exit_125() {
         ),
     ];
     for (args, code) in cases {
-        assert_refused(&run(args), code);
+        let id = assert_refused(&run(args), code);
+        // Every refusal, including one before the command line parsed, leaves its record.
+        assert_eq!(fx.record(&id)["refusal"]["code"], *code, "{args:?}");
     }
+    assert_eq!(fx.run_ids().len(), cases.len(), "one record per run");
 }

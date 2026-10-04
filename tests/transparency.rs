@@ -315,6 +315,7 @@ fn at_an_interactive_shell_ctrl_c_arrives_once_and_ctrl_z_stops_the_whole_job() 
         ])
         .arg(fx.run(&[]).get_program())
         .args(fx.run(&[probe.to_str().unwrap(), "wait-signal"]).get_args())
+        .env("XDG_STATE_HOME", fx.state_home())
         .current_dir(fx.root())
         .stderr(slave.try_clone().expect("dup"));
     with_controlling_terminal(&mut command, &slave);

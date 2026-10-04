@@ -7,6 +7,7 @@ pub mod code;
 pub mod floor;
 pub mod launch;
 pub mod policy;
+pub mod record;
 pub mod refusal;
 pub mod self_test;
 pub mod supervisor;

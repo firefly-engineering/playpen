@@ -1,6 +1,7 @@
 //! The invocation contract ([spec §11]) and the launch sequence ([spec §4.2]), as far as the
-//! walking skeleton goes: parse, read the policy, resolve one profile's roots, check the CWD,
-//! self-test the floor, compile the floor plus those roots, and run the target confined.
+//! walking skeleton goes: open the run record, parse, read the policy, resolve one profile's
+//! roots, check the CWD, self-test the floor, compile the floor plus those roots, complete the
+//! record, and run the target confined.
 //!
 //! [spec §11]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#11-invocation-contract
 //! [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
@@ -16,6 +17,7 @@ use crate::child;
 use crate::code::Code;
 use crate::floor::floor;
 use crate::policy::Policy;
+use crate::record::{RunId, RunRecord};
 use crate::refusal::{EXIT_REFUSED, Refusal};
 use crate::self_test;
 
@@ -47,17 +49,48 @@ enum Command {
 /// [spec §11.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#112-kind
 const KINDS: &[&str] = &["claude", "omp"];
 
-/// Run playpen with `args` (including `argv[0]`) from the caller's working directory `cwd`.
-/// Returns the process exit status; on a refusal, the refusal line has already been written.
-pub fn main(args: impl IntoIterator<Item = OsString>, cwd: std::io::Result<PathBuf>) -> i32 {
+/// Run playpen with `args` (including `argv[0]`) from the caller's working directory `cwd`, with
+/// playpen's state directory at `state` (`None` when the environment names none). Returns the
+/// process exit status; on a refusal, the refusal line has already been written.
+pub fn main(
+    args: impl IntoIterator<Item = OsString>,
+    cwd: std::io::Result<PathBuf>,
+    state: Option<PathBuf>,
+) -> i32 {
+    // Step 1, before anything that can refuse, so that every refusal leaves a record.
+    let run = match RunId::allocate() {
+        Ok(run) => run,
+        Err(refusal) => return refuse(&refusal, None),
+    };
+    let mut record = match RunRecord::open(&run, state.as_deref()) {
+        Ok(record) => record,
+        Err(refusal) => return refuse(&refusal, Some(&run)),
+    };
+    match invoke(args, cwd, &mut record) {
+        Ok(status) => {
+            record.finish(status);
+            status
+        }
+        Err(refusal) => {
+            record.refuse(&refusal);
+            refuse(&refusal, Some(&run))
+        }
+    }
+}
+
+fn invoke(
+    args: impl IntoIterator<Item = OsString>,
+    cwd: std::io::Result<PathBuf>,
+    record: &mut RunRecord,
+) -> Result<i32, Refusal> {
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
         Err(err) if matches!(err.kind(), ErrorKind::DisplayHelp) => {
             // Help was asked for; no agent was going to run. stdout is sacred, so it goes to stderr.
             eprint!("{}", err.render());
-            return 0;
+            return Ok(0);
         }
-        Err(err) => return refuse(usage_refusal(&err)),
+        Err(err) => return Err(usage_refusal(&err)),
     };
     match cli.command {
         Command::Run {
@@ -65,22 +98,20 @@ pub fn main(args: impl IntoIterator<Item = OsString>, cwd: std::io::Result<PathB
             agent,
             policy,
             argv,
-        } => match run(
+        } => run(
             &profile,
             &agent,
             policy.as_deref(),
             &argv,
             cwd,
+            record,
             self_test::floor,
-        ) {
-            Ok(status) => status,
-            Err(refusal) => refuse(refusal),
-        },
+        ),
     }
 }
 
-fn refuse(refusal: Refusal) -> i32 {
-    refusal.emit();
+fn refuse(refusal: &Refusal, run: Option<&RunId>) -> i32 {
+    refusal.emit(run);
     EXIT_REFUSED
 }
 
@@ -104,6 +135,7 @@ fn run(
     policy: Option<&Path>,
     argv: &[OsString],
     cwd: std::io::Result<PathBuf>,
+    record: &mut RunRecord,
     floor_self_test: impl FnOnce() -> Result<(), Refusal>,
 ) -> Result<i32, Refusal> {
     if !KINDS.contains(&agent) {
@@ -115,21 +147,30 @@ fn run(
             ),
         ));
     }
+    record.kind(agent);
     let policy_path = policy.ok_or_else(|| {
         Refusal::new(
             Code::PolicyNotFound,
             "no policy given; pass --policy <path>",
         )
     })?;
+    // Absolute, so a stored record names the file whatever directory it is read from.
+    match &cwd {
+        Ok(cwd) => record.policy(&cwd.join(policy_path)),
+        Err(_) => record.policy(policy_path),
+    }
     let policy = Policy::load(policy_path)?;
     let roots = resolve_roots(&policy, profile)?;
+    record.profile(profile);
     check_cwd(cwd, &roots)?;
     // Before the real child is forked, on every launch, never from a cached verdict.
     floor_self_test()?;
 
     let mut caps = floor();
     caps.paths.extend(roots);
-    child::run_confined(&caps, argv)
+    record.launch(&caps)?;
+    let run = record.id().clone();
+    child::run_confined(&caps, argv, &run, |pid| record.spawned(pid))
 }
 
 /// The selected profile's brought roots, canonicalised, as path grants with provenance.
@@ -277,6 +318,9 @@ mod tests {
         // No target: forking the real child refuses with `refusal.invocation.usage` before the
         // fork, so this code can only come from a self-test run ahead of it, and no test forks.
         let argv = [];
+        let state = tempfile::TempDir::new().expect("state");
+        let id = RunId::allocate().expect("id");
+        let mut record = RunRecord::open(&id, Some(state.path())).expect("record");
         let mut ran = 0;
         let refusal = run(
             "p",
@@ -284,6 +328,7 @@ mod tests {
             Some(&policy),
             &argv,
             Ok(root.path().into()),
+            &mut record,
             || {
                 ran += 1;
                 Err(Refusal::new(Code::FloorSelfTest, "the canary died"))
@@ -292,6 +337,11 @@ mod tests {
         .expect_err("the launch refuses");
         assert_eq!(ran, 1);
         assert_eq!(refusal.code, Code::FloorSelfTest);
+        assert_eq!(
+            record.record().capabilities,
+            None,
+            "the record was not completed"
+        );
     }
 
     #[test]

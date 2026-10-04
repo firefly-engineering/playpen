@@ -17,7 +17,7 @@ use std::os::fd::AsRawFd;
 use std::process::Command;
 
 use crate::capability::CapabilitySet;
-use crate::child;
+use crate::child::{self, Started};
 use crate::code::Code;
 use crate::refusal::Refusal;
 
@@ -50,11 +50,25 @@ pub fn canary(caps: &CapabilitySet) -> Result<(), Refusal> {
     let (mut stderr, writer) = std::io::pipe().map_err(|e| prepare_refusal("pipe", e))?;
     let _reapable = Reapable::new()?;
     let mut command = Command::new(CANARY);
-    let pid = child::spawn_confined(caps, &mut command, || {
+    // The canary's refusal is carried inside the self-test's own line, which names the run.
+    let started = child::spawn_confined(caps, &mut command, None, || {
         redirect(&null, 0)?;
         redirect(&null, 1)?;
         redirect(&writer, 2)
     })?;
+    let pid = match started {
+        Started::Exec(pid) => pid,
+        Started::Refused(refusal) => {
+            return Err(Refusal::new(
+                Code::FloorSelfTest,
+                format!(
+                    "the floor canary {CANARY} could not start when confined: {}: {}",
+                    refusal.code,
+                    refusal.message()
+                ),
+            ));
+        }
+    };
     // The child holds the only other write end; once it exits, the read below ends.
     drop(writer);
     let mut said = Vec::new();

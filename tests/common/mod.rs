@@ -1,5 +1,6 @@
 //! The fixture shared by the end-to-end suites: a policy with one read-write root holding a copy
-//! of the probe, and helpers to run playpen and the probe against it.
+//! of the probe, a state directory of its own, and helpers to run playpen and the probe against
+//! them.
 
 #![allow(dead_code)] // each suite uses its own subset
 
@@ -18,6 +19,8 @@ pub struct Fixture {
     pub policy: PathBuf,
     /// Kept apart from the root so the policy is never inside the boundary.
     pub policy_dir: TempDir,
+    /// `XDG_STATE_HOME` for every playpen this fixture runs, so no test touches the real one.
+    state_home: TempDir,
 }
 
 impl Fixture {
@@ -36,7 +39,53 @@ impl Fixture {
             root,
             policy,
             policy_dir,
+            state_home: TempDir::new().expect("state home"),
         }
+    }
+
+    pub fn state_home(&self) -> &Path {
+        self.state_home.path()
+    }
+
+    /// Where playpen keeps this fixture's run records.
+    pub fn runs(&self) -> PathBuf {
+        self.state_home().join("playpen/runs")
+    }
+
+    /// The stored record of run `id`.
+    pub fn record(&self, id: &str) -> Value {
+        let path = self.runs().join(format!("{id}.json"));
+        let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        serde_json::from_slice(&bytes).expect("a record is JSON")
+    }
+
+    /// The ids of every run this fixture has recorded.
+    pub fn run_ids(&self) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(self.runs()) else {
+            return Vec::new();
+        };
+        let mut ids: Vec<_> = entries
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .into_string()
+                    .expect("utf-8")
+            })
+            .filter_map(|name| name.strip_suffix(".json").map(str::to_owned))
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// `playpen` with `args`, from inside the root, under this fixture's state directory.
+    pub fn playpen(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(PLAYPEN);
+        command
+            .args(args)
+            .current_dir(self.root())
+            .env("XDG_STATE_HOME", self.state_home());
+        command
     }
 
     pub fn root(&self) -> &Path {
@@ -53,9 +102,8 @@ impl Fixture {
     }
 
     pub fn run_from(&self, cwd: &Path, argv: &[&str]) -> Command {
-        let mut command = Command::new(PLAYPEN);
+        let mut command = self.playpen(&["run", "--profile", "p", "--agent", "claude", "--policy"]);
         command
-            .args(["run", "--profile", "p", "--agent", "claude", "--policy"])
             .arg(&self.policy)
             .arg("--")
             .args(argv)
@@ -70,6 +118,32 @@ impl Fixture {
         argv.extend(args);
         verdict(self.run(&argv).output().expect("run playpen"))
     }
+}
+
+/// Exactly one stderr line `playpen: <code>: … — run <id>`, exit 125, and nothing on stdout.
+/// Returns the run id.
+pub fn assert_refused(output: &Output, code: &str) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(125), "stderr={stderr}");
+    assert!(
+        output.stdout.is_empty(),
+        "stdout is sacred: {:?}",
+        output.stdout
+    );
+    let lines: Vec<_> = stderr.lines().collect();
+    assert_eq!(lines.len(), 1, "a refusal is one line: {stderr:?}");
+    assert!(stderr.ends_with('\n'));
+    let prefix = format!("playpen: {code}: ");
+    assert!(
+        lines[0].starts_with(&prefix),
+        "expected {prefix:?}, got {:?}",
+        lines[0]
+    );
+    let (_, run) = lines[0]
+        .rsplit_once(" — run ")
+        .unwrap_or_else(|| panic!("no run id on {:?}", lines[0]));
+    assert_eq!(run.len(), 26, "a run id is a ULID: {run:?}");
+    run.to_owned()
 }
 
 pub fn verdict(output: Output) -> Value {

@@ -205,8 +205,10 @@ including a failure to find a policy or select a profile, leaves a record.
 13. **Write the manifest** and render the kind's presentation
     ([§13](#13-the-manifest)).
 14. **Construct the environment** ([§9](#9-the-environment)).
-15. **Complete the run record** with the capability set, the pid, and the timestamps.
-16. **Fork.** The child closes fds above 2, applies the capability set, and `exec`s.
+15. **Complete the run record** with the capability set and the timestamps.
+16. **Fork.** The child closes fds above 2, applies the capability set, and `exec`s. A child that
+    refuses before `exec` reports the refusal to the supervisor, which records it and writes the
+    line. Once the target is `exec`ed, its pid goes to the run record.
 17. **Supervise**: forward signals, serve the proxy, re-mint near expiry, and `wait`.
 18. **Tear down**, in order:
     1. run revokers, while the proxy is still up;
@@ -1184,6 +1186,10 @@ wanted. It lives in playpen's own state directory: outside every workspace, not 
 profile, and **unreachable from inside the boundary**. Retention is a bounded ring of recent
 runs; it is a debugging aid, not an audit log.
 
+A run id is a ULID, so ids sort by the time their run started. The record is one JSON document
+per run, carrying its own format version, and holds the refusal's code and sentence when the run
+refused.
+
 ### 14.2 `playpen explain`
 
 `playpen explain` has three sections, rendered from one `--json` form:
@@ -1744,7 +1750,12 @@ Choices this spec made that no ticket decided. **Reviewed and accepted** in
 - **C6. `refusal.state.io`** for playpen's own state I/O failures. The record requires these to
   refuse, but never named a code.
 - **C7. The state directory's location** is left to the implementation. It must be outside every
-  workspace, not writable by any profile, and a real host path.
+  workspace, not writable by any profile, and a real host path. The implementation uses
+  `$XDG_STATE_HOME/playpen/` when that is an absolute path, else `~/.local/state/playpen/`, on
+  both platforms, as [§10.1](#101-location) reads `$XDG_CONFIG_HOME`. A relative value of
+  either variable is ignored, as the XDG base directory specification requires. Run records are
+  `runs/<run id>.json` beneath it. Neither variable naming an absolute path is
+  `refusal.state.io`.
 - **C8. Row ids.** These were taken from [#29](https://github.com/firefly-engineering/playpen/issues/29)'s
   report. The rows added by later tickets (`N-keg-decoy`, `N-endpoint`, `N-endpoint-no-leg`,
   `P-argv`, `P-endpoint`, `R-policy-span`, `R-no-filesystem`) were named here.

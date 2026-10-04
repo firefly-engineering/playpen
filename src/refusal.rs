@@ -1,4 +1,5 @@
-//! The refusal line ([spec §14.3]): one line on stderr, then exit `125`.
+//! The refusal line ([spec §14.3]): one line on stderr, then exit `125`. The line ends with the
+//! run id, which names the run's record ([`crate::record`]).
 //!
 //! [spec §14.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#143-the-refusal-line
 
@@ -6,6 +7,7 @@ use std::fmt;
 use std::io::Write;
 
 use crate::code::Code;
+use crate::record::RunId;
 
 /// Exit status reserved for "playpen did not run the agent".
 pub const EXIT_REFUSED: i32 = 125;
@@ -26,9 +28,22 @@ impl Refusal {
         }
     }
 
-    /// Write the refusal line to stderr in a single write.
-    pub fn emit(&self) {
-        let line = format!("{self}\n");
+    /// The human sentence, without the prefix or the code.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// The refusal line of run `run`. `None` only when no run id could be allocated.
+    pub fn line(&self, run: Option<&RunId>) -> String {
+        match run {
+            Some(run) => format!("{self} — run {run}"),
+            None => self.to_string(),
+        }
+    }
+
+    /// Write the refusal line of run `run` to stderr in a single write.
+    pub fn emit(&self, run: Option<&RunId>) {
+        let line = format!("{}\n", self.line(run));
         // Nothing useful can be done if stderr itself is gone.
         let _ = std::io::stderr().write_all(line.as_bytes());
     }
@@ -60,6 +75,19 @@ mod tests {
             r.to_string(),
             "playpen: refusal.cwd.ungranted: cwd /tmp is outside every granted root"
         );
+    }
+
+    #[test]
+    fn the_line_ends_with_the_run_id() {
+        let r = Refusal::new(Code::CwdUngranted, "cwd /tmp is outside every granted root");
+        let run = RunId::allocate().expect("id");
+        assert_eq!(
+            r.line(Some(&run)),
+            format!(
+                "playpen: refusal.cwd.ungranted: cwd /tmp is outside every granted root — run {run}"
+            )
+        );
+        assert_eq!(r.line(None), r.to_string());
     }
 
     #[test]
