@@ -76,14 +76,23 @@ fn writing_outside_the_root_is_a_denial() {
     );
 }
 
-/// Hand `file` to the spawned process as descriptor `fd`, without close-on-exec.
+/// Hand `file` to the spawned process as descriptor `fd`, without close-on-exec. When `file` is
+/// already `fd`, `dup2` changes nothing and its close-on-exec flag survives, so it is cleared.
 fn inherit_as(command: &mut Command, file: &File, fd: i32) {
     let source = file.as_raw_fd();
-    // SAFETY: dup2 is async-signal-safe; both descriptors are valid in the forked child.
+    // SAFETY: dup2 and fcntl are async-signal-safe; both descriptors are valid in the forked
+    // child.
     unsafe {
-        command.pre_exec(move || match libc::dup2(source, fd) {
-            -1 => Err(std::io::Error::last_os_error()),
-            _ => Ok(()),
+        command.pre_exec(move || {
+            let done = if source == fd {
+                libc::fcntl(fd, libc::F_SETFD, 0)
+            } else {
+                libc::dup2(source, fd)
+            };
+            match done {
+                -1 => Err(std::io::Error::last_os_error()),
+                _ => Ok(()),
+            }
         });
     }
 }
