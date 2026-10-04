@@ -19,7 +19,7 @@ use crate::explain;
 use crate::floor::floor;
 use crate::mechanism::{self, Mechanism};
 use crate::policy::Policy;
-use crate::record::{RunId, RunRecord};
+use crate::record::{self, RunId, RunRecord};
 use crate::refusal::{EXIT_REFUSED, Refusal};
 use crate::self_test;
 
@@ -102,7 +102,7 @@ pub fn main(
         Ok(record) => record,
         Err(refusal) => return refuse(&refusal, Some(&run)),
     };
-    match invoke(parsed, cwd, &mut record, probe) {
+    match invoke(parsed, cwd, state.as_deref(), &mut record, probe) {
         Ok(status) => {
             record.finish(status);
             status
@@ -117,6 +117,7 @@ pub fn main(
 fn invoke(
     parsed: Result<RunArgs, clap::Error>,
     cwd: std::io::Result<PathBuf>,
+    state: Option<&Path>,
     record: &mut RunRecord,
     probe: impl FnOnce() -> Mechanism,
 ) -> Result<i32, Refusal> {
@@ -132,6 +133,7 @@ fn invoke(
         policy.as_deref(),
         &argv,
         cwd,
+        state,
         record,
         probe,
         self_test::floor,
@@ -168,6 +170,7 @@ fn run(
     policy: Option<&Path>,
     argv: &[OsString],
     cwd: std::io::Result<PathBuf>,
+    state: Option<&Path>,
     record: &mut RunRecord,
     probe: impl FnOnce() -> Mechanism,
     floor_self_test: impl FnOnce() -> Result<(), Refusal>,
@@ -204,6 +207,13 @@ fn run(
 
     let mut caps = floor()?;
     caps.paths.extend(roots);
+    // The existence-tier containment check, run once the capability set is complete because the
+    // rule is about *every* granted path and the floor is a grant too: on a non-FHS host it is a
+    // declared closure read from a `PLAYPEN_FLOOR`-selected directory, so it is neither
+    // policy-declared nor state-derived ([ADR 0027]). A compiled-in FHS floor can never trigger it.
+    //
+    // [ADR 0027]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0027-the-state-directory-is-unreachable-by-refusal-because-a-carve-out-is-not-portable.md
+    record::unreachable(state, &caps.paths)?;
     record.launch(&caps)?;
     let run = record.id().clone();
     // Both callbacks write the record, and only one of them ever fires, but the borrow checker
@@ -260,6 +270,9 @@ fn resolve_roots(policy: &Policy, profile: &str) -> Result<Vec<PathGrant>, Refus
                 access: root.mode.into(),
                 scope: Scope::Subtree,
                 from,
+                // Policy-declared, so never exempt: a brought root of `~` is exactly the breach
+                // the state-reachability check exists to refuse (ADR 0027).
+                state_derived: false,
             });
         }
     }
@@ -302,6 +315,7 @@ mod tests {
             access: Access::ReadWrite,
             scope: Scope::Subtree,
             from: "workspace:w.roots[0]".into(),
+            state_derived: false,
         }
     }
 
@@ -378,6 +392,7 @@ mod tests {
             Some(&policy),
             &argv,
             Ok(root.path().into()),
+            Some(state.path()),
             &mut record,
             probe,
             floor_self_test,

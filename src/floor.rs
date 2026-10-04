@@ -140,6 +140,9 @@ fn dedicated_grants(dir: &Path) -> Result<Vec<PathGrant>, Refusal> {
             access: Access::Read,
             scope: Scope::Subtree,
             from: from.clone(),
+            // A declared closure is read from a PLAYPEN_FLOOR-selected directory, not computed
+            // from the state directory, so it is checked like any other grant (ADR 0027).
+            state_derived: false,
         })
         .collect();
     if grants.is_empty() {
@@ -157,6 +160,7 @@ fn dedicated_grants(dir: &Path) -> Result<Vec<PathGrant>, Refusal> {
         access: Access::Read,
         scope: Scope::Subtree,
         from,
+        state_derived: false,
     });
     Ok(grants)
 }
@@ -197,6 +201,9 @@ pub fn floor() -> Result<CapabilitySet, Refusal> {
             access,
             scope,
             from: FROM.into(),
+            // The compiled-in FHS floor never reaches under $HOME, so this can never trigger
+            // the state-reachability check — but it is checked, not exempted (ADR 0027).
+            state_derived: false,
         })
         .collect();
     if let Some(dir) = dedicated() {

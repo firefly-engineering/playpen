@@ -981,7 +981,7 @@ policy.
 |---|---|---|
 | Parser contract | syntax, unknown fields, types, version, tags, NUL | build time and launch |
 | Coherence | cross-table references and constraints ([Appendix A](#appendix-a--code-registry), *coherence*) | build time and launch |
-| Existence | roots, exclusions, symlink targets, shim targets, writability | launch only |
+| Existence | roots, exclusions, symlink targets, shim targets, writability, state-directory reachability | launch only |
 
 `playpen check [--policy <f>] [--no-filesystem]` runs the first two tiers, or all three without
 `--no-filesystem`. On a Nix host the module runs it in a derivation, so an incoherent policy
@@ -1230,7 +1230,10 @@ The run record holds:
 
 It is **opened before launch**, because the run that refuses is the one whose record is most
 wanted. It lives in playpen's own state directory: outside every workspace, not writable by any
-profile, and **unreachable from inside the boundary**. Retention is a bounded ring of recent
+profile, and **unreachable from inside the boundary** — enforced, not merely true of the default
+policy: a launch whose grants reach it refuses with `refusal.state.reachable`, because a record
+the agent could read is one it could be confused by, and a record carries the resolved profile,
+the selection trace, the capability set and the route table. Retention is a bounded ring of recent
 runs; it is a debugging aid, not an audit log. The ring holds the **100** most recent **ended**
 runs, plus **every live run**. Opening a record removes ended runs beyond those, with the staging
 file a crash left behind for one
@@ -1549,6 +1552,7 @@ Row ids are provisional. The implementation owns the final ids.
 | `R-incoherent-ws` | refusal | an incoherent workspace → `125` + code | both |
 | `R-ceiling` | refusal | a policy over the compiled-profile ceiling → `125` + `refusal.budget.exceeded`; asserts the code, never a path count | macOS (`n/a` Linux) |
 | `R-record` | refusal | a run record exists **after** a refusal | both |
+| `R-state-reachable` | refusal | a root that is an ancestor of playpen's state directory → `125` + `refusal.state.reachable`, naming both paths. The state directory is **synthetic**, not the real `$HOME`: the check compares resolved paths and does not care whose home it is | both |
 | `R-code-coverage` | refusal | every `refusal.*` code in the registry has ≥ 1 producing row | both |
 | `R-policy-span` | refusal | a policy refusal names file, line and column, including through a merge key | both |
 | `R-no-filesystem` | refusal | `check --no-filesystem` performs no existence check | both |
@@ -1757,6 +1761,7 @@ rather than a `refusal.*` code needing an exemption from the gate.
 | `refusal.root.missing` | existence | a brought root, toolchain root, symlink target or shim target is absent |
 | `refusal.exclusion.missing` | existence | an exclusion's path is absent |
 | `refusal.integrity.writable` | existence | the policy, the playpen executable, the shim link or its directory is profile-writable |
+| `refusal.state.reachable` † | existence | a granted path reaches playpen's state directory, in either containment direction, naming both paths and the mode. Covers brought roots, toolchain roots, exclusions and the floor; exempt are only subtrees playpen *derived from* that directory ([ADR 0027](adr/0027-the-state-directory-is-unreachable-by-refusal-because-a-carve-out-is-not-portable.md)) |
 | `refusal.cwd.ungranted` | existence | the CWD is not inside a granted root |
 | `refusal.area.busy` † | launch | an `exclusive` area is held; names the holding run id |
 | `refusal.state.collision` | coherence | a share entry names the kind's instruction entry point and the kind has no import mechanism |
@@ -1886,8 +1891,18 @@ Choices this spec made that no ticket decided. **Reviewed and accepted** in
   to show the selection trace and the injected argv for a given invocation.
 - **C6. `refusal.state.io`** for playpen's own state I/O failures. The record requires these to
   refuse, but never named a code.
-- **C7. The state directory's location** is left to the implementation. It must be outside every
-  workspace, not writable by any profile, and a real host path. The implementation uses
+- **C7. The state directory's location** is left to the implementation. It must be **unreachable
+  by any granted path** and a real host path. "Outside every workspace" was the original wording
+  and is narrower than the rule's own enforcement: it omits **toolchain roots**, which attach to
+  the profile rather than to a workspace, **exclusions**, and **the floor**, which on a non-FHS
+  host is a declared closure naming a directory an operator chose. A requirement narrower than
+  what it enforces is what makes a reader distrust the document — someone would declare a
+  toolchain root over `~` and be refused by a rule the spec does not state. A launch whose grants
+  reach the directory is `refusal.state.reachable`
+  ([ADR 0027](adr/0027-the-state-directory-is-unreachable-by-refusal-because-a-carve-out-is-not-portable.md)),
+  and the only exemption is a subtree playpen *derived from* the directory: agent state
+  directories live inside it and are granted by design, so the exemption turns on where a path
+  came from rather than on who declared it. The implementation uses
   `$XDG_STATE_HOME/playpen/` when that is an absolute path, else `~/.local/state/playpen/`, on
   both platforms, as [§10.1](#101-location) reads `$XDG_CONFIG_HOME`. A relative value of
   either variable is ignored, as the XDG base directory specification requires. Run records are

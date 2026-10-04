@@ -64,6 +64,7 @@ fn unappliable() -> CapabilitySet {
             access: Access::Read,
             scope: Scope::Subtree,
             from: "test".into(),
+            state_derived: false,
         }],
         mach_services: vec![],
     }

@@ -214,6 +214,7 @@ mod tests {
                 access: Access::Read,
                 scope: Scope::Subtree,
                 from: "workspace:w.roots[0]".into(),
+                state_derived: false,
             }],
             mach_services: vec![],
         };

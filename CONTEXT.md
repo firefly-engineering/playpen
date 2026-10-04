@@ -537,8 +537,10 @@ producing **enforcement test**, since a **fault** cannot be provoked by one.
 What playpen knows and the kernel cannot: which policy produced this boundary. The resolved
 profile and the selection trace that chose it, the **capability set**, the **credential route**
 table, the agent's pid and the **supervisor**'s own, the timestamps. Written *before* launch, since a run that refuses is the one whose record
-is most wanted. Lives outside every workspace and is unreachable from inside the boundary — a
-record the agent could read is one it could be confused by. A bounded ring of recent runs: a
+is most wanted. Lives beyond every granted path and is unreachable from inside the boundary — a
+record the agent could read is one it could be confused by, and that is enforced by a **refusal**
+rather than left to the default policy's shape, because carving the directory out of a granted
+root is expressible on one platform only. A bounded ring of recent runs: a
 debugging aid, not an audit log — bounded in *history*, which is what that distinction protects, so
 a run still going is never evicted however many have started since. The longest-running run is the
 most interesting one, and was the one the ring was certain to drop.

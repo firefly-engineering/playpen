@@ -33,6 +33,20 @@ pub struct PathGrant {
     pub scope: Scope,
     /// The authored source of this grant (`floor`, `workspace:playpen.roots[0]`, …).
     pub from: String,
+    /// Whether playpen **derived** this path from its own state directory, rather than something
+    /// having declared a path that happens to lie inside it.
+    ///
+    /// This is the one exemption from the state-reachability check ([ADR 0027]), and it is
+    /// deliberately a property of the grant rather than an enumerated list of tenants: the state
+    /// directory is not private in its entirety — agent state directories live inside it and are
+    /// granted to the agent by design — so "a granted path inside the state directory" is the
+    /// intended arrangement rather than the bug. Derivation is what makes the exemption safe,
+    /// because a derived path is inside only because playpen computed it from the directory. A
+    /// list would fail open for every tenant nobody remembered to add.
+    ///
+    /// [ADR 0027]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0027-the-state-directory-is-unreachable-by-refusal-because-a-carve-out-is-not-portable.md
+    #[serde(default)]
+    pub state_derived: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

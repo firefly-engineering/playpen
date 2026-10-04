@@ -8,10 +8,9 @@
 //! self-limiting because each one is a process. Liveness is an advisory lock on a sidecar
 //! ([`LOCK_EXT`]), so there is no age bound to pick.
 //!
-//! The record lives in playpen's own state directory, outside every workspace. It is unreachable
-//! from inside the boundary because nothing grants it: the floor never reaches under `$HOME`. A
-//! brought root that covers it is not yet refused
-//! ([#116](https://github.com/firefly-engineering/playpen/issues/116)).
+//! The record lives in playpen's own state directory, beyond every granted path. That is enforced
+//! and not merely true of the default policy: a launch whose grants reach the directory refuses
+//! ([`unreachable`]).
 //!
 //! [spec §14.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#141-the-run-record
 //! [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
@@ -26,7 +25,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::capability::CapabilitySet;
+use crate::capability::{Access, CapabilitySet, PathGrant, Scope};
 use crate::code::Code;
 use crate::fault::Fault;
 use crate::refusal::Refusal;
@@ -68,6 +67,71 @@ pub fn state_dir(xdg_state_home: Option<OsString>, home: Option<OsString>) -> Op
     absolute(xdg_state_home)
         .or_else(|| absolute(home).map(|home| home.join(".local/state")))
         .map(|base| base.join("playpen"))
+}
+
+/// Refuse if any grant in `grants` reaches playpen's state directory `state` ([ADR 0027]).
+///
+/// [Spec §14.1] requires the run record to be unreachable from inside the boundary, and
+/// [Appendix C] item C7 requires the state directory to be beyond every profile's reach. Nothing
+/// checked it: the directory was unreachable in practice for one reason only — nothing granted it,
+/// because the floor never reaches under `$HOME` — which is a property of the default policy
+/// rather than of the model. A brought root of `~` made every record readable and, at
+/// `readwrite`, forgeable.
+///
+/// **Reachability is the breach, not writability**, so the mode does not decide it: a record
+/// carries the resolved profile, the selection trace, the capability set and the route table, so a
+/// `read` root over the records hands a map of the boundary to the thing being confined. The mode
+/// is named in the sentence instead, because the operator's remedy is the same single action
+/// either way.
+///
+/// Refusing rather than carving the directory out of an otherwise-granted root: Seatbelt can
+/// express a deny inside an allow, and Landlock is an allow-list with no deny rules. A fix
+/// available on one platform is not a fix, and the alternative would have been a named asymmetry
+/// in the *reachability of the run record*, which is the last place to accept platform inequality.
+///
+/// [ADR 0027]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0027-the-state-directory-is-unreachable-by-refusal-because-a-carve-out-is-not-portable.md
+/// [spec §14.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#141-the-run-record
+/// [Appendix C]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#appendix-c--assembly-choices
+pub fn unreachable(state: Option<&Path>, grants: &[PathGrant]) -> Result<(), Refusal> {
+    // No state directory means no records to reach; `RunRecord::open` has already refused.
+    let Some(state) = state else {
+        return Ok(());
+    };
+    // Resolved on both sides, so a grant that reaches the directory through a symlink is caught.
+    // A path that cannot be resolved is compared as written: a missing root is refused elsewhere,
+    // and a floor path absent on this host grants nothing.
+    let resolve = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let state = resolve(state);
+    for grant in grants {
+        if grant.state_derived {
+            continue;
+        }
+        let path = resolve(&grant.path);
+        let reaches = match grant.scope {
+            // A subtree grant reaches the directory from either side: at or above it, everything
+            // beneath is granted; at or below it, the grant is inside the directory already.
+            Scope::Subtree => state.starts_with(&path) || path.starts_with(&state),
+            // A literal grant of an ancestor grants nothing beneath it, so only one direction.
+            Scope::Literal => path.starts_with(&state),
+        };
+        if reaches {
+            let mode = match grant.access {
+                Access::Read => "read",
+                Access::ReadWrite => "readwrite",
+            };
+            return Err(Refusal::new(
+                Code::StateReachable,
+                format!(
+                    "{}: the {mode} grant of {} reaches playpen's state directory {}, whose run \
+                     records must be unreachable from inside the boundary",
+                    grant.from,
+                    path.display(),
+                    state.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// A run id: a ULID, so ids sort by the time their run started.
@@ -653,6 +717,7 @@ mod tests {
                 access: Access::ReadWrite,
                 scope: Scope::Subtree,
                 from: "workspace:w.roots[0]".into(),
+                state_derived: false,
             }],
             mach_services: vec![],
         };
@@ -741,6 +806,113 @@ mod tests {
         );
         let record = decode(without.as_bytes()).expect("an older record reads");
         assert_eq!(record.fault, None);
+    }
+
+    fn grant(path: &Path, access: Access, scope: Scope) -> PathGrant {
+        PathGrant {
+            path: path.to_path_buf(),
+            access,
+            scope,
+            from: "workspace:w.roots[0]".into(),
+            state_derived: false,
+        }
+    }
+
+    /// A brought root of `~`, or of any ancestor of the state directory, is the breach #116
+    /// reported: it makes every run record readable from inside and, at `readwrite`, forgeable.
+    #[test]
+    fn a_grant_above_the_state_directory_refuses_naming_both_paths() {
+        let home = tempfile::TempDir::new().expect("home");
+        let state = home.path().join(".local/state/playpen");
+        std::fs::create_dir_all(&state).expect("state");
+
+        for access in [Access::Read, Access::ReadWrite] {
+            let grants = [grant(home.path(), access, Scope::Subtree)];
+            let refusal = unreachable(Some(&state), &grants).expect_err("refuses");
+            assert_eq!(refusal.code, Code::StateReachable);
+            // Both paths, so the operator can see what to change and what it reached.
+            let said = refusal.message();
+            let home_resolved = home.path().canonicalize().expect("resolve");
+            assert!(
+                said.contains(&home_resolved.display().to_string()),
+                "{said}"
+            );
+            assert!(
+                said.contains(&state.canonicalize().expect("resolve").display().to_string()),
+                "{said}"
+            );
+            assert!(said.contains("workspace:w.roots[0]"), "{said}");
+        }
+        // Reachability is the breach, not writability, but the mode is named in the sentence.
+        let read_only = [grant(home.path(), Access::Read, Scope::Subtree)];
+        let said = unreachable(Some(&state), &read_only)
+            .expect_err("a read root over the records is a breach too")
+            .message()
+            .to_string();
+        assert!(said.contains("read grant"), "{said}");
+    }
+
+    /// The other containment direction, and the one #76 makes the *intended* arrangement: a path
+    /// inside the state directory refuses unless playpen derived it from there.
+    #[test]
+    fn a_grant_inside_the_state_directory_refuses_unless_it_was_derived() {
+        let state = tempfile::TempDir::new().expect("state");
+        let inside = state.path().join("agents/claude/p");
+        std::fs::create_dir_all(&inside).expect("inside");
+
+        let declared = [grant(&inside, Access::ReadWrite, Scope::Subtree)];
+        assert_eq!(
+            unreachable(Some(state.path()), &declared)
+                .expect_err("a declared path inside refuses")
+                .code,
+            Code::StateReachable
+        );
+
+        // Derivation is what makes the exemption safe: the path is inside because playpen
+        // computed it from the directory, never because something granted a path containing it.
+        let derived = [PathGrant {
+            state_derived: true,
+            ..grant(&inside, Access::ReadWrite, Scope::Subtree)
+        }];
+        assert!(unreachable(Some(state.path()), &derived).is_ok());
+    }
+
+    /// Resolved on both sides, so the check cannot be walked around with a symlink.
+    #[test]
+    fn a_grant_reaching_the_state_directory_through_a_symlink_refuses() {
+        let home = tempfile::TempDir::new().expect("home");
+        let state = home.path().join("state/playpen");
+        std::fs::create_dir_all(&state).expect("state");
+        let link = tempfile::TempDir::new().expect("elsewhere");
+        let link = link.path().join("link");
+        std::os::unix::fs::symlink(home.path(), &link).expect("symlink");
+
+        let grants = [grant(&link, Access::Read, Scope::Subtree)];
+        assert_eq!(
+            unreachable(Some(&state), &grants)
+                .expect_err("refuses")
+                .code,
+            Code::StateReachable
+        );
+    }
+
+    /// A grant beside the state directory, and a literal grant of an ancestor, reach nothing: the
+    /// check must not refuse a launch that was never a breach.
+    #[test]
+    fn a_grant_that_reaches_nothing_is_allowed() {
+        let home = tempfile::TempDir::new().expect("home");
+        let state = home.path().join(".local/state/playpen");
+        std::fs::create_dir_all(&state).expect("state");
+        let elsewhere = home.path().join("src/playpen");
+        std::fs::create_dir_all(&elsewhere).expect("elsewhere");
+
+        let beside = [grant(&elsewhere, Access::ReadWrite, Scope::Subtree)];
+        assert!(unreachable(Some(&state), &beside).is_ok());
+        // A literal grant of an ancestor grants nothing beneath it, so it reaches no record.
+        let literal = [grant(home.path(), Access::Read, Scope::Literal)];
+        assert!(unreachable(Some(&state), &literal).is_ok());
+        // Nothing to reach without a state directory; `open` has already refused by then.
+        assert!(unreachable(None, &beside).is_ok());
     }
 
     #[test]

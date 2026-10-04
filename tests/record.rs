@@ -103,6 +103,51 @@ fn no_state_directory_at_all_refuses_with_state_io() {
     assert_refused(&output, "refusal.state.io");
 }
 
+/// A brought root that is an ancestor of playpen's state directory refuses, naming both paths
+/// ([ADR 0027]). Before this, the launch went ahead silently and every run record was readable
+/// from inside the boundary — and forgeable, since this fixture's root is `readwrite`.
+///
+/// The state directory is synthetic, as every row's is: the check compares resolved paths and does
+/// not care whose home it is, so pointing it at the real `$HOME` would buy no realism and risk
+/// what [#118](https://github.com/firefly-engineering/playpen/issues/118) reports.
+///
+/// [ADR 0027]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0027-the-state-directory-is-unreachable-by-refusal-because-a-carve-out-is-not-portable.md
+#[test]
+fn a_root_above_the_state_directory_refuses_naming_both_paths() {
+    let fx = Fixture::new();
+    // Inside the brought root, which is the breach: an `XDG_STATE_HOME` under a granted path.
+    let inside = fx.root().join("state");
+    let output = fx
+        .run(&[&os_bin("true")])
+        .env("XDG_STATE_HOME", &inside)
+        .output()
+        .expect("playpen");
+
+    assert_refused(&output, "refusal.state.reachable");
+    let said = String::from_utf8_lossy(&output.stderr).to_string();
+    let root = fx.root().canonicalize().expect("root");
+    assert!(
+        said.contains(&root.display().to_string()),
+        "the line names the offending grant: {said}"
+    );
+    assert!(
+        said.contains(&inside.join("playpen").display().to_string()),
+        "and the state directory it reaches: {said}"
+    );
+    // The refusal still leaves a record, like every other refusal class ([spec §14.1]): the
+    // record opens before the check, which needs the resolved profile's grants, and no agent is
+    // ever forked on this path so the window has no reader. Its sidecar went with the run.
+    let left: Vec<_> = std::fs::read_dir(inside.join("playpen/runs"))
+        .expect("the state directory the run was refused about")
+        .map(|e| e.expect("entry").file_name())
+        .collect();
+    assert_eq!(
+        left.len(),
+        1,
+        "the refusing run left its own record, and its sidecar went with it: {left:?}"
+    );
+}
+
 #[test]
 fn a_relative_policy_path_is_recorded_absolute() {
     let fx = Fixture::new();
