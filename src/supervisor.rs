@@ -4,7 +4,15 @@
 //! The child stays in playpen's process group, which is the caller's job: the terminal's Ctrl-C
 //! and Ctrl-Z reach every process in the job, a pipeline around playpen keeps the terminal, and
 //! playpen never touches the foreground. A signal the terminal generated has therefore reached the
-//! child already, and is not forwarded a second time (`from_the_terminal`).
+//! child already, and is not forwarded a second time ([`child_already_has`]).
+//!
+//! Which signals those are is decided by **origin** where the platform reports it, and by a
+//! structural proxy where it does not ([`Origin`]). What no platform reports is a signal's
+//! *target*: `siginfo_t` carries the sender and never the addressee, so a signal sent to the whole
+//! job cannot be told from one sent to playpen alone, and the agent receives it twice. That is a
+//! **named residual**, unclosable rather than unclosed, and
+//! [`crate::supervisor`]'s suppression predicate should not be "improved" to close it — the
+//! information does not exist to be read.
 //!
 //! The supervisor stays single-threaded: signals are blocked before the fork and taken
 //! synchronously with `sigwait`, so nothing runs in a signal handler. A thread started before the
@@ -64,12 +72,63 @@ fn forwardable() -> Vec<c_int> {
     signals
 }
 
-/// The signals a terminal sends to its whole foreground process group.
+/// The signals a terminal generates for a process group of its own accord. `SIGTTIN` and
+/// `SIGTTOU` belong here too: they are tty-generated, and leaving them out doubled them and then
+/// stopped playpen with the job on a signal the child had already received twice.
 fn is_terminal_generated(sig: c_int) -> bool {
     matches!(
         sig,
-        libc::SIGINT | libc::SIGQUIT | libc::SIGTSTP | libc::SIGWINCH
+        libc::SIGINT
+            | libc::SIGQUIT
+            | libc::SIGTSTP
+            | libc::SIGWINCH
+            | libc::SIGTTIN
+            | libc::SIGTTOU
     )
+}
+
+/// What playpen can learn about where a signal came from. Readable on Linux and nowhere else
+/// (**named asymmetry #7**, [ADR 0026]).
+///
+/// [ADR 0026]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0026-signal-origin-is-readable-on-linux-and-the-kill-target-is-readable-nowhere.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// The kernel generated this instance: a terminal keypress, or a per-process condition such
+    /// as `alarm()` expiring.
+    Kernel,
+    /// Something called `kill`. Whether it addressed playpen or the whole job is **not** readable:
+    /// `siginfo_t` reports a signal's sender and never its target.
+    Sent,
+    /// This platform cannot say. Absent from the Linux build, which can always say, so that the
+    /// asymmetry is structural rather than a variant nothing reaches.
+    #[cfg(not(target_os = "linux"))]
+    Unreadable,
+}
+
+/// Whether the child already holds this signal, so forwarding it would deliver it twice.
+///
+/// `si_code` **refines** membership of the tty-generated set rather than replacing it: an
+/// `alarm()`-generated `SIGALRM` is also `SI_KERNEL`, and `SIGALRM`, `SIGXFSZ` and `SIGXCPU` are
+/// per-process signals the child never received, so a predicate that suppressed everything the
+/// kernel generated would swallow them ([ADR 0026]).
+///
+/// Within the set, though, `SI_KERNEL` is a proof and not a heuristic: if the tty generates this
+/// signal and the kernel generated this instance, the tty delivered it to a process group holding
+/// playpen, and the child is in that group. That is why the Linux arm drops the foreground check
+/// rather than ANDing with it — once the code is in hand, the check carries no information.
+///
+/// [ADR 0026]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0026-signal-origin-is-readable-on-linux-and-the-kill-target-is-readable-nowhere.md
+fn child_already_has(sig: c_int, origin: Origin) -> bool {
+    if !is_terminal_generated(sig) {
+        return false;
+    }
+    match origin {
+        Origin::Kernel => true,
+        Origin::Sent => false,
+        // No path to the origin, blocked or handled, so fall back to the structural proxy.
+        #[cfg(not(target_os = "linux"))]
+        Origin::Unreadable => from_the_terminal(),
+    }
 }
 
 /// The stops after which the caller's shell expects the whole job to be stopped.
@@ -161,18 +220,16 @@ impl HeldSignals {
     /// [ADR 0024]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0024-a-status-playpen-cannot-learn-is-a-fault-and-not-a-refusal.md
     pub fn supervise(&self, child: pid_t) -> Result<i32, Fault> {
         loop {
-            let mut sig = 0;
-            // SAFETY: `self.set` is initialised and every member is blocked.
-            if unsafe { libc::sigwait(&self.set, &mut sig) } != 0 {
+            let Some((sig, origin)) = take(&self.set) else {
                 continue;
-            }
+            };
             if sig == libc::SIGCHLD {
                 if let Some(status) = reap(child)? {
                     return Ok(status);
                 }
                 continue;
             }
-            if !(is_terminal_generated(sig) && from_the_terminal()) {
+            if !child_already_has(sig, origin) {
                 // A child already gone has nobody left to tell; its exit arrives as SIGCHLD.
                 // SAFETY: kill has no memory preconditions.
                 unsafe { libc::kill(child, sig) };
@@ -187,6 +244,52 @@ impl HeldSignals {
     }
 }
 
+// `sigwaitinfo`, which the `libc` crate does not bind for `linux-gnu`. glibc exports it, and it
+// is the only way to read a blocked signal's `si_code` without a handler.
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn sigwaitinfo(set: *const sigset_t, info: *mut libc::siginfo_t) -> c_int;
+}
+
+/// Take the next held signal, with what can be learnt about where it came from.
+///
+/// On Linux `sigwaitinfo` reports a reliable `si_code` for a blocked signal: `SI_KERNEL` for one
+/// the terminal generated, `SI_USER` for a `kill` ([ADR 0026]).
+///
+/// [ADR 0026]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0026-signal-origin-is-readable-on-linux-and-the-kill-target-is-readable-nowhere.md
+#[cfg(target_os = "linux")]
+fn take(set: &sigset_t) -> Option<(c_int, Origin)> {
+    let mut info = MaybeUninit::<libc::siginfo_t>::uninit();
+    // SAFETY: `set` is initialised and every member is blocked; `info` is a valid out-pointer,
+    // read only once sigwaitinfo has filled it.
+    let sig = unsafe { sigwaitinfo(set, info.as_mut_ptr()) };
+    if sig == -1 {
+        return None;
+    }
+    // SAFETY: a successful sigwaitinfo initialised the structure.
+    let code = unsafe { info.assume_init() }.si_code;
+    let origin = if code == libc::SI_KERNEL {
+        Origin::Kernel
+    } else {
+        Origin::Sent
+    };
+    Some((sig, origin))
+}
+
+/// macOS has no `sigwaitinfo`, and `si_code` is `0` there for both a keypress and a `kill`, with
+/// `si_pid` set in both cases — so there is no path, blocked or handled, to a signal's origin
+/// (**named asymmetry #7**). Levelling Linux down to match would mean knowingly dropping a signal
+/// playpen could forward correctly.
+#[cfg(not(target_os = "linux"))]
+fn take(set: &sigset_t) -> Option<(c_int, Origin)> {
+    let mut sig = 0;
+    // SAFETY: `set` is initialised and every member is blocked.
+    if unsafe { libc::sigwait(set, &mut sig) } != 0 {
+        return None;
+    }
+    Some((sig, Origin::Unreadable))
+}
+
 fn caller_ignores(sig: c_int) -> bool {
     let mut current = MaybeUninit::<libc::sigaction>::uninit();
     // SAFETY: a null new action only queries; `current` is a valid out-pointer, read only once
@@ -198,9 +301,12 @@ fn caller_ignores(sig: c_int) -> bool {
 }
 
 /// Whether a terminal-generated signal can have come from the terminal: playpen's group holds the
-/// foreground of its controlling terminal. The terminal then delivered it to the child too. The
-/// signal carries no reliable sign of its sender — on macOS a `kill` and a keypress arrive
-/// alike — so a direct `kill -INT` to a foreground playpen is not forwarded either.
+/// foreground of its controlling terminal, so the terminal would have delivered it to the child
+/// too. A structural proxy, used only where the origin cannot be read ([`Origin::Unreadable`]),
+/// and wrong in two ways there: a direct `kill -INT` to a foreground playpen is not forwarded,
+/// and for `SIGTTIN`/`SIGTTOU` the condition is **inverted**, since a process receiving one is by
+/// definition in a *background* group.
+#[cfg(not(target_os = "linux"))]
 fn from_the_terminal() -> bool {
     // SAFETY: getpgrp has no preconditions.
     let group = unsafe { libc::getpgrp() };
@@ -308,5 +414,43 @@ mod tests {
         assert!(!is_terminal_generated(libc::SIGHUP));
         assert!(!is_terminal_generated(libc::SIGTERM));
         assert!(is_terminal_generated(libc::SIGINT));
+    }
+
+    /// The whole tty-generated set, including the two the old predicate left out and so forwarded
+    /// unconditionally ([ADR 0026]).
+    ///
+    /// [ADR 0026]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0026-signal-origin-is-readable-on-linux-and-the-kill-target-is-readable-nowhere.md
+    #[test]
+    fn the_terminal_generated_set_holds_the_background_stops_too() {
+        for sig in [libc::SIGTTIN, libc::SIGTTOU] {
+            assert!(
+                is_terminal_generated(sig),
+                "signal {sig} is tty-generated and would otherwise be doubled"
+            );
+        }
+    }
+
+    /// A signal the kernel generated for a tty-generated signal reached the child already; one
+    /// someone sent did not, whoever they addressed it to.
+    #[test]
+    fn origin_decides_the_forward_within_the_terminal_generated_set() {
+        assert!(child_already_has(libc::SIGINT, Origin::Kernel));
+        // The case the old predicate dropped: a direct `kill -INT` to a foreground playpen.
+        assert!(!child_already_has(libc::SIGINT, Origin::Sent));
+    }
+
+    /// `SI_KERNEL` does not mean "the process group got it". These are per-process signals the
+    /// kernel generates and the child never received, so suppressing everything kernel-generated
+    /// would swallow them ([ADR 0026]).
+    ///
+    /// [ADR 0026]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0026-signal-origin-is-readable-on-linux-and-the-kill-target-is-readable-nowhere.md
+    #[test]
+    fn a_kernel_generated_per_process_signal_is_still_forwarded() {
+        for sig in [libc::SIGALRM, libc::SIGXCPU, libc::SIGXFSZ] {
+            assert!(
+                !child_already_has(sig, Origin::Kernel),
+                "signal {sig} never reached the child and must be forwarded"
+            );
+        }
     }
 }

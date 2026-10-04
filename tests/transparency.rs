@@ -222,7 +222,8 @@ fn kill_unless_done(done: &AtomicBool, probe: libc::pid_t, spawned: libc::pid_t)
     }
 }
 
-/// The signals the probe's `wait-signal` waits for.
+/// The standard signals the probe's `wait-signal` waits for. It also waits for the first realtime
+/// signal on Linux, which only the doubling test needs.
 const WAITED: [libc::c_int; 5] = [
     libc::SIGHUP,
     libc::SIGINT,
@@ -351,6 +352,91 @@ fn type_keys(master: &OwnedFd, keys: &[u8]) {
     // SAFETY: `keys` is valid for its length.
     let written = unsafe { libc::write(master.as_raw_fd(), keys.as_ptr().cast(), keys.len()) };
     assert_eq!(written, keys.len() as isize, "write to the terminal");
+}
+
+/// **Named asymmetry #7** ([ADR 0026]): signal origin is readable on Linux, so a `kill -INT` sent
+/// straight to playpen while playpen's group holds the terminal's foreground is forwarded. It
+/// arrives as `SI_USER`, where a keypress arrives as `SI_KERNEL`. macOS reports `0` for both and
+/// drops it, which is the asymmetry's live consequence.
+///
+/// [ADR 0026]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0026-signal-origin-is-readable-on-linux-and-the-kill-target-is-readable-nowhere.md
+#[test]
+#[cfg(target_os = "linux")]
+fn a_signal_sent_straight_to_a_foreground_playpen_is_forwarded() {
+    let fx = Fixture::new();
+    let probe = fx.probe();
+    let (master, slave) = pty();
+    let mut command = fx.run(&[probe.to_str().unwrap(), "wait-signal"]);
+    // setsid plus TIOCSCTTY makes playpen's own group the terminal's foreground group, which is
+    // exactly the condition under which the old predicate withheld the forward.
+    with_controlling_terminal(&mut command, &slave);
+    let mut screen = File::from(master.try_clone().expect("dup"));
+    std::thread::spawn(move || std::io::copy(&mut screen, &mut std::io::sink()));
+    let run = Waiting::spawn(command);
+    drop(slave);
+
+    let job = run.child_group();
+    assert_eq!(
+        run.ready["foreground"],
+        json!(job),
+        "the precondition: playpen's job holds the terminal's foreground: {}",
+        run.ready
+    );
+
+    // Addressed to playpen alone, so the only copy the child can get is the forwarded one.
+    run.signal(libc::SIGINT);
+    let (lines, status) = run.finish();
+    assert_eq!(
+        lines,
+        [json!({"signal": libc::SIGINT, "count": 1})],
+        "a sent signal is not a keypress, and withholding it drops it entirely"
+    );
+    assert_eq!(status, Some(0));
+    drop(master);
+}
+
+/// The twelfth **named residual** ([ADR 0026]), pinned by asserting the doubling it causes.
+///
+/// It reads oddly on purpose. A receiver learns a signal's *sender* and never its *target*, so
+/// playpen cannot know the child already holds a copy of a group-directed signal, and the
+/// doubling is unclosable rather than unclosed. This is the only thing that will notice if
+/// someone later closes it with a heuristic — and a silent change in signal delivery surfaces
+/// months later as an agent exiting on one Ctrl-C.
+///
+/// A **realtime** signal, because only its deliveries are queued. A standard signal delivered
+/// twice while the first is still pending arrives once, and playpen's forward races the kernel's
+/// direct copy closely enough that it often does — which would make this assert a coin flip
+/// about *observability* rather than a fact about delivery. The residual itself is open on both
+/// platforms ([spec §18](../docs/spec.md)); macOS has no queued signal to measure it with.
+///
+/// [ADR 0026]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0026-signal-origin-is-readable-on-linux-and-the-kill-target-is-readable-nowhere.md
+#[test]
+#[cfg(target_os = "linux")]
+fn a_signal_addressed_to_the_whole_job_reaches_the_agent_twice() {
+    let fx = Fixture::new();
+    let probe = fx.probe();
+    let mut command = fx.run(&[probe.to_str().unwrap(), "wait-signal"]);
+    // A job of its own, so the kill below reaches playpen and the child and nothing of the suite.
+    command.process_group(0);
+    let run = Waiting::spawn(command);
+    let job = run.pid();
+    assert_eq!(run.child_group(), job, "the child is in playpen's job");
+
+    // Addressed to the whole job: the kernel delivers one copy to the child directly, and playpen
+    // forwards a second. Not tty-generated, so no origin test suppresses it — and `SI_USER` is
+    // what a group kill and a process kill both report, which is the whole point.
+    let queued = libc::SIGRTMIN();
+    // SAFETY: kill has no memory preconditions.
+    assert_eq!(unsafe { libc::kill(-job, queued) }, 0, "kill the job");
+
+    let (lines, status) = run.finish();
+    assert_eq!(
+        lines,
+        [json!({"signal": queued, "count": 2})],
+        "if this now reads 1, the suppression predicate has grown a heuristic that guesses a \
+         signal's target; the kernel does not report one (ADR 0026)"
+    );
+    assert_eq!(status, Some(0));
 }
 
 #[test]

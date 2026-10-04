@@ -30,18 +30,30 @@ enum Action {
     /// Report the identity (device, inode) of descriptors 0, 1 and 2.
     Stdio,
     /// Report this process's id, its group and its terminal's foreground group, then wait for
-    /// one of [`WAITED`] and report it with how many arrived. Two verdicts, one per line.
+    /// one of [`waited`] and report it with how many arrived. Two verdicts, one per line.
     WaitSignal,
 }
 
 /// The signals `wait-signal` waits for: ones whose default action would terminate the probe.
-const WAITED: &[libc::c_int] = &[
-    libc::SIGHUP,
-    libc::SIGINT,
-    libc::SIGTERM,
-    libc::SIGUSR1,
-    libc::SIGUSR2,
-];
+///
+/// On Linux the first realtime signal is waited for too. It is the only one whose deliveries are
+/// **queued** rather than coalesced, so it is the only one that can count a double delivery
+/// exactly — a standard signal delivered twice while still pending arrives once, which would make
+/// the doubling of a group-directed signal unobservable rather than absent
+/// ([ADR 0026](https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0026-signal-origin-is-readable-on-linux-and-the-kill-target-is-readable-nowhere.md)).
+fn waited() -> Vec<libc::c_int> {
+    #[allow(unused_mut)] // extended per platform
+    let mut signals = vec![
+        libc::SIGHUP,
+        libc::SIGINT,
+        libc::SIGTERM,
+        libc::SIGUSR1,
+        libc::SIGUSR2,
+    ];
+    #[cfg(target_os = "linux")]
+    signals.push(libc::SIGRTMIN());
+    signals
+}
 
 fn main() -> ExitCode {
     let Some(actions) = parse(std::env::args().skip(1)) else {
@@ -203,7 +215,7 @@ fn wait_signal() -> ExitCode {
     // SAFETY: a zeroed sigaction is valid; the handler only touches atomics.
     let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
     action.sa_sigaction = record as extern "C" fn(libc::c_int) as libc::sighandler_t;
-    for &sig in WAITED {
+    for sig in waited() {
         // SAFETY: `set` and `action` are initialised; `sig` is a valid signal number.
         if unsafe { libc::sigaddset(&mut set, sig) } != 0
             || unsafe { libc::sigaction(sig, &action, std::ptr::null_mut()) } != 0

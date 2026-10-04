@@ -1075,9 +1075,11 @@ playpen owes this contract to its callers regardless of backend
 - **stdout is sacred**: a run never writes to it. Diagnostics go to stderr.
 - Catchable **signals are forwarded** to the child. The child stays in the caller's process
   group, its job, so a pipeline around playpen keeps the terminal and the terminal's own
-  signals reach the child directly. While playpen's group holds the terminal's foreground, the
-  terminal-generated `SIGINT`, `SIGQUIT`, `SIGTSTP` and `SIGWINCH` are therefore not forwarded
-  again; a job stop stops playpen with the child. A signal the caller ignores stays ignored.
+  signals reach the child directly. A signal sent to playpen therefore **reaches the agent
+  exactly once, where the platform can tell** — which syscall discriminates is a backend matter
+  ([§15.4](#154-named-asymmetries)), and the one case no platform can tell is the twelfth named
+  residual ([§18](#18-named-residuals)). A job stop stops playpen with the child. A signal the
+  caller ignores stays ignored.
   `SIGKILL`, `SIGSTOP`, `SIGCHLD`, `SIGPIPE` and the synchronous fault signals are not
   forwarded. Blocking a fault signal would make a real fault undefined behaviour, so one sent to
   playpen kills the supervisor; **the agent then dies with it on Linux and survives on macOS**
@@ -1421,6 +1423,7 @@ belongs in the transparency suite instead. A `—` in that column means the asym
 | 4 | denial visibility: zero preconditions on macOS, four on Linux. Partly permanent: macOS's channel is certifiable *a priori*, Linux's only *a posteriori* | macOS | `R-trace-denials` (`n/a` on macOS) |
 | 5 | user namespaces (Chromium's nested userns) are Linux's | — | `P-unshare` (`n/a` on macOS) |
 | 6 | the parent-death signal that stops an agent outliving its supervisor. Permanent: after `exec` only a kernel mechanism can do this, and macOS has none. Narrows [§18](#18-named-residuals) item 4 to macOS | Linux | `the_agent_does_not_outlive_a_killed_supervisor`, transparency (`n/a` on macOS) |
+| 7 | signal **origin** is readable: `sigwaitinfo`'s `si_code` is `SI_KERNEL` for a tty keypress and `SI_USER` for a `kill`, where macOS reports `0` for both with `si_pid` set in both. Live consequence: a direct `kill -INT` to a foreground playpen is forwarded on Linux and silently dropped on macOS | Linux | `a_signal_sent_straight_to_a_foreground_playpen_is_forwarded`, transparency (`n/a` on macOS) |
 
 Linux's lack of a mechanism-native Keychain is recorded through `N-keychain` being `n/a` on
 Linux.
@@ -1555,6 +1558,11 @@ change, and it is skipped on hosted CI by policy (`skip.suite.liveness-not-on-ci
 A **named residual** is a reachable surface playpen consciously declines to close. It is written
 down rather than inherited silently.
 
+It is not the same ledger as a **named asymmetry** ([§15.4](#154-named-asymmetries)), and the
+distinction is load-bearing: an asymmetry is open on *one* platform and closable in principle,
+where a residual is open wherever it is open and closed nowhere. Filing one as the other loses
+exactly the information both ledgers exist to carry.
+
 1. **ACP client-side execution.** An ACP client outside the boundary may execute file reads and
    terminal commands on the confined agent's behalf. The client is owner-controlled.
 2. **Network-reachable credential sources.** A cloud metadata endpoint, or a credential service
@@ -1591,6 +1599,17 @@ down rather than inherited silently.
     The filesystem half is bounded, inspectable litter, and removing it would mean running the
     most failure-prone code in playpen on a process that has just declared itself broken — a
     teardown that hangs converts a crash into a hang.
+12. **A group-directed signal reaches the agent twice**, and this one is **unclosable** rather
+    than unclosed. `kill -TERM -<job>` delivers one copy to the agent directly, and playpen
+    forwards a second. A receiver learns a signal's *sender* and never its *target*, so playpen
+    cannot know the agent already holds a copy: a process-directed `kill` and a group-directed one
+    are byte-identical in `siginfo_t`. Comparing the sender's group does not rescue it either — a
+    sibling inside the job sending a direct `kill` must be forwarded, a stranger outside it
+    sending a group kill must not, and either sender can be inside or outside. A doubled `SIGINT`
+    is the one that bites: some agents exit on a second Ctrl-C. Recorded with its reason because
+    it is the entry most likely to be mistaken for a bug, and pinned by a test that asserts the
+    doubling
+    ([ADR 0026](adr/0026-signal-origin-is-readable-on-linux-and-the-kill-target-is-readable-nowhere.md)).
 
 ---
 
