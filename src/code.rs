@@ -10,7 +10,8 @@ use std::fmt;
 macro_rules! registry {
     ($($variant:ident => $code:literal,)*) => {
         /// One stable code. The `refusal.*` codes mean playpen declined to launch; the `broker.*`
-        /// codes mean the broker denied a live agent one request.
+        /// codes mean the broker denied a live agent one request; the `bug.*` codes mean playpen
+        /// reached a state it has no contract for, and are defects rather than outcomes.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         pub enum Code {
             $($variant,)*
@@ -90,6 +91,14 @@ registry! {
     TraceChannelLossy => "refusal.trace.channel-lossy",
     // Broker
     BrokerEndpointDenied => "broker.endpoint.denied",
+    // Faults. Not outcomes a caller can provoke or should handle: each one says playpen is
+    // broken, and the run ends by `SIGABRT` rather than with a status ([ADR 0024]). A separate
+    // prefix, so `R-code-coverage` — which must fail on any `refusal.*` code no suite row
+    // produces — never asks for a row that nothing can provoke.
+    //
+    // [ADR 0024]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0024-a-status-playpen-cannot-learn-is-a-fault-and-not-a-refusal.md
+    BugStatusNoChild => "bug.status.no-child",
+    BugStatusUnreadable => "bug.status.unreadable",
 }
 
 impl fmt::Display for Code {
@@ -114,9 +123,23 @@ mod tests {
         for code in Code::ALL {
             let parts: Vec<_> = code.as_str().split('.').collect();
             assert!(
-                matches!(parts.as_slice(), ["refusal" | "broker", subject, reason]
+                matches!(parts.as_slice(), ["refusal" | "broker" | "bug", subject, reason]
                     if !subject.is_empty() && !reason.is_empty()),
                 "{code} is not <prefix>.<subject>.<reason>"
+            );
+        }
+    }
+
+    /// The release gate enumerates `refusal.*` and must fail on any such code no row produces, so
+    /// a fault's code has to sit outside that prefix ([ADR 0024]).
+    ///
+    /// [ADR 0024]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0024-a-status-playpen-cannot-learn-is-a-fault-and-not-a-refusal.md
+    #[test]
+    fn a_fault_is_never_a_refusal() {
+        for code in [Code::BugStatusNoChild, Code::BugStatusUnreadable] {
+            assert!(
+                code.as_str().starts_with("bug."),
+                "{code} is not in the fault prefix"
             );
         }
     }

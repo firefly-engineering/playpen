@@ -206,7 +206,16 @@ fn run(
     caps.paths.extend(roots);
     record.launch(&caps)?;
     let run = record.id().clone();
-    child::run_confined(&caps, argv, &run, |pid| record.spawned(pid))
+    // Both callbacks write the record, and only one of them ever fires, but the borrow checker
+    // cannot see that from two closures: a cell is cheaper than a seam for it.
+    let record = std::cell::RefCell::new(record);
+    child::run_confined(
+        &caps,
+        argv,
+        &run,
+        |pid| record.borrow_mut().spawned(pid),
+        |fault| record.borrow_mut().fault(fault),
+    )
 }
 
 /// The selected profile's brought roots, canonicalised, as path grants with provenance.

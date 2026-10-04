@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::capability::CapabilitySet;
 use crate::code::Code;
+use crate::fault::Fault;
 use crate::refusal::Refusal;
 
 /// The record format this playpen writes. A reader branches on it before anything else.
@@ -130,11 +131,26 @@ pub struct Record {
     /// The status playpen exited with after the child ran.
     pub status: Option<i32>,
     pub refusal: Option<RecordedRefusal>,
+    /// The fault playpen died of, if it died of one ([ADR 0024]). A field of its own rather than
+    /// reuse of `refusal`, because `explain --run` reads it back out and a surface whose job is to
+    /// state facts must not report a crash as a refusal. Additive, so a record written before this
+    /// field existed still reads: it simply held no fault.
+    ///
+    /// [ADR 0024]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0024-a-status-playpen-cannot-learn-is-a-fault-and-not-a-refusal.md
+    #[serde(default)]
+    pub fault: Option<RecordedFault>,
 }
 
 /// A refusal as recorded: the stable code and the human sentence beside it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordedRefusal {
+    pub code: String,
+    pub message: String,
+}
+
+/// A fault as recorded, in the same shape as a refusal: the stable code and the sentence beside it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordedFault {
     pub code: String,
     pub message: String,
 }
@@ -172,6 +188,7 @@ impl RunRecord {
             ended_at_unix_ms: None,
             status: None,
             refusal: None,
+            fault: None,
         };
         // Staged whole, then linked into place: a reader never sees half of one, and a link
         // that exists already is a collision, which refuses rather than overwrites another run.
@@ -248,6 +265,19 @@ impl RunRecord {
         self.record.refusal = Some(RecordedRefusal {
             code: refusal.code.to_string(),
             message: refusal.message().to_string(),
+        });
+        self.end();
+    }
+
+    /// Record the fault playpen is about to abort on ([ADR 0024]). The agent has already been
+    /// killed, so the end time this writes is true. playpen is dying either way, so a failure to
+    /// write is dropped; the fault line still carries the code.
+    ///
+    /// [ADR 0024]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0024-a-status-playpen-cannot-learn-is-a-fault-and-not-a-refusal.md
+    pub fn fault(&mut self, fault: &Fault) {
+        self.record.fault = Some(RecordedFault {
+            code: fault.code.to_string(),
+            message: fault.message().to_string(),
         });
         self.end();
     }
@@ -518,6 +548,47 @@ mod tests {
             })
         );
         assert!(stored.ended_at_unix_ms >= Some(stored.started_at_unix_ms));
+    }
+
+    /// A fault is recorded in a field of its own, so `explain` can state a crash as a crash
+    /// rather than as a refusal ([ADR 0024]).
+    ///
+    /// [ADR 0024]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0024-a-status-playpen-cannot-learn-is-a-fault-and-not-a-refusal.md
+    #[test]
+    fn a_fault_is_recorded_apart_from_a_refusal() {
+        let state = tempfile::TempDir::new().expect("state");
+        let id = RunId::allocate().expect("id");
+        let mut record = RunRecord::open(&id, Some(state.path())).expect("open");
+        record.fault(&Fault::new(
+            Code::BugStatusNoChild,
+            "cannot learn the status of agent 42",
+        ));
+        let stored = read_back(&record);
+        assert_eq!(
+            stored.fault,
+            Some(RecordedFault {
+                code: "bug.status.no-child".into(),
+                message: "cannot learn the status of agent 42".into(),
+            })
+        );
+        assert_eq!(stored.refusal, None, "a fault is not a refusal");
+        assert!(stored.ended_at_unix_ms >= Some(stored.started_at_unix_ms));
+    }
+
+    /// The field is additive, so a record written before it existed still reads ([ADR 0024]).
+    ///
+    /// [ADR 0024]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0024-a-status-playpen-cannot-learn-is-a-fault-and-not-a-refusal.md
+    #[test]
+    fn a_record_written_without_a_fault_field_still_reads() {
+        let without = format!(
+            r#"{{"format": {FORMAT}, "run": "{}", "started_at_unix_ms": 1, "kind": null,
+                 "policy": null, "profile": null, "capabilities": null,
+                 "launched_at_unix_ms": null, "pid": null, "ended_at_unix_ms": null,
+                 "status": null, "refusal": null}}"#,
+            id_at(1)
+        );
+        let record = decode(without.as_bytes()).expect("an older record reads");
+        assert_eq!(record.fault, None);
     }
 
     #[test]

@@ -17,6 +17,7 @@ use std::mem::MaybeUninit;
 use libc::{c_int, pid_t, sigset_t};
 
 use crate::code::Code;
+use crate::fault::Fault;
 use crate::refusal::Refusal;
 
 /// The signals forwarded to the child. Excluded: the uncatchable `SIGKILL` and `SIGSTOP`;
@@ -145,7 +146,12 @@ impl HeldSignals {
 
     /// Supervise `child` until it exits: forward signals, stop with it as a job, and return the
     /// status playpen exits with — the child's own, or `128+N` when it died by signal N.
-    pub fn supervise(&self, child: pid_t) -> Result<i32, Refusal> {
+    ///
+    /// The error is a [`Fault`] rather than a refusal: by the time this is supervising, the child
+    /// has run, so there is no honest way to say it did not ([ADR 0024]).
+    ///
+    /// [ADR 0024]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0024-a-status-playpen-cannot-learn-is-a-fault-and-not-a-refusal.md
+    pub fn supervise(&self, child: pid_t) -> Result<i32, Fault> {
         loop {
             let mut sig = 0;
             // SAFETY: `self.set` is initialised and every member is blocked.
@@ -211,7 +217,13 @@ fn setup_refusal(call: &str, err: std::io::Error) -> Refusal {
 }
 
 /// Collect `child` if it has exited.
-fn reap(child: pid_t) -> Result<Option<i32>, Refusal> {
+///
+/// A `waitpid` that fails is a **fault** and never a refusal ([ADR 0024]): the child has run by
+/// now, perhaps for hours, so `125` — "playpen did not run the agent" — would be a lie. On our own
+/// unreaped child the call can realistically fail only with `EINTR`, which is retried below.
+///
+/// [ADR 0024]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0024-a-status-playpen-cannot-learn-is-a-fault-and-not-a-refusal.md
+fn reap(child: pid_t) -> Result<Option<i32>, Fault> {
     loop {
         let mut status = 0;
         // SAFETY: `status` is a valid out-pointer for the duration of the call.
@@ -220,16 +232,27 @@ fn reap(child: pid_t) -> Result<Option<i32>, Refusal> {
             -1 => {
                 let err = std::io::Error::last_os_error();
                 if err.kind() != std::io::ErrorKind::Interrupted {
-                    return Err(Refusal::new(
-                        Code::ProcessWait,
-                        format!("waitpid failed: {err}"),
-                    ));
+                    return Err(wait_fault(child, err));
                 }
             }
             _ if libc::WIFSIGNALED(status) => return Ok(Some(128 + libc::WTERMSIG(status))),
             _ => return Ok(Some(libc::WEXITSTATUS(status))),
         }
     }
+}
+
+/// The fault a failed `waitpid` on the agent is. `ECHILD` means the kernel has no such child of
+/// ours, so something reaped it behind the supervisor's back; anything else means the call itself
+/// is wrong, which is a different defect and so a different code.
+fn wait_fault(child: pid_t, err: std::io::Error) -> Fault {
+    let code = match err.raw_os_error() {
+        Some(libc::ECHILD) => Code::BugStatusNoChild,
+        _ => Code::BugStatusUnreadable,
+    };
+    Fault::new(
+        code,
+        format!("cannot learn the status of agent {child}: waitpid failed: {err}"),
+    )
 }
 
 #[cfg(test)]
@@ -250,6 +273,25 @@ mod tests {
         for sig in [libc::SIGHUP, libc::SIGINT, libc::SIGTERM, libc::SIGQUIT] {
             assert!(signals.contains(&sig), "signal {sig} is not forwarded");
         }
+    }
+
+    /// Nothing can provoke a failed `waitpid` on our own unreaped child, so the test covers the
+    /// branch rather than the condition ([ADR 0024]).
+    ///
+    /// [ADR 0024]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0024-a-status-playpen-cannot-learn-is-a-fault-and-not-a-refusal.md
+    #[test]
+    fn a_failed_wait_is_a_fault_naming_why() {
+        let fault = |errno| wait_fault(4242, std::io::Error::from_raw_os_error(errno));
+        // Something reaped the agent behind the supervisor's back.
+        assert_eq!(fault(libc::ECHILD).code, Code::BugStatusNoChild);
+        // The call itself is wrong, which is a different defect.
+        assert_eq!(fault(libc::EINVAL).code, Code::BugStatusUnreadable);
+        assert!(
+            fault(libc::ECHILD).message().contains("4242"),
+            "the fault names the agent"
+        );
+        // Never a refusal: the agent has run, so `125` would say it had not.
+        assert!(!fault(libc::ECHILD).code.as_str().starts_with("refusal."));
     }
 
     #[test]

@@ -13,6 +13,7 @@ use std::process::Command;
 use crate::backend;
 use crate::capability::CapabilitySet;
 use crate::code::Code;
+use crate::fault::Fault;
 use crate::record::RunId;
 use crate::refusal::{EXIT_REFUSED, Refusal};
 use crate::supervisor::HeldSignals;
@@ -21,13 +22,20 @@ use crate::supervisor::HeldSignals;
 /// `on_exec` receives the child's pid once the target has been `exec`ed. Returns the status the
 /// supervisor exits with. `run` names the run on a refusal line the child has to write itself.
 ///
+/// `on_fault` records a fault, and is called only on the path that then aborts ([ADR 0024]): once
+/// the agent has run, a status playpen cannot learn is a defect rather than a refusal, so this
+/// never returns an error for it. Both callbacks write the run's record, which the caller owns.
+///
 /// The supervisor must still be single-threaded here: the child allocates between `fork` and
 /// `exec`, which is sound only when no other thread can hold the allocator's lock.
+///
+/// [ADR 0024]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0024-a-status-playpen-cannot-learn-is-a-fault-and-not-a-refusal.md
 pub fn run_confined(
     caps: &CapabilitySet,
     argv: &[OsString],
     run: &RunId,
     on_exec: impl FnOnce(libc::pid_t),
+    on_fault: impl FnOnce(&Fault),
 ) -> Result<i32, Refusal> {
     let (target, args) = argv
         .split_first()
@@ -43,7 +51,12 @@ pub fn run_confined(
     match started {
         Started::Exec(pid) => {
             on_exec(pid);
-            held.supervise(pid)
+            match held.supervise(pid) {
+                Ok(status) => Ok(status),
+                // The agent has run and its status is unknowable, so there is nothing to return:
+                // playpen states the fault, kills the agent, records it and dies.
+                Err(fault) => fault.abort(run, pid, on_fault),
+            }
         }
         Started::Refused(refusal) => Err(refusal),
     }

@@ -1081,13 +1081,21 @@ playpen owes this contract to its callers regardless of backend
   `SIGKILL`, `SIGSTOP`, `SIGCHLD`, `SIGPIPE` and the synchronous fault signals are not
   forwarded.
 - playpen **exits with the child's status**, and with `128+N` when the child dies by signal.
+- **A status playpen cannot learn is a fault**, which is the third outcome and not a status
+  ([ADR 0024](adr/0024-a-status-playpen-cannot-learn-is-a-fault-and-not-a-refusal.md)). playpen
+  states on stderr, under a `bug.*` code, that it cannot tell; kills the agent, so the outcome is
+  at least deterministic; records it; and dies by `SIGABRT`. A caller reads a signal death as a
+  crash, where every ordinary status is one the agent might have returned. It is a defect rather
+  than a contract case: nothing a caller does can provoke one.
 - There is **no mode flag**. The same behaviour is correct for a TUI, for ACP's JSON-RPC over
   stdio, and for piped or CI use, and playpen does not know which it is in.
 - **Path identity.** Every path visible inside is the same absolute path outside. playpen
   confines and never remaps, and this is what keeps ACP's absolute paths, error messages and
   the manifest truthful on both sides.
-- **Exit `125`** is reserved for "playpen did not run the agent". Every backend failure is
-  translated into it.
+- **Exit `125`** is reserved for "playpen did not run the agent", and means strictly that: it is
+  unreachable once the agent has been `exec`ed. Every backend failure *that refuses the launch* is
+  translated into it; a failure after the agent has run is a fault, since `125` would then say the
+  agent never ran when it did.
 
 ### 11.7 Self-integrity
 
@@ -1225,7 +1233,9 @@ for it
 
 A run id is a ULID, so ids sort by the time their run started. The record is one JSON document
 per run, carrying its own format version, and holds the refusal's code and sentence when the run
-refused.
+refused. A **fault** is held apart from a refusal, in a field of its own
+([ADR 0024](adr/0024-a-status-playpen-cannot-learn-is-a-fault-and-not-a-refusal.md)): `explain`
+reads it back out, and a surface whose job is to state facts must not report a crash as a refusal.
 
 ### 14.2 `playpen explain`
 
@@ -1556,6 +1566,13 @@ down rather than inherited silently.
 10. **Unix-socket credential oracles on Linux below Landlock ABI 9.** `ssh-agent`, `gpg-agent` and
     kindred sockets are reachable if their path is known. Recorded outward only
     ([§6.3](#63-credential-oracles)); the residual closes as kernels move.
+11. **The run scratch and `ephemeral` areas a fault leaves on disk.** A run that ends by `SIGABRT`
+    ([§11.6](#116-process-transparency)) runs no teardown. The credential half needs none: the
+    proxy is hosted in the supervisor rather than detached, so process death *is* the credential
+    teardown ([ADR 0013](adr/0013-the-proxy-is-the-supervisors-and-the-two-confinements-are-independent.md)).
+    The filesystem half is bounded, inspectable litter, and removing it would mean running the
+    most failure-prone code in playpen on a process that has just declared itself broken — a
+    teardown that hangs converts a crash into a hang.
 
 ---
 
@@ -1640,6 +1657,13 @@ The registry is closed and versioned. **Codes marked † were minted by a ticket
 named here** from refusals the record describes in prose ([Appendix C](#appendix-c--assembly-choices),
 item C1). "Tier" is when the refusal can fire ([§10.5](#105-validation-tiers)).
 
+One namespace, **three prefixes**: `refusal.*` for a refusal, `broker.*` for a broker denial, and
+`bug.*` for a fault ([§11.6](#116-process-transparency)). Neither of the last two has a tier: a
+broker denial fires against a live agent, and a fault at no validation point at all. Only
+`refusal.*` is bound by `R-code-coverage`'s requirement that every code have a producing row
+([§17.2](#172-rows)) — a fault cannot be provoked by one, which is why it is a separate prefix
+rather than a `refusal.*` code needing an exemption from the gate.
+
 ### Policy
 
 | Code | Tier | Fires when |
@@ -1693,7 +1717,7 @@ item C1). "Tier" is when the refusal can fire ([§10.5](#105-validation-tiers)).
 | `refusal.state.collision` | coherence | a share entry names the kind's instruction entry point and the kind has no import mechanism |
 | `refusal.state.io` | launch | playpen cannot create its own state: run scratch, an area, the manifest, the record or the lock file |
 | `refusal.process.fork` † | launch | the supervisor could not fork the child |
-| `refusal.process.wait` † | launch | the supervisor could not wait for the child |
+| `refusal.process.wait` † | launch | playpen could not wait for the floor self-test's throwaway canary, which is its one caller: a wait that fails after the agent has been `exec`ed is a fault, not a refusal ([ADR 0024](adr/0024-a-status-playpen-cannot-learn-is-a-fault-and-not-a-refusal.md)) |
 
 ### Mechanism
 
@@ -1733,6 +1757,17 @@ These fire before launch and refuse the `--trace-denials` flag, not the run.
 | Code | Fires when |
 |---|---|
 | `broker.endpoint.denied` † | no endpoint rule matched; no upstream leg occurred. Minted as `egress.endpoint.denied` and renamed by ADR 0020 |
+
+### Faults
+
+Not outcomes, and not provokable: each says playpen is broken, and the run ends by `SIGABRT`
+rather than with a status ([§11.6](#116-process-transparency)). A code rather than a bare message
+because §14.3's rule holds here too — a caller meeting a crash should be able to branch on *why*.
+
+| Code | Fires when |
+|---|---|
+| `bug.status.no-child` † | the supervisor's wait for the agent failed with `ECHILD`: something reaped it behind playpen's back |
+| `bug.status.unreadable` † | that wait failed for any other reason, which means the call itself was wrong |
 
 **Deliberately absent:** `refusal.flag.*` was never minted, and `required` was dropped
 ([#27](https://github.com/firefly-engineering/playpen/issues/27)). There is no

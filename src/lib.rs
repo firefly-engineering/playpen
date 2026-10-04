@@ -5,6 +5,7 @@ pub mod capability;
 pub mod child;
 pub mod code;
 pub mod explain;
+pub mod fault;
 pub mod floor;
 pub mod launch;
 pub mod mechanism;

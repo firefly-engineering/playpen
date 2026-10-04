@@ -98,6 +98,19 @@ fn render_run(record: &Record, out: &mut impl Write) -> io::Result<()> {
                     .map(|r| format!("{}: {}", r.code, r.message)),
             ),
         ),
+        // A crash is not a refusal, and a surface whose job is to state facts must not report it
+        // as one ([ADR 0024]).
+        //
+        // [ADR 0024]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0024-a-status-playpen-cannot-learn-is-a-fault-and-not-a-refusal.md
+        (
+            "fault",
+            known(
+                record
+                    .fault
+                    .as_ref()
+                    .map(|f| format!("{}: {}", f.code, f.message)),
+            ),
+        ),
     ];
     for (name, value) in fields {
         writeln!(out, "{name:<9} {}", OneLine(&value))?;
@@ -131,11 +144,13 @@ fn render_run(record: &Record, out: &mut impl Write) -> io::Result<()> {
 
 /// One line per run: its id, when it started, the kind and profile, and how it ended.
 fn render_summary(record: &Record, out: &mut impl Write) -> io::Result<()> {
-    let outcome = match (&record.refusal, record.status) {
-        (Some(refusal), _) => refusal.code.clone(),
-        (None, Some(status)) => format!("status {status}"),
+    // A fault first: a run that both ran and crashed has a status that means nothing.
+    let outcome = match (&record.fault, &record.refusal, record.status) {
+        (Some(fault), ..) => fault.code.clone(),
+        (None, Some(refusal), _) => refusal.code.clone(),
+        (None, None, Some(status)) => format!("status {status}"),
         // Running, or its playpen died before it could finish the record.
-        (None, None) => "unfinished".to_string(),
+        (None, None, None) => "unfinished".to_string(),
     };
     let line = format!(
         "{}  {}  {}  {}  {outcome}",
