@@ -18,6 +18,13 @@ enum Action {
     Read(String),
     /// Create or truncate the path and write a byte to it.
     Write(String),
+    /// List the directory at the path.
+    List(String),
+    /// Read an inherited descriptor to the end, without opening anything.
+    ReadFd(libc::c_int),
+    /// Look the Mach service up by name in the bootstrap namespace.
+    #[cfg(target_os = "macos")]
+    LookUp(String),
     /// List the descriptors above stderr held by this process.
     Fds,
     /// Report the identity (device, inode) of descriptors 0, 1 and 2.
@@ -39,7 +46,7 @@ const WAITED: &[libc::c_int] = &[
 fn main() -> ExitCode {
     let Some(actions) = parse(std::env::args().skip(1)) else {
         eprintln!(
-            "usage: playpen-probe (read <path> | write <path> | fds | stdio)... | playpen-probe wait-signal"
+            "usage: playpen-probe (read <path> | write <path> | list <path> | read-fd <fd> | look-up <service> (macOS) | fds | stdio)... | playpen-probe wait-signal"
         );
         return ExitCode::from(2);
     };
@@ -61,6 +68,10 @@ fn parse(args: impl IntoIterator<Item = String>) -> Option<Vec<Action>> {
         actions.push(match verb.as_str() {
             "read" => Action::Read(args.next()?),
             "write" => Action::Write(args.next()?),
+            "list" => Action::List(args.next()?),
+            "read-fd" => Action::ReadFd(args.next()?.parse().ok()?),
+            #[cfg(target_os = "macos")]
+            "look-up" => Action::LookUp(args.next()?),
             "fds" => Action::Fds,
             "stdio" => Action::Stdio,
             "wait-signal" => Action::WaitSignal,
@@ -88,6 +99,12 @@ fn verdict(action: &Action) -> String {
                 .open(path)
                 .and_then(|mut f| f.write_all(b"x")),
         ),
+        Action::List(path) => io_verdict(
+            std::fs::read_dir(path).and_then(|entries| entries.collect::<Result<Vec<_>, _>>()),
+        ),
+        Action::ReadFd(fd) => io_verdict(read_fd(*fd)),
+        #[cfg(target_os = "macos")]
+        Action::LookUp(service) => look_up(service),
         Action::Fds => {
             let fds: Vec<String> = held_fds().iter().map(|fd| fd.to_string()).collect();
             format!(r#"{{"fds":[{}]}}"#, fds.join(","))
@@ -103,6 +120,50 @@ fn verdict(action: &Action) -> String {
         }
         Action::WaitSignal => unreachable!("wait-signal writes its own verdicts"),
     }
+}
+
+/// Read `fd` to the end with `read(2)` itself: wrapping a descriptor that may be closed in a
+/// `File` would assert an ownership the probe cannot know it has.
+fn read_fd(fd: libc::c_int) -> std::io::Result<()> {
+    let mut buf = [0u8; 4096];
+    loop {
+        // SAFETY: `buf` is valid for writes of its length; `read` fails cleanly with EBADF on a
+        // descriptor that is not open.
+        match unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) } {
+            0 => return Ok(()),
+            -1 => {
+                let err = std::io::Error::last_os_error();
+                if err.kind() != ErrorKind::Interrupted {
+                    return Err(err);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A bootstrap lookup reports through its `kern_return_t`, never `errno`: a sandbox denial is
+/// `BOOTSTRAP_NOT_PRIVILEGED`, which stays distinct from `BOOTSTRAP_UNKNOWN_SERVICE`.
+#[cfg(target_os = "macos")]
+fn look_up(service: &str) -> String {
+    use mach2::bootstrap::{bootstrap_look_up, bootstrap_port};
+    use mach2::kern_return::KERN_SUCCESS;
+    use mach2::mach_port::mach_port_deallocate;
+    use mach2::traps::mach_task_self;
+
+    let Ok(name) = std::ffi::CString::new(service) else {
+        return r#"{"ok":false}"#.to_string();
+    };
+    let mut port = 0;
+    // SAFETY: `bootstrap_port` is libSystem's, initialised before `main`; `name` is a C string
+    // and `port` a valid out-pointer for the duration of the call.
+    let kr = unsafe { bootstrap_look_up(bootstrap_port, name.as_ptr(), &mut port) };
+    if kr != KERN_SUCCESS {
+        return format!(r#"{{"ok":false,"kr":{kr}}}"#);
+    }
+    // SAFETY: the lookup gave this task a send right to `port`, which nothing else uses.
+    unsafe { mach_port_deallocate(mach_task_self(), port) };
+    r#"{"ok":true}"#.to_string()
 }
 
 /// The (device, inode) of an open descriptor, which names the object behind it.

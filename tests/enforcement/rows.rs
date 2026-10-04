@@ -3,7 +3,12 @@
 //!
 //! [spec §17.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#172-rows
 
-use crate::row::{Action, BOTH, Class, Decision, Expected, Fixture, Row, Target};
+use playpen::code::Code;
+
+use crate::row::{
+    Action, Asymmetry, BOTH, Class, Decision, Expected, Fixture, Invocation, Os, Platform, Row,
+    Scope, Services, Target,
+};
 
 pub const ROWS: &[Row] = &[
     // On macOS this cannot yet catch a floor whose content regressed:
@@ -31,6 +36,63 @@ pub const ROWS: &[Row] = &[
         expected: Expected::Denial,
         from: &[Decision::Adr(6), Decision::Adr(16), Decision::Issue(53)],
     },
+    Row {
+        id: "N-ssh-config",
+        class: Class::Negative,
+        platform: BOTH,
+        fixture: Fixture::ProbeRoot,
+        action: Action::Read(Target::SshConfig),
+        expected: Expected::Denial,
+        from: &[Decision::Adr(6), Decision::Adr(16), Decision::Issue(54)],
+    },
+    Row {
+        id: "N-aws",
+        class: Class::Negative,
+        platform: BOTH,
+        fixture: Fixture::ProbeRoot,
+        action: Action::List(Target::Aws),
+        expected: Expected::Denial,
+        from: &[Decision::Adr(6), Decision::Adr(16), Decision::Issue(54)],
+    },
+    Row {
+        id: "N-npmrc",
+        class: Class::Negative,
+        platform: BOTH,
+        fixture: Fixture::ProbeRoot,
+        action: Action::Read(Target::Npmrc),
+        expected: Expected::Denial,
+        from: &[Decision::Adr(6), Decision::Adr(16), Decision::Issue(54)],
+    },
+    Row {
+        id: "N-hosttemp",
+        class: Class::Negative,
+        platform: BOTH,
+        fixture: Fixture::ProbeRoot,
+        action: Action::Read(Target::HostTemp),
+        expected: Expected::Denial,
+        from: &[Decision::Adr(6), Decision::Adr(16), Decision::Issue(54)],
+    },
+    Row {
+        id: "N-keychain",
+        class: Class::Negative,
+        platform: Platform {
+            scope: Scope::Only(Os::MacOs, Asymmetry::Keychain),
+            ..BOTH
+        },
+        fixture: Fixture::ProbeRoot,
+        action: Action::LookUp(Services::Keychain),
+        expected: Expected::Denial,
+        from: &[Decision::Adr(6), Decision::Adr(16), Decision::Issue(54)],
+    },
+    Row {
+        id: "N-fd",
+        class: Class::Negative,
+        platform: BOTH,
+        fixture: Fixture::ProbeRoot,
+        action: Action::ReadInherited,
+        expected: Expected::Closed,
+        from: &[Decision::Adr(6), Decision::Adr(16), Decision::Issue(54)],
+    },
     // The file does not exist yet, so a mechanism that hid the directory rather than denying it
     // would answer `ENOENT`: the sharpest instance of the law.
     Row {
@@ -41,5 +103,14 @@ pub const ROWS: &[Row] = &[
         action: Action::Create(Target::DecoyDir),
         expected: Expected::Denial,
         from: &[Decision::Adr(7), Decision::Adr(16), Decision::Issue(53)],
+    },
+    Row {
+        id: "R-record",
+        class: Class::Refusal,
+        platform: BOTH,
+        fixture: Fixture::Outside,
+        action: Action::Refuse(Invocation::Usage),
+        expected: Expected::Recorded(Code::InvocationUsage),
+        from: &[Decision::Adr(7), Decision::Adr(16), Decision::Issue(54)],
     },
 ];

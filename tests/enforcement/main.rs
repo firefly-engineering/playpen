@@ -17,9 +17,10 @@ mod run;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use playpen::code::Code;
 use row::{
-    Action, Asymmetry, BOTH, Class, Expected, Fixture, Os, Outcome, Platform, Row, Scope, Seen,
-    Target, Verdict, judge,
+    Action, Asymmetry, BOTH, Cause, Class, Declined, Expected, Fixture, Os, Outcome, Platform, Row,
+    Scope, Seen, Target, Verdict, judge, judge_refusal,
 };
 use rows::ROWS;
 
@@ -47,8 +48,20 @@ fn main() {
             a_negative_passes_only_on_a_denial_errno,
         ),
         (
+            "a_mach_negative_passes_only_when_the_lookup_is_not_privileged",
+            a_mach_negative_passes_only_when_the_lookup_is_not_privileged,
+        ),
+        (
+            "a_closed_descriptor_negative_passes_only_on_ebadf",
+            a_closed_descriptor_negative_passes_only_on_ebadf,
+        ),
+        (
             "a_positive_that_fails_outside_is_a_setup_failure",
             a_positive_that_fails_outside_is_a_setup_failure,
+        ),
+        (
+            "a_recorded_refusal_needs_the_exit_the_code_and_the_record",
+            a_recorded_refusal_needs_the_exit_the_code_and_the_record,
         ),
         (
             "a_row_scoped_to_the_other_platform_is_na_and_never_runs",
@@ -102,7 +115,7 @@ fn every_action_runs_under_its_rows_fixture() {
 
 fn failed(errno: i32) -> Seen {
     Seen::Failed {
-        errno: Some(errno),
+        cause: Some(Cause::Errno(errno)),
         detail: format!("errno {errno}"),
     }
 }
@@ -133,11 +146,98 @@ fn a_negative_passes_only_on_a_denial_errno() {
     }
 }
 
+/// A sandbox denies a lookup as not privileged; an unknown service is what absence reads as, so
+/// it fails the row as `ENOENT` does. On Linux no lookup is a denial.
+fn a_mach_negative_passes_only_when_the_lookup_is_not_privileged() {
+    let looked_up = |kr: i32| Seen::Failed {
+        cause: Some(Cause::Bootstrap(kr)),
+        detail: format!("kr {kr}"),
+    };
+    #[cfg(target_os = "macos")]
+    {
+        use mach2::bootstrap::{BOOTSTRAP_NOT_PRIVILEGED, BOOTSTRAP_UNKNOWN_SERVICE};
+        let inside = looked_up(BOOTSTRAP_NOT_PRIVILEGED);
+        assert_eq!(
+            judge(Expected::Denial, &Seen::Succeeded, &inside),
+            Verdict::Pass
+        );
+        let verdict = judge(
+            Expected::Denial,
+            &Seen::Succeeded,
+            &looked_up(BOOTSTRAP_UNKNOWN_SERVICE),
+        );
+        assert!(matches!(verdict, Verdict::Fail(_)), "{verdict:?}");
+    }
+    // The errno that shares the number never stands in for the kern_return_t.
+    let verdict = judge(Expected::Denial, &Seen::Succeeded, &looked_up(libc::EPERM));
+    assert!(matches!(verdict, Verdict::Fail(_)), "{verdict:?}");
+}
+
+fn a_closed_descriptor_negative_passes_only_on_ebadf() {
+    assert_eq!(
+        judge(Expected::Closed, &Seen::Succeeded, &failed(libc::EBADF)),
+        Verdict::Pass
+    );
+    // A kernel denial is not playpen closing the descriptor.
+    for inside in [Seen::Succeeded, failed(common::DENIAL_ERRNOS[0])] {
+        let verdict = judge(Expected::Closed, &Seen::Succeeded, &inside);
+        assert!(matches!(verdict, Verdict::Fail(_)), "{verdict:?}");
+    }
+    let verdict = judge(Expected::Closed, &failed(libc::EBADF), &failed(libc::EBADF));
+    assert!(matches!(verdict, Verdict::Setup(_)), "{verdict:?}");
+}
+
 fn a_positive_that_fails_outside_is_a_setup_failure() {
     let verdict = judge(Expected::Succeeds, &failed(libc::EPERM), &Seen::Succeeded);
     assert!(matches!(verdict, Verdict::Setup(_)), "{verdict:?}");
     let verdict = judge(Expected::Succeeds, &Seen::Succeeded, &failed(libc::EPERM));
     assert!(matches!(verdict, Verdict::Fail(_)), "{verdict:?}");
+}
+
+fn a_recorded_refusal_needs_the_exit_the_code_and_the_record() {
+    let code = Code::InvocationUsage;
+    let expected = Expected::Recorded(code);
+    let declined = Declined {
+        status: Some(playpen::refusal::EXIT_REFUSED),
+        line: Some((code.to_string(), "01J9".into())),
+        recorded: Some(Some(code.to_string())),
+        detail: String::new(),
+    };
+    assert_eq!(judge_refusal(expected, &declined), Verdict::Pass);
+    let other = Code::KindUnknown.to_string();
+    for broken in [
+        // A run that launched leaves a record too.
+        Declined {
+            status: Some(0),
+            ..declined.clone()
+        },
+        Declined {
+            line: None,
+            ..declined.clone()
+        },
+        Declined {
+            line: Some((other.clone(), "01J9".into())),
+            ..declined.clone()
+        },
+        Declined {
+            recorded: None,
+            ..declined.clone()
+        },
+        Declined {
+            recorded: Some(None),
+            ..declined.clone()
+        },
+        Declined {
+            recorded: Some(Some(other)),
+            ..declined.clone()
+        },
+    ] {
+        let verdict = judge_refusal(expected, &broken);
+        assert!(
+            matches!(verdict, Verdict::Fail(_)),
+            "{broken:?}: {verdict:?}"
+        );
+    }
 }
 
 /// Under a home that does not exist the row could only be a setup failure if it ran, so `n/a` is

@@ -6,6 +6,9 @@
 
 use std::fmt;
 
+use playpen::code::Code;
+use playpen::refusal::EXIT_REFUSED;
+
 use crate::common::DENIAL_ERRNOS;
 
 /// One assertion of the suite.
@@ -21,7 +24,7 @@ pub struct Row {
     pub from: &'static [Decision],
 }
 
-/// The refusal class, asserted from outside with no sandbox at all, arrives with its first row.
+/// What a row asserts, and from where.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Class {
     /// From inside, the action must fail with a denial.
@@ -29,6 +32,9 @@ pub enum Class {
     /// From inside, the action must succeed. Admissible only if the regression it catches is
     /// silent.
     Positive,
+    /// From outside, with no sandbox at all: playpen declines to launch, with exit `125` and a
+    /// code.
+    Refusal,
 }
 
 /// Where a row applies, and what it needs of the host there.
@@ -94,6 +100,9 @@ ledger! {
     CompiledProfileCeiling => "the compiled-profile ceiling",
     DenialVisibility => "denial visibility",
     UserNamespaces => "user namespaces",
+    // Recorded beneath the ledger's table rather than numbered in it: Linux has no
+    // mechanism-native Keychain, so `N-keychain` is `n/a` there.
+    Keychain => "a mechanism-native Keychain",
 }
 
 /// A host precondition a row needs, each probed explicitly and skipping by its own stable name
@@ -122,6 +131,9 @@ pub enum Fixture {
     /// A policy document whose one profile grants a single read-only root holding the probe, so
     /// every negative made under it reads "unreachable even with the probe's root present".
     ProbeRoot,
+    /// No sandbox at all: playpen is invoked so that it declines to launch, under a state
+    /// directory of the row's own.
+    Outside,
 }
 
 /// The closed set of checks.
@@ -135,43 +147,102 @@ pub enum Action {
     Read(Target),
     /// The probe creates a file that does not exist yet inside the target directory.
     Create(Target),
+    /// The probe lists the target directory: what reading a directory means.
+    List(Target),
+    /// The probe reads to the end a descriptor it inherited, open on a decoy credential: the
+    /// same open file outside, and passed to playpen inside ([spec §8.7]).
+    ///
+    /// [spec §8.7]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#87-file-descriptors
+    ReadInherited,
+    /// The probe looks up each of the services by name in its bootstrap namespace (macOS).
+    LookUp(Services),
+    /// playpen is invoked so that it refuses, and leaves what it leaves behind.
+    Refuse(Invocation),
 }
 
 impl Action {
     /// The only fixture this action can run under: the canary admits no grant beside the floor,
-    /// and everything else needs the probe's root.
+    /// a refusal admits no sandbox at all, and everything else needs the probe's root.
     pub fn fixture(self) -> Fixture {
         match self {
             Action::Canary => Fixture::BareFloor,
-            Action::Read(_) | Action::Create(_) => Fixture::ProbeRoot,
+            Action::Read(_)
+            | Action::Create(_)
+            | Action::List(_)
+            | Action::ReadInherited
+            | Action::LookUp(_) => Fixture::ProbeRoot,
+            Action::Refuse(_) => Fixture::Outside,
         }
     }
 }
 
-/// A path the fixture establishes outside before the row runs.
+/// Paths the fixture establishes outside before the row runs. A credential the host lacks is
+/// replaced by a decoy at its real path, so the row exercises the same path resolution on a
+/// fresh runner; a decoy is removed when the row is done.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
     /// A private key `~/.ssh/id_*`: the host's own if it has one, else a decoy created there.
     SshKey,
+    /// `~/.ssh/config`.
+    SshConfig,
+    /// The `~/.aws` directory; its decoy is empty.
+    Aws,
+    /// `~/.npmrc`.
+    Npmrc,
+    /// A fresh decoy file in each of the host's temp directories: `/tmp`, `/var/tmp`, and on
+    /// macOS the per-user `/var/folders/…` directory that `confstr` reports.
+    HostTemp,
     /// A fresh directory outside every grant.
     DecoyDir,
+}
+
+/// Mach services, named by what they serve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Services {
+    /// The Keychain's: `com.apple.SecurityServer` (file-based keychains, served by `securityd`)
+    /// and the `com.apple.securityd.*` services of the data-protection keychain, served by
+    /// `secd`, the XPC variant among them. The floor names none of them ([spec §8.2]).
+    ///
+    /// [spec §8.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#82-the-floor
+    Keychain,
+}
+
+/// An invocation playpen refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Invocation {
+    /// `playpen run` and nothing else: refused at parsing, the earliest refusal after the run
+    /// record is opened, so it is the one a record opened any later would miss.
+    Usage,
 }
 
 /// What the row asserts of the action, outside and then inside.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Expected {
-    /// Succeeds outside; inside fails with an errno in the platform's denial set, never `ENOENT`.
+    /// Succeeds outside; inside fails with a denial of this platform, never with absence: an
+    /// errno in the denial set and never `ENOENT`, or on macOS a Mach lookup that is not
+    /// privileged and never an unknown service.
     Denial,
+    /// Succeeds outside; inside fails with `EBADF`, because playpen closed the descriptor before
+    /// `exec` ([spec §8.7]). Not a kernel denial, so the denial set does not govern it.
+    ///
+    /// [spec §8.7]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#87-file-descriptors
+    Closed,
     /// Succeeds outside and inside.
     Succeeds,
+    /// playpen exits `125` with this code on its refusal line, and the run record the line names
+    /// exists afterwards, holding the same code ([spec §14.1]).
+    ///
+    /// [spec §14.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#141-the-run-record
+    Recorded(Code),
 }
 
 impl Expected {
     /// The class an assertion of this kind belongs to.
     pub fn class(self) -> Class {
         match self {
-            Expected::Denial => Class::Negative,
+            Expected::Denial | Expected::Closed => Class::Negative,
             Expected::Succeeds => Class::Positive,
+            Expected::Recorded(_) => Class::Refusal,
         }
     }
 }
@@ -196,11 +267,34 @@ impl fmt::Display for Decision {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Seen {
     Succeeded,
-    /// `errno` when the failure was a system call's, and what was observed, for the report.
+    /// How the call reported the failure, when it was a call's, and what was observed, for the
+    /// report.
     Failed {
-        errno: Option<i32>,
+        cause: Option<Cause>,
         detail: String,
     },
+}
+
+/// How a failed call reported its failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cause {
+    /// A system call's `errno`.
+    Errno(i32),
+    /// A Mach bootstrap lookup's `kern_return_t`.
+    Bootstrap(i32),
+}
+
+/// What a refusing invocation left behind, as seen from outside.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Declined {
+    pub status: Option<i32>,
+    /// The code and run id on the refusal line, if stderr held exactly one line that reads as one.
+    pub line: Option<(String, String)>,
+    /// The record of that run, if it exists, by the refusal code it stores: the inner `None` is a
+    /// record that holds no refusal.
+    pub recorded: Option<Option<String>>,
+    /// What was observed, for the report.
+    pub detail: String,
 }
 
 /// The verdict on a row that ran.
@@ -264,15 +358,54 @@ pub fn judge(expected: Expected, outside: &Seen, inside: &Seen) -> Verdict {
         (Expected::Succeeds, Seen::Failed { detail, .. }) => {
             Verdict::Fail(format!("fails inside: {detail}"))
         }
-        (Expected::Denial, Seen::Succeeded) => Verdict::Fail("reachable inside".into()),
-        (Expected::Denial, Seen::Failed { errno, detail }) => match errno {
-            Some(libc::ENOENT) => Verdict::Fail(format!(
+        (Expected::Denial | Expected::Closed, Seen::Succeeded) => {
+            Verdict::Fail("reachable inside".into())
+        }
+        (Expected::Denial, Seen::Failed { cause, detail }) => match cause {
+            Some(Cause::Errno(libc::ENOENT)) => Verdict::Fail(format!(
                 "ENOENT inside: a denial must never read as absence: {detail}"
             )),
-            Some(errno) if DENIAL_ERRNOS.contains(errno) => Verdict::Pass,
+            Some(Cause::Errno(errno)) if DENIAL_ERRNOS.contains(errno) => Verdict::Pass,
+            #[cfg(target_os = "macos")]
+            Some(Cause::Bootstrap(mach2::bootstrap::BOOTSTRAP_UNKNOWN_SERVICE)) => Verdict::Fail(
+                format!("an unknown service inside: a denial must never read as absence: {detail}"),
+            ),
+            #[cfg(target_os = "macos")]
+            Some(Cause::Bootstrap(mach2::bootstrap::BOOTSTRAP_NOT_PRIVILEGED)) => Verdict::Pass,
             _ => Verdict::Fail(format!(
-                "not a denial errno of this platform {DENIAL_ERRNOS:?}: {detail}"
+                "not a denial of this platform (errnos {DENIAL_ERRNOS:?}): {detail}"
             )),
         },
+        (Expected::Closed, Seen::Failed { cause, detail }) => match cause {
+            Some(Cause::Errno(libc::EBADF)) => Verdict::Pass,
+            _ => Verdict::Fail(format!("not EBADF: {detail}")),
+        },
+        (Expected::Recorded(_), _) => Verdict::Setup(
+            "a refusal has no inside: playpen declined to launch, so it is judged by what it left"
+                .into(),
+        ),
+    }
+}
+
+/// A refusal row: exit `125` with the expected code, then the record that the line names holds
+/// it. Neither half alone is the assertion: a run that launched leaves a record too.
+pub fn judge_refusal(expected: Expected, declined: &Declined) -> Verdict {
+    let Expected::Recorded(code) = expected else {
+        return Verdict::Setup(format!("{expected:?} is not a refusal's assertion"));
+    };
+    let detail = &declined.detail;
+    if declined.status != Some(EXIT_REFUSED) {
+        return Verdict::Fail(format!("did not refuse: {detail}"));
+    }
+    match &declined.line {
+        Some((seen, _)) if seen == code.as_str() => {}
+        _ => return Verdict::Fail(format!("not one refusal line with {code}: {detail}")),
+    }
+    match &declined.recorded {
+        None => Verdict::Fail(format!("no run record after the refusal: {detail}")),
+        Some(Some(recorded)) if recorded == code.as_str() => Verdict::Pass,
+        Some(recorded) => Verdict::Fail(format!(
+            "the run record holds refusal {recorded:?}, not {code}: {detail}"
+        )),
     }
 }
