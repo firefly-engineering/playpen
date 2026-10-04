@@ -1,6 +1,6 @@
 //! The invocation contract ([spec §11]) and the launch sequence ([spec §4.2]), as far as the
 //! walking skeleton goes: parse, read the policy, resolve one profile's roots, check the CWD,
-//! compile the floor plus those roots, and run the target confined.
+//! self-test the floor, compile the floor plus those roots, and run the target confined.
 //!
 //! [spec §11]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#11-invocation-contract
 //! [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
@@ -17,6 +17,7 @@ use crate::code::Code;
 use crate::floor::floor;
 use crate::policy::Policy;
 use crate::refusal::{EXIT_REFUSED, Refusal};
+use crate::self_test;
 
 #[derive(Debug, Parser)]
 #[command(name = "playpen")]
@@ -64,7 +65,14 @@ pub fn main(args: impl IntoIterator<Item = OsString>, cwd: std::io::Result<PathB
             agent,
             policy,
             argv,
-        } => match run(&profile, &agent, policy.as_deref(), &argv, cwd) {
+        } => match run(
+            &profile,
+            &agent,
+            policy.as_deref(),
+            &argv,
+            cwd,
+            self_test::floor,
+        ) {
             Ok(status) => status,
             Err(refusal) => refuse(refusal),
         },
@@ -88,12 +96,15 @@ fn usage_refusal(err: &clap::Error) -> Refusal {
     Refusal::new(Code::InvocationUsage, message)
 }
 
+/// `floor_self_test` is [`self_test::floor`] in every launch; it is a parameter so a test can
+/// show that its refusal stops the launch before the real child is forked.
 fn run(
     profile: &str,
     agent: &str,
     policy: Option<&Path>,
     argv: &[OsString],
     cwd: std::io::Result<PathBuf>,
+    floor_self_test: impl FnOnce() -> Result<(), Refusal>,
 ) -> Result<i32, Refusal> {
     if !KINDS.contains(&agent) {
         return Err(Refusal::new(
@@ -113,6 +124,8 @@ fn run(
     let policy = Policy::load(policy_path)?;
     let roots = resolve_roots(&policy, profile)?;
     check_cwd(cwd, &roots)?;
+    // Before the real child is forked, on every launch, never from a cached verdict.
+    floor_self_test()?;
 
     let mut caps = floor();
     caps.paths.extend(roots);
@@ -249,6 +262,36 @@ mod tests {
         let err = parse(&["playpen", "run", "--agent", "claude", "--", "x"]).unwrap_err();
         assert_eq!(usage_refusal(&err).code, Code::InvocationUsage);
         assert!(parse(&["playpen", "run", "--profile", "p", "--", "x"]).is_err());
+    }
+
+    #[test]
+    fn a_failing_floor_self_test_refuses_before_the_real_child_is_forked() {
+        let root = tempfile::TempDir::new().expect("root");
+        let policy = root.path().join("policy.json");
+        let document = serde_json::json!({
+            "version": 1,
+            "workspaces": {"w": {"roots": [{"path": root.path(), "mode": "read"}]}},
+            "profiles": {"p": {"workspaces": ["w"]}},
+        });
+        std::fs::write(&policy, document.to_string()).expect("policy");
+        // No target: forking the real child refuses with `refusal.invocation.usage` before the
+        // fork, so this code can only come from a self-test run ahead of it, and no test forks.
+        let argv = [];
+        let mut ran = 0;
+        let refusal = run(
+            "p",
+            "claude",
+            Some(&policy),
+            &argv,
+            Ok(root.path().into()),
+            || {
+                ran += 1;
+                Err(Refusal::new(Code::FloorSelfTest, "the canary died"))
+            },
+        )
+        .expect_err("the launch refuses");
+        assert_eq!(ran, 1);
+        assert_eq!(refusal.code, Code::FloorSelfTest);
     }
 
     #[test]

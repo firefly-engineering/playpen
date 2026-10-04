@@ -27,22 +27,43 @@ pub fn run_confined(caps: &CapabilitySet, argv: &[OsString]) -> Result<i32, Refu
     command.args(args);
 
     let held = HeldSignals::block()?;
-    // SAFETY: plain fork; the child only runs `confine_and_exec`, which never returns.
+    let pid = spawn_confined(caps, &mut command, || {
+        held.release_in_child();
+        Ok(())
+    })?;
+    held.supervise(pid)
+}
+
+/// Fork a child that runs `prepare`, closes every descriptor above 2, applies `caps` to itself
+/// and `exec`s `command`. Returns the child's pid; the caller reaps it.
+///
+/// If any step fails, the child writes one refusal line to its own stderr and exits `125`.
+/// `prepare` runs between `fork` and `exec`, so it is bound by the same single-threaded rule.
+pub(crate) fn spawn_confined(
+    caps: &CapabilitySet,
+    command: &mut Command,
+    prepare: impl FnOnce() -> Result<(), Refusal>,
+) -> Result<libc::pid_t, Refusal> {
+    // SAFETY: plain fork; the child only runs `prepare` and `confine_and_exec`, never returning.
     match unsafe { libc::fork() } {
         -1 => Err(Refusal::new(
             Code::ProcessFork,
             format!("fork failed: {}", std::io::Error::last_os_error()),
         )),
-        0 => {
-            held.release_in_child();
-            confine_and_exec(caps, &mut command)
-        }
-        pid => held.supervise(pid),
+        0 => confine_and_exec(caps, command, prepare),
+        pid => Ok(pid),
     }
 }
 
-fn confine_and_exec(caps: &CapabilitySet, command: &mut Command) -> ! {
-    let refusal = match close_inherited_fds().and_then(|()| backend::apply(caps)) {
+fn confine_and_exec(
+    caps: &CapabilitySet,
+    command: &mut Command,
+    prepare: impl FnOnce() -> Result<(), Refusal>,
+) -> ! {
+    let confined = prepare()
+        .and_then(|()| close_inherited_fds())
+        .and_then(|()| backend::apply(caps));
+    let refusal = match confined {
         Ok(()) => {
             let err = command.exec();
             Refusal::new(

@@ -166,6 +166,27 @@ fn success_writes_nothing_and_passes_the_status_through() {
 }
 
 #[test]
+fn a_caller_that_ignores_sigchld_still_gets_a_launch() {
+    let fx = Fixture::new();
+    let mut command = fx.run(&["/bin/sh", "-c", "exit 3"]);
+    // SAFETY: signal is async-signal-safe. Linux keeps an ignored SIGCHLD across `exec`, and with
+    // it the kernel reaps children before playpen can wait for them.
+    unsafe {
+        command.pre_exec(|| {
+            libc::signal(libc::SIGCHLD, libc::SIG_IGN);
+            Ok(())
+        });
+    }
+    let output = command.output().expect("playpen");
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn a_target_that_cannot_be_executed_refuses() {
     let fx = Fixture::new();
     let missing = fx.root().join("missing");

@@ -4,7 +4,7 @@
 //! The child stays in playpen's process group, which is the caller's job: the terminal's Ctrl-C
 //! and Ctrl-Z reach every process in the job, a pipeline around playpen keeps the terminal, and
 //! playpen never touches the foreground. A signal the terminal generated has therefore reached the
-//! child already, and is not forwarded a second time ([`from_the_terminal`]).
+//! child already, and is not forwarded a second time (`from_the_terminal`).
 //!
 //! The supervisor stays single-threaded: signals are blocked before the fork and taken
 //! synchronously with `sigwait`, so nothing runs in a signal handler. A thread started before the
