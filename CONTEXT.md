@@ -490,9 +490,10 @@ so — nothing in userspace can watch for a parent's death after `exec`), and th
 signal's origin, which decides whether a signal sent straight to playpen while it holds the
 terminal is forwarded or dropped (Linux only: macOS reports a keypress and a `kill` alike) are the
 seven so
-far. The ledger is kept honest by the **enforcement
-test** set: an assertion that runs on only one platform must name the asymmetry it encodes,
-and a backend that makes such an assertion inapplicable has retired one rather than passed it.
+far. The ledger is kept honest by the suite that can assert the property — the **enforcement
+test** set for the boundary, the transparency one for how playpen carries signals and status:
+an assertion that runs on only one platform must name the asymmetry it encodes, and a backend
+that makes such an assertion inapplicable has retired one rather than passed it.
 
 ## Denial
 

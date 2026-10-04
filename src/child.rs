@@ -95,6 +95,10 @@ pub(crate) fn spawn_confined(
     // the target, and a caller that closed its stdio cannot have it land where `prepare` redirects.
     let reporter = PipeWriter::from(first.as_fd().try_clone_to_owned().map_err(pipe_refusal)?);
     drop(first);
+    // Read before the fork, so the child compares against the parent it was forked from rather
+    // than against whoever has adopted it since ([`die_with_supervisor`]).
+    // SAFETY: getpid has no preconditions.
+    let supervisor = unsafe { libc::getpid() };
     // SAFETY: plain fork; the child only runs `prepare` and `confine_and_exec`, never returning.
     let pid = match unsafe { libc::fork() } {
         -1 => {
@@ -103,7 +107,7 @@ pub(crate) fn spawn_confined(
                 format!("fork failed: {}", std::io::Error::last_os_error()),
             ));
         }
-        0 => confine_and_exec(caps, command, reporter, run, prepare),
+        0 => confine_and_exec(caps, command, reporter, run, supervisor, prepare),
         pid => pid,
     };
     // The child holds the only other write end; the read below ends at its `exec` or its exit.
@@ -124,8 +128,11 @@ fn confine_and_exec(
     command: &mut Command,
     mut reporter: PipeWriter,
     run: Option<&RunId>,
+    supervisor: libc::pid_t,
     prepare: impl FnOnce() -> Result<(), Refusal>,
 ) -> ! {
+    // First, so the window in which the agent could be orphaned is as short as the fork allows.
+    die_with_supervisor(supervisor);
     let confined = prepare()
         .and_then(|()| close_inherited_fds(reporter.as_raw_fd()))
         .and_then(|()| backend::apply(caps));
@@ -146,6 +153,45 @@ fn confine_and_exec(
     // SAFETY: `_exit` skips the parent's atexit handlers, which must not run twice.
     unsafe { libc::_exit(EXIT_REFUSED) }
 }
+
+/// Ask the kernel to `SIGKILL` this child when the supervisor dies, so the agent cannot outlive
+/// it by any route, `SIGKILL` of playpen included ([ADR 0025]). Without it, a fault signal sent to
+/// playpen kills the supervisor and leaves the agent running unsupervised, reparented to init and
+/// still holding the caller's terminal — confined, with no credentials, and unreachable by the
+/// caller's signals.
+///
+/// Nothing in userspace can do this after `exec`: a death pipe or a watched descriptor needs the
+/// watcher to run code, and `exec` replaces the image with an agent that will not poll playpen's
+/// private fd. A kernel mechanism is the only kind there is, which is why macOS, having none,
+/// keeps the residual as **named asymmetry #6** rather than as something unimplemented.
+///
+/// The setting is cleared when `exec`ing a set-user-ID target, which silently forfeits the
+/// guarantee. Noted rather than guarded: playpen's targets are agents, and the integrity checks
+/// already stand between the policy and what gets `exec`ed.
+///
+/// [ADR 0025]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0025-the-agent-does-not-outlive-its-supervisor-where-the-kernel-can-say-so.md
+#[cfg(target_os = "linux")]
+fn die_with_supervisor(supervisor: libc::pid_t) {
+    // SAFETY: this prctl takes a signal number by value and touches no memory.
+    unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) };
+    // The setting can only be made after the fork, so a supervisor that died in between never
+    // made it, and this child is already the orphan the setting exists to prevent. A window left
+    // open inside the mechanism that exists to close a window reads as an oversight.
+    // SAFETY: getppid has no preconditions.
+    if unsafe { libc::getppid() } != supervisor {
+        // SAFETY: `SIGKILL` on ourselves can be neither blocked nor caught, and is exactly the
+        // outcome the setting above would have produced.
+        unsafe { libc::raise(libc::SIGKILL) };
+    }
+}
+
+/// macOS has no parent-death signal, and no userspace stand-in works after `exec`, so the agent
+/// can outlive its supervisor there. **Named asymmetry #6**, and permanent rather than
+/// unimplemented ([ADR 0025]).
+///
+/// [ADR 0025]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0025-the-agent-does-not-outlive-its-supervisor-where-the-kernel-can-say-so.md
+#[cfg(not(target_os = "linux"))]
+fn die_with_supervisor(_supervisor: libc::pid_t) {}
 
 /// A refusal on the report pipe: the code's index in the registry, then the message. Both ends
 /// are this one binary, so the index names the same code on either side.

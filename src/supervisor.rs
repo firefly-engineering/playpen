@@ -10,6 +10,14 @@
 //! synchronously with `sigwait`, so nothing runs in a signal handler. A thread started before the
 //! fork would not have them blocked, and would swallow them.
 //!
+//! **And the thread that forks is the thread that lives for the whole run.** This is a second rule
+//! with a reason of its own, not a restatement of the first: the child's parent-death signal
+//! ([`crate::child`]) fires on the death of the parent *thread*, not of the parent process, so a
+//! supervisor whose forking thread exits while the process lives would `SIGKILL` the agent for no
+//! reason. The rule above can be satisfied by starting threads *after* the fork — correct for
+//! signals, and fatal here — so it is written out separately
+//! ([ADR 0025](https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0025-the-agent-does-not-outlive-its-supervisor-where-the-kernel-can-say-so.md)).
+//!
 //! [spec §11.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#116-process-transparency
 
 use std::mem::MaybeUninit;

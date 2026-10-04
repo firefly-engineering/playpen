@@ -1079,7 +1079,10 @@ playpen owes this contract to its callers regardless of backend
   terminal-generated `SIGINT`, `SIGQUIT`, `SIGTSTP` and `SIGWINCH` are therefore not forwarded
   again; a job stop stops playpen with the child. A signal the caller ignores stays ignored.
   `SIGKILL`, `SIGSTOP`, `SIGCHLD`, `SIGPIPE` and the synchronous fault signals are not
-  forwarded.
+  forwarded. Blocking a fault signal would make a real fault undefined behaviour, so one sent to
+  playpen kills the supervisor; **the agent then dies with it on Linux and survives on macOS**
+  ([ADR 0025](adr/0025-the-agent-does-not-outlive-its-supervisor-where-the-kernel-can-say-so.md),
+  named asymmetry #6). The same holds for `SIGKILL` of playpen, which no handler could catch.
 - playpen **exits with the child's status**, and with `128+N` when the child dies by signal.
 - **A status playpen cannot learn is a fault**, which is the third outcome and not a status
   ([ADR 0024](adr/0024-a-status-playpen-cannot-learn-is-a-fault-and-not-a-refusal.md)). playpen
@@ -1404,7 +1407,11 @@ module checks the closure's size at build time, and the launch-time refusal is t
 ### 15.4 Named asymmetries
 
 A **named asymmetry** is a place where the two platforms are not equals, written down rather
-than absorbed. Each has a row in the enforcement suite.
+than absorbed. Each has a **suite row**, in the enforcement suite or the transparency suite
+depending on what it is a property of: the enforcement suite's verbs are about the boundary —
+read, create, list, inherited fd, Mach lookup, refuse — so an asymmetry in process transparency
+belongs in the transparency suite instead. A `—` in that column means the asymmetry is
+*unassertable*, never that its row lives elsewhere.
 
 | # | Asymmetry | Favours | Suite row |
 |---|---|---|---|
@@ -1413,6 +1420,7 @@ than absorbed. Each has a row in the enforcement suite.
 | 3 | the compiled-profile ceiling | Linux | `R-ceiling` (`n/a` on Linux) |
 | 4 | denial visibility: zero preconditions on macOS, four on Linux. Partly permanent: macOS's channel is certifiable *a priori*, Linux's only *a posteriori* | macOS | `R-trace-denials` (`n/a` on macOS) |
 | 5 | user namespaces (Chromium's nested userns) are Linux's | — | `P-unshare` (`n/a` on macOS) |
+| 6 | the parent-death signal that stops an agent outliving its supervisor. Permanent: after `exec` only a kernel mechanism can do this, and macOS has none. Narrows [§18](#18-named-residuals) item 4 to macOS | Linux | `the_agent_does_not_outlive_a_killed_supervisor`, transparency (`n/a` on macOS) |
 
 Linux's lack of a mechanism-native Keychain is recorded through `N-keychain` being `n/a` on
 Linux.
@@ -1492,7 +1500,10 @@ linuxbrew and `~/.local` follow the keg-list or coarse-root shapes.
   verdicts written as JSON on the probe's stdout. The exit code carries one bit: *the probe ran*
   or *the probe broke*.
 - **A single-platform assertion costs a named asymmetry.** A `both` assertion that proves
-  inexpressible on one platform is a design bug to escalate, never a skip.
+  inexpressible on one platform is a design bug to escalate, never a skip. The debt is owed
+  whichever suite the assertion lives in: an asymmetry in process transparency is asserted in the
+  transparency suite, since this suite's verbs are about the boundary
+  ([§15.4](#154-named-asymmetries)).
 - **Gates.** CI may be green with skips. A **release requires the full set green on a reference
   host of each platform.** Runner labels are **pinned**, never `-latest`: use `ubuntu-24.04`,
   and a pinned `macos-*`.
@@ -1552,9 +1563,16 @@ down rather than inherited silently.
    port on loopback from being a leak.
 3. **A browser without its own renderer isolation** runs at full workspace privilege. The
    operator's lever is workspace scoping: a buzz-class profile gets a thin workspace.
-4. **An orphaned agent holding a released area.** `SIGKILL` the supervisor without its process
-   group and the agent keeps writing an area whose lock has released. It has lost all
-   credentials.
+4. **An orphaned agent holding a released area — on macOS only.** `SIGKILL` the supervisor
+   without its process group and the agent keeps writing an area whose lock has released. It has
+   lost all credentials. On Linux the agent dies with its supervisor by every route, `SIGKILL`
+   included (named asymmetry #6), so only macOS can reach the live orphan; with the agent dead the
+   lock's released state is accurate rather than a lie. What survives on **both** platforms is the
+   *lock* half of [ADR 0010](adr/0010-concurrency-is-a-property-of-a-provisioned-area.md)'s
+   residual: for the child to hold the lock it would need an inherited descriptor, which
+   [ADR 0006](adr/0006-the-floor-is-built-in-and-the-toolchain-is-a-coarse-root.md) forbids. A
+   supervisor that has merely lost track of the agent's status kills it on either platform
+   ([§11.6](#116-process-transparency)), so that route reaches no orphan at all.
 5. **The sequential cross-profile channel** a `persistent` area opens. The same channel exists
    through any brought root granted to two profiles.
 6. **git push *discovery* succeeds under a read-only rule set.**

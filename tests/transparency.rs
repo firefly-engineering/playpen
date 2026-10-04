@@ -254,6 +254,50 @@ fn catchable_signals_sent_to_playpen_reach_the_child_once() {
     }
 }
 
+/// Whether `pid` still exists. The agent is playpen's child and not this process's, so once
+/// playpen is gone there is no zombie of it to confuse the answer: the kernel reaps the orphan,
+/// and signal 0 then fails with `ESRCH`.
+fn alive(pid: libc::pid_t) -> bool {
+    // SAFETY: signal 0 performs the permission and existence check and delivers nothing.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// **Named asymmetry #6** ([ADR 0025]): on Linux the agent cannot outlive its supervisor by any
+/// route, `SIGKILL` of playpen included. That is the route [ADR 0010]'s orphan residual cites and
+/// the one no handler can catch, so it is the one worth asserting. `n/a` on macOS, which has no
+/// parent-death signal and no userspace stand-in that works after `exec`.
+///
+/// [ADR 0025]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0025-the-agent-does-not-outlive-its-supervisor-where-the-kernel-can-say-so.md
+/// [ADR 0010]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0010-concurrency-is-a-property-of-a-provisioned-area.md
+#[test]
+#[cfg(target_os = "linux")]
+fn the_agent_does_not_outlive_a_killed_supervisor() {
+    let fx = Fixture::new();
+    let probe = fx.probe();
+    let mut command = fx.run(&[probe.to_str().unwrap(), "wait-signal"]);
+    command.process_group(0);
+    let run = Waiting::spawn(command);
+    let agent = run.probe_pid();
+    assert!(alive(agent), "the agent is running before the kill");
+
+    run.signal(libc::SIGKILL);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while alive(agent) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the agent {agent} outlived its killed supervisor: it is confined, holds the \
+             caller's terminal, has no credentials and cannot be signalled by the caller"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let (_, status) = run.finish();
+    assert_eq!(
+        status, None,
+        "playpen died by the signal rather than exiting with a status"
+    );
+}
+
 /// A new pseudo-terminal: the master, and the slave as a file.
 fn pty() -> (OwnedFd, File) {
     // SAFETY: posix_openpt has no memory preconditions.
