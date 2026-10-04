@@ -15,6 +15,7 @@ mod rows;
 mod run;
 
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use playpen::code::Code;
@@ -25,6 +26,12 @@ use row::{
 use rows::ROWS;
 
 fn main() {
+    // Re-run by `R-missing-cap` as playpen: its inputs are read here, as `src/main.rs` reads them.
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() == Some(OsStr::new(run::AS_PLAYPEN_OFFERING_NOTHING)) {
+        let status = run::as_playpen_offering_nothing(args, std::env::current_dir());
+        std::process::exit(status);
+    }
     let checks: &[(&str, fn())] = &[
         ("row_ids_are_unique", row_ids_are_unique),
         (

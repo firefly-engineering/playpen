@@ -213,6 +213,13 @@ pub enum Invocation {
     /// `playpen run` and nothing else: refused at parsing, the earliest refusal after the run
     /// record is opened, so it is the one a record opened any later would miss.
     Usage,
+    /// `playpen run` of the canary, on a mechanism that offers none of the capabilities every
+    /// profile requires. No host the suite runs on lacks one, so the probe is the one thing
+    /// replaced: the suite re-runs itself as playpen with [`playpen::launch::main`] given a probe
+    /// that offers nothing ([spec §4.2], step 7).
+    ///
+    /// [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
+    MissingCapability,
 }
 
 /// What the row asserts of the action, outside and then inside.

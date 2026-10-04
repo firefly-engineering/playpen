@@ -22,6 +22,11 @@ serde_json = "1"
 [target.'cfg(target_os = "macos")'.dependencies]
 mach2 = "0.7"
 
+# What each Landlock ABI offers, read from the crate nono is built against, at the exact version
+# nono resolves: the two move together or not at all (tests/pin.rs).
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "=0.4.7"
+
 [dev-dependencies]
 tempfile = "3"
 toml = "0.9"

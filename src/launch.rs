@@ -17,6 +17,7 @@ use crate::child;
 use crate::code::Code;
 use crate::explain;
 use crate::floor::floor;
+use crate::mechanism::{self, Mechanism};
 use crate::policy::Policy;
 use crate::record::{RunId, RunRecord};
 use crate::refusal::{EXIT_REFUSED, Refusal};
@@ -58,10 +59,15 @@ const KINDS: &[&str] = &["claude", "omp"];
 /// Run playpen with `args` (including `argv[0]`) from the caller's working directory `cwd`, with
 /// playpen's state directory at `state` (`None` when the environment names none). Returns the
 /// process exit status; on a refusal, the refusal line has already been written.
+///
+/// `probe` is [`Mechanism::probe`] in every launch; it is a parameter so the suite's
+/// `R-missing-cap` row can launch on a mechanism that lacks a capability, which no host it runs
+/// on does.
 pub fn main(
     args: impl IntoIterator<Item = OsString>,
     cwd: std::io::Result<PathBuf>,
     state: Option<PathBuf>,
+    probe: impl FnOnce() -> Mechanism,
 ) -> i32 {
     // Parsing has no effect, so it can come first. `explain` launches nothing ([spec §14.2]), so
     // it opens no record and pushes no run out of the ring, and nor does a request for help;
@@ -96,7 +102,7 @@ pub fn main(
         Ok(record) => record,
         Err(refusal) => return refuse(&refusal, Some(&run)),
     };
-    match invoke(parsed, cwd, &mut record) {
+    match invoke(parsed, cwd, &mut record, probe) {
         Ok(status) => {
             record.finish(status);
             status
@@ -112,6 +118,7 @@ fn invoke(
     parsed: Result<RunArgs, clap::Error>,
     cwd: std::io::Result<PathBuf>,
     record: &mut RunRecord,
+    probe: impl FnOnce() -> Mechanism,
 ) -> Result<i32, Refusal> {
     let RunArgs {
         profile,
@@ -126,6 +133,7 @@ fn invoke(
         &argv,
         cwd,
         record,
+        probe,
         self_test::floor,
     )
 }
@@ -147,8 +155,13 @@ fn usage_refusal(err: &clap::Error) -> Refusal {
     Refusal::new(Code::InvocationUsage, message)
 }
 
-/// `floor_self_test` is [`self_test::floor`] in every launch; it is a parameter so a test can
-/// show that its refusal stops the launch before the real child is forked.
+/// `probe` and `floor_self_test` are [`Mechanism::probe`] and [`self_test::floor`] in every
+/// launch; they are parameters so a test can show that each one's refusal stops the launch before
+/// the real child is forked.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "step 7's two checks are each a seam a test replaces"
+)]
 fn run(
     profile: &str,
     agent: &str,
@@ -156,6 +169,7 @@ fn run(
     argv: &[OsString],
     cwd: std::io::Result<PathBuf>,
     record: &mut RunRecord,
+    probe: impl FnOnce() -> Mechanism,
     floor_self_test: impl FnOnce() -> Result<(), Refusal>,
 ) -> Result<i32, Refusal> {
     if !KINDS.contains(&agent) {
@@ -183,7 +197,9 @@ fn run(
     let roots = resolve_roots(&policy, profile)?;
     record.profile(profile);
     check_cwd(cwd, &roots)?;
-    // Before the real child is forked, on every launch, never from a cached verdict.
+    // Step 7, on every launch, never from a cached verdict: the mechanism first, so a missing
+    // capability is named as such rather than surfacing as a canary that could not be confined.
+    probe().require(mechanism::REQUIRED)?;
     floor_self_test()?;
 
     let mut caps = floor();
@@ -327,8 +343,14 @@ mod tests {
         assert!(parse(&["playpen", "run", "--profile", "p", "--", "x"]).is_err());
     }
 
-    #[test]
-    fn a_failing_floor_self_test_refuses_before_the_real_child_is_forked() {
+    /// Launch profile `p` over a root of its own with no target, under `probe` and
+    /// `floor_self_test`, and return the refusal and whether the record was completed. With no
+    /// target, forking the real child refuses with `refusal.invocation.usage` before the fork, so
+    /// any other code comes from a check run ahead of it, and no test forks.
+    fn refuse_without_target(
+        probe: impl FnOnce() -> Mechanism,
+        floor_self_test: impl FnOnce() -> Result<(), Refusal>,
+    ) -> (Refusal, bool) {
         let root = tempfile::TempDir::new().expect("root");
         let policy = root.path().join("policy.json");
         let document = serde_json::json!({
@@ -337,13 +359,10 @@ mod tests {
             "profiles": {"p": {"workspaces": ["w"]}},
         });
         std::fs::write(&policy, document.to_string()).expect("policy");
-        // No target: forking the real child refuses with `refusal.invocation.usage` before the
-        // fork, so this code can only come from a self-test run ahead of it, and no test forks.
         let argv = [];
         let state = tempfile::TempDir::new().expect("state");
         let id = RunId::allocate().expect("id");
         let mut record = RunRecord::open(&id, Some(state.path())).expect("record");
-        let mut ran = 0;
         let refusal = run(
             "p",
             "claude",
@@ -351,19 +370,51 @@ mod tests {
             &argv,
             Ok(root.path().into()),
             &mut record,
-            || {
-                ran += 1;
-                Err(Refusal::new(Code::FloorSelfTest, "the canary died"))
-            },
+            probe,
+            floor_self_test,
         )
         .expect_err("the launch refuses");
+        (refusal, record.record().capabilities.is_some())
+    }
+
+    fn offering_everything() -> Mechanism {
+        Mechanism::new("a mechanism offering everything", mechanism::REQUIRED)
+    }
+
+    #[test]
+    fn a_failing_floor_self_test_refuses_before_the_real_child_is_forked() {
+        let mut ran = 0;
+        let (refusal, completed) = refuse_without_target(offering_everything, || {
+            ran += 1;
+            Err(Refusal::new(Code::FloorSelfTest, "the canary died"))
+        });
         assert_eq!(ran, 1);
         assert_eq!(refusal.code, Code::FloorSelfTest);
-        assert_eq!(
-            record.record().capabilities,
-            None,
-            "the record was not completed"
+        assert!(!completed, "the record was not completed");
+    }
+
+    #[test]
+    fn a_missing_capability_refuses_before_anything_is_applied() {
+        let mut probed = 0;
+        let mut self_tested = 0;
+        let (refusal, completed) = refuse_without_target(
+            || {
+                probed += 1;
+                Mechanism::new("a mechanism offering nothing", &[])
+            },
+            || {
+                self_tested += 1;
+                Ok(())
+            },
         );
+        assert_eq!(probed, 1);
+        assert_eq!(
+            self_tested, 0,
+            "the canary is never confined on a mechanism found wanting"
+        );
+        assert_eq!(refusal.code, Code::MechanismUnavailable);
+        assert!(refusal.message().contains("process scoping"), "{refusal}");
+        assert!(!completed, "the record was not completed");
     }
 
     #[test]

@@ -6,10 +6,11 @@
 
 use std::path::Path;
 
-use nono::{AccessMode, FsCapability, NetworkMode, NonoError, Sandbox};
+use nono::{AccessMode, FsCapability, IpcMode, NetworkMode, NonoError, Sandbox, SignalMode};
 
 use crate::capability::{Access, CapabilitySet, PathGrant, Scope};
 use crate::code::Code;
+use crate::mechanism::{self, Capability};
 use crate::refusal::Refusal;
 
 /// Apply `caps` to the calling process, irrevocably.
@@ -26,11 +27,30 @@ pub fn apply(caps: &CapabilitySet) -> Result<(), Refusal> {
 fn compile(caps: &CapabilitySet) -> Result<nono::CapabilitySet, Refusal> {
     // playpen claims credential confinement only; the network is not a confined surface (ADR 0020).
     let mut set = nono::CapabilitySet::new().set_network_mode(NetworkMode::AllowAll);
+    for &capability in mechanism::REQUIRED {
+        request(&mut set, capability);
+    }
     for grant in &caps.paths {
         add_path(&mut set, grant)?;
     }
     add_mach_services(&mut set, &caps.mach_services)?;
     Ok(set)
+}
+
+/// Request a required capability explicitly, never through a backend default: an explicit request
+/// is what fails closed should the probe ([`mechanism`]) ever pass a mechanism that lacks it.
+fn request(set: &mut nono::CapabilitySet, capability: Capability) {
+    match capability {
+        Capability::ProcessScoping => {
+            // Not the default `Isolated`, which nono drops quietly below Landlock ABI 6: on a
+            // kernel that offers the scope the two are the same, and on one that does not this
+            // one refuses.
+            set.set_signal_mode_mut(SignalMode::AllowSameSandbox);
+            // The default, stated. nono drops it quietly below ABI 6 and has no explicit mode that
+            // refuses instead, so for abstract sockets playpen's own probe is the only refusal.
+            set.set_ipc_mode_mut(IpcMode::SharedMemoryOnly);
+        }
+    }
 }
 
 fn add_path(set: &mut nono::CapabilitySet, grant: &PathGrant) -> Result<(), Refusal> {
@@ -177,6 +197,13 @@ mod tests {
     fn an_unexpected_error_still_carries_a_registry_code() {
         let r = translate(NonoError::HomeNotFound);
         assert_eq!(r.code, Code::MechanismUnavailable);
+    }
+
+    #[test]
+    fn process_scoping_is_requested_explicitly() {
+        let set = compile(&CapabilitySet::default()).expect("compiles");
+        assert_eq!(set.signal_mode(), SignalMode::AllowSameSandbox);
+        assert_eq!(set.ipc_mode(), IpcMode::SharedMemoryOnly);
     }
 
     #[test]

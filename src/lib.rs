@@ -7,6 +7,7 @@ pub mod code;
 pub mod explain;
 pub mod floor;
 pub mod launch;
+pub mod mechanism;
 pub mod policy;
 pub mod record;
 pub mod refusal;

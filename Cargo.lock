@@ -1386,6 +1386,7 @@ name = "playpen"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "landlock",
  "libc",
  "mach2",
  "nono",

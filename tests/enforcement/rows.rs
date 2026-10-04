@@ -113,4 +113,13 @@ pub const ROWS: &[Row] = &[
         expected: Expected::Recorded(Code::InvocationUsage),
         from: &[Decision::Adr(7), Decision::Adr(16), Decision::Issue(54)],
     },
+    Row {
+        id: "R-missing-cap",
+        class: Class::Refusal,
+        platform: BOTH,
+        fixture: Fixture::Outside,
+        action: Action::Refuse(Invocation::MissingCapability),
+        expected: Expected::Recorded(Code::MechanismUnavailable),
+        from: &[Decision::Adr(3), Decision::Adr(16), Decision::Issue(55)],
+    },
 ];

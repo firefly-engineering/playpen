@@ -4,6 +4,7 @@
 //!
 //! [spec §17.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#171-form
 
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::DirBuilderExt;
@@ -11,6 +12,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use playpen::mechanism::Mechanism;
 use playpen::record::Record;
 use playpen::self_test::{self, CANARY};
 use serde_json::Value;
@@ -79,12 +81,42 @@ fn refusal(row: &Row) -> Verdict {
     }
 }
 
-/// Invoke playpen as `invocation` says, with the fixture's own state directory handed to it
-/// through its environment, and read back the record its refusal line names.
+/// The first argument that makes the suite run as playpen on a mechanism that offers nothing
+/// ([`as_playpen_offering_nothing`]). The second stands in for `XDG_STATE_HOME`.
+pub const AS_PLAYPEN_OFFERING_NOTHING: &str = "--as-playpen-offering-nothing";
+
+/// The suite, re-run by [`decline`], as playpen: what `src/main.rs` does, with the state directory
+/// from `args` rather than the environment, and the mechanism probe replaced by one that offers
+/// nothing. Returns the status to exit with.
+pub fn as_playpen_offering_nothing(
+    mut args: impl Iterator<Item = OsString>,
+    cwd: std::io::Result<PathBuf>,
+) -> i32 {
+    let state = playpen::record::state_dir(args.next(), None);
+    let argv = std::iter::once(OsString::from("playpen")).chain(args);
+    playpen::launch::main(argv, cwd, state, || {
+        Mechanism::new("a mechanism offering nothing", &[])
+    })
+}
+
+/// Invoke playpen as `invocation` says, with the fixture's own state directory handed to it,
+/// and read back the record its refusal line names.
 fn decline(invocation: Invocation) -> Declined {
     let fixture = common::Fixture::with_mode("read");
     let mut command = match invocation {
         Invocation::Usage => fixture.playpen(&["run"]),
+        Invocation::MissingCapability => {
+            let suite = std::env::current_exe().expect("the suite's own executable");
+            let mut command = Command::new(suite);
+            command
+                .arg(AS_PLAYPEN_OFFERING_NOTHING)
+                .arg(fixture.state_home())
+                .args(["run", "--profile", "p", "--agent", "claude", "--policy"])
+                .arg(&fixture.policy)
+                .args(["--", CANARY])
+                .current_dir(fixture.root());
+            command
+        }
     };
     let output = command.stdin(Stdio::null()).output().expect("run playpen");
     let stderr = String::from_utf8_lossy(&output.stderr);

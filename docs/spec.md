@@ -1288,9 +1288,9 @@ naming *which* precondition failed. That refusal is scoped to the flag, not to t
 **nono is the mechanism backend, reached as a library, behind a playpen-owned seam**
 ([ADR 0003](adr/0003-nono-is-the-mechanism-backend.md)). playpen is **Rust**.
 
-- The dependency is the `nono` crate (`sandbox` and `capability` modules, plus the ABI-probe
-  entry points) and the `nono-proxy` crate (`ProxyConfig`, `server::start`), both
-  **pinned exactly** to one revision of the maintained fork **`firefly-engineering/nono`**, as a
+- The dependency is the `nono` crate (`sandbox` and `capability` modules) and the `nono-proxy`
+  crate (`ProxyConfig`, `server::start`), both **pinned exactly** to one revision of the
+  maintained fork **`firefly-engineering/nono`**, as a
   Cargo `git` dependency with a fixed `rev`, never a branch ([ADR 0022](adr/0022-playpen-pins-a-maintained-fork-of-nono.md)). The fork carries playpen's
   changes on a `playpen` branch, rebased onto upstream tags (cut from `v0.79.0`). Upstreaming is
   optional and later. `nono-cli` is structurally out of reach: its
@@ -1303,9 +1303,17 @@ naming *which* precondition failed. That refusal is scoped to the flag, not to t
 - **A backend is defined by the enforcement tests it passes** ([§17](#17-the-enforcement-suite)).
   A version bump is a PR that stays red until the suite says otherwise; compiling is not the
   gate.
-- **playpen refuses on its own authority.** It requests process scoping explicitly, so nono's
-  fail-closed path fires. It also probes the ABI itself beforehand, so the refusal survives a
-  change in nono's defaults.
+- **playpen refuses on its own authority.** It requests process scoping explicitly
+  (`SignalMode::AllowSameSandbox`, never the quietly degrading default), so nono's fail-closed path
+  fires. It also probes the ABI itself beforehand, so the refusal survives a change in nono's
+  defaults. The probe is the kernel's own version query, `landlock_create_ruleset(NULL, 0,
+  LANDLOCK_CREATE_RULESET_VERSION)`, not nono's, which stops at the highest ABI nono knows. What
+  each ABI offers is read from the `landlock` crate, pinned exactly to the version nono resolves.
+  nono has no fail-closed mode for abstract-socket scoping, so for that half the probe is the only
+  refusal. Seatbelt has no versions, so on macOS what the mechanism offers is fixed.
+- **Every profile requires process scoping** (signals and abstract unix sockets confined to the
+  sandbox: Landlock ABI 6). The policy cannot yet require any further capability. A missing one
+  is `refusal.mechanism.unavailable`, naming it.
 - Every nono denial is an errno, never `SIGSYS`: the crate defines no kill action.
 
 The network mode is `AllowAll` on both platforms
@@ -1471,7 +1479,7 @@ Row ids are provisional. The implementation owns the final ids.
 | `P-manifest` | positive | "the manifest is true": every stated route authenticates through the proxy, every path is accessible at its stated mode, and nothing outside them is; skip `skip.host.no-egress` | both |
 | `P-argv` | positive | the injected argv in `explain --json` matches the argv the child received | both |
 | `P-endpoint` | positive | a matching request reaches upstream authenticated, with the phantom stripped and the secret injected | both |
-| `R-missing-cap` | refusal | a missing mechanism capability → `125` + code | both |
+| `R-missing-cap` | refusal | a missing mechanism capability → `125` + code. No host lacks one, so the launch runs with its probe replaced by one offering nothing | both |
 | `R-incoherent-ws` | refusal | an incoherent workspace → `125` + code | both |
 | `R-ceiling` | refusal | a policy over the compiled-profile ceiling → `125` + `refusal.budget.exceeded`; asserts the code, never a path count | macOS (`n/a` Linux) |
 | `R-record` | refusal | a run record exists **after** a refusal | both |
