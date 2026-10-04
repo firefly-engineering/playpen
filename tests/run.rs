@@ -1,96 +1,23 @@
 //! `playpen run` end to end: the walking skeleton's acceptance criteria, each asserted in two
 //! parts — the condition is first shown to hold outside, then the boundary's behaviour inside.
 
+mod common;
+
 use std::fs::File;
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-const PLAYPEN: &str = env!("CARGO_BIN_EXE_playpen");
-const PROBE: &str = env!("CARGO_BIN_EXE_playpen-probe");
+use common::{Fixture, PLAYPEN, PROBE, probe_outside, verdict};
 
 /// A denial errno on this platform ([spec §15.2]); `ENOENT` is never one.
 #[cfg(target_os = "macos")]
 const DENIAL_ERRNOS: &[i32] = &[libc::EPERM];
 #[cfg(target_os = "linux")]
 const DENIAL_ERRNOS: &[i32] = &[libc::EACCES, libc::EXDEV, libc::EPERM];
-
-/// One workspace with one read-write brought root, holding a copy of the probe.
-struct Fixture {
-    root: TempDir,
-    policy: PathBuf,
-    /// Kept apart from the root so the policy is never inside the boundary.
-    policy_dir: TempDir,
-}
-
-impl Fixture {
-    fn new() -> Self {
-        let root = TempDir::new().expect("root");
-        std::fs::copy(PROBE, root.path().join("probe")).expect("copy probe");
-        let policy_dir = TempDir::new().expect("policy dir");
-        let policy = policy_dir.path().join("policy.json");
-        let document = json!({
-            "version": 1,
-            "workspaces": {"w": {"roots": [{"path": root.path(), "mode": "readwrite"}]}},
-            "profiles": {"p": {"workspaces": ["w"]}},
-        });
-        std::fs::write(&policy, document.to_string()).expect("write policy");
-        Self {
-            root,
-            policy,
-            policy_dir,
-        }
-    }
-
-    fn root(&self) -> &Path {
-        self.root.path()
-    }
-
-    fn probe(&self) -> PathBuf {
-        self.root().join("probe")
-    }
-
-    /// `playpen run` from inside the root.
-    fn run(&self, argv: &[&str]) -> Command {
-        self.run_from(self.root(), argv)
-    }
-
-    fn run_from(&self, cwd: &Path, argv: &[&str]) -> Command {
-        let mut command = Command::new(PLAYPEN);
-        command
-            .args(["run", "--profile", "p", "--agent", "claude", "--policy"])
-            .arg(&self.policy)
-            .arg("--")
-            .args(argv)
-            .current_dir(cwd);
-        command
-    }
-
-    /// Run the probe confined and return its verdict.
-    fn probe_inside(&self, args: &[&str]) -> Value {
-        let probe = self.probe();
-        let mut argv = vec![probe.to_str().expect("utf-8 path")];
-        argv.extend(args);
-        verdict(self.run(&argv).output().expect("run playpen"))
-    }
-}
-
-fn verdict(output: Output) -> Value {
-    assert!(
-        output.status.success(),
-        "the probe broke: {output:?} stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).expect("probe verdict is JSON")
-}
-
-fn probe_outside(args: &[&str]) -> Value {
-    verdict(Command::new(PROBE).args(args).output().expect("run probe"))
-}
 
 fn assert_denied(v: &Value) {
     assert_eq!(v["ok"], false, "{v}");

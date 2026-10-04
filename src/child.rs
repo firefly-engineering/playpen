@@ -1,6 +1,6 @@
 //! The confined child ([spec §4.1]): closes every descriptor above 2, applies the capability set
-//! to itself, and `exec`s the target. The supervisor stays the child's direct parent and exits
-//! with its status.
+//! to itself, and `exec`s the target. The supervisor stays the child's direct parent, forwards
+//! signals to it, and exits with its status ([`crate::supervisor`]).
 //!
 //! [spec §4.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#41-processes
 
@@ -12,6 +12,7 @@ use crate::backend;
 use crate::capability::CapabilitySet;
 use crate::code::Code;
 use crate::refusal::{EXIT_REFUSED, Refusal};
+use crate::supervisor::HeldSignals;
 
 /// Fork, confine the child under `caps`, `exec` `argv` in the inherited CWD, and wait for it.
 /// Returns the status the supervisor exits with.
@@ -25,14 +26,18 @@ pub fn run_confined(caps: &CapabilitySet, argv: &[OsString]) -> Result<i32, Refu
     let mut command = Command::new(target);
     command.args(args);
 
+    let held = HeldSignals::block()?;
     // SAFETY: plain fork; the child only runs `confine_and_exec`, which never returns.
     match unsafe { libc::fork() } {
         -1 => Err(Refusal::new(
             Code::ProcessFork,
             format!("fork failed: {}", std::io::Error::last_os_error()),
         )),
-        0 => confine_and_exec(caps, &mut command),
-        pid => wait(pid),
+        0 => {
+            held.release_in_child();
+            confine_and_exec(caps, &mut command)
+        }
+        pid => held.supervise(pid),
     }
 }
 
@@ -50,28 +55,6 @@ fn confine_and_exec(caps: &CapabilitySet, command: &mut Command) -> ! {
     refusal.emit();
     // SAFETY: `_exit` skips the parent's atexit handlers, which must not run twice.
     unsafe { libc::_exit(EXIT_REFUSED) }
-}
-
-fn wait(pid: libc::pid_t) -> Result<i32, Refusal> {
-    let mut status = 0;
-    loop {
-        // SAFETY: `status` is a valid out-pointer for the duration of the call.
-        if unsafe { libc::waitpid(pid, &mut status, 0) } == pid {
-            break;
-        }
-        let err = std::io::Error::last_os_error();
-        if err.kind() != std::io::ErrorKind::Interrupted {
-            return Err(Refusal::new(
-                Code::ProcessWait,
-                format!("waitpid failed: {err}"),
-            ));
-        }
-    }
-    Ok(if libc::WIFSIGNALED(status) {
-        128 + libc::WTERMSIG(status)
-    } else {
-        libc::WEXITSTATUS(status)
-    })
 }
 
 /// The sandbox gates acquiring a descriptor, not using one already open, so nothing inherited

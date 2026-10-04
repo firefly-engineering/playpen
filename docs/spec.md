@@ -1037,7 +1037,13 @@ playpen owes this contract to its callers regardless of backend
 
 - **stdio is inherited untouched.** No PTY, no piping, no interposition.
 - **stdout is sacred**: playpen never writes to it. Diagnostics go to stderr.
-- Catchable **signals are forwarded** to the child's process group.
+- Catchable **signals are forwarded** to the child. The child stays in the caller's process
+  group, its job, so a pipeline around playpen keeps the terminal and the terminal's own
+  signals reach the child directly. While playpen's group holds the terminal's foreground, the
+  terminal-generated `SIGINT`, `SIGQUIT`, `SIGTSTP` and `SIGWINCH` are therefore not forwarded
+  again; a job stop stops playpen with the child. A signal the caller ignores stays ignored.
+  `SIGKILL`, `SIGSTOP`, `SIGCHLD`, `SIGPIPE` and the synchronous fault signals are not
+  forwarded.
 - playpen **exits with the child's status**, and with `128+N` when the child dies by signal.
 - There is **no mode flag**. The same behaviour is correct for a TUI, for ACP's JSON-RPC over
   stdio, and for piped or CI use, and playpen does not know which it is in.

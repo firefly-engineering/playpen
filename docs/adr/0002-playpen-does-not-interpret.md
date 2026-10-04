@@ -81,8 +81,10 @@ nicety: without it, a caller cannot tell a refusal from an agent that exited bad
 playpen also stays the parent process rather than `exec`ing, since the credential proxy
 lives inside the boundary and ephemeral areas need tearing down. Being a supervisor is
 compatible with everything above only because the supervisor is transparent: signals
-forwarded to the child's process group, the child's status propagated, `128+N` on signal
-death.
+forwarded to the child, the child's status propagated, `128+N` on signal death. The child stays
+in the caller's process group rather than one of its own: a group of its own would have to take
+the terminal's foreground for a TUI to read it, which stops every other stage of a pipeline that
+reads the terminal, such as `playpen run … | less`.
 
 ## Rejected alternatives
 
