@@ -71,3 +71,13 @@ inside the backend, and it is the clean semantic fix if it is ever upstreamed.
   owned and stated.
 - **The fork's diff is a deliberate set.** Adding a change needs a demonstrated need and a suite row
   that asserts it.
+
+- _Amended by [ADR 0029](0029-the-backend-grants-only-what-the-policy-asked-for.md): **the set is
+  four, and the fourth is the first to clear the bar above.** nono's macOS base profile emits
+  `(allow process-exec*)` unconditionally, so the capability set's execute dimension was never
+  enforced there and the floor self-test passed under an empty capability set — a vacuous assertion,
+  which ADR 0016 calls a defect. Exec is now emitted with the same path filters that already gate
+  `file-map-executable`, so the change is one unconditional line replaced by a loop beside it, with
+  no new access class in nono. The bar held: the need was measured, and the asserting row is a new
+  negative that fails if nothing is granted. An `Execute` access class, which #63's exclusions will
+  want, is deferred as predicted rather than demonstrated._

@@ -91,3 +91,13 @@ enforce it.
   would require playpen to model information flow, a vocabulary it does not have and should not
   acquire. The operator's lever is workspace scoping, where ADR 0005 landed the same class of
   problem.
+
+- _Amended by [ADR 0025](0025-the-agent-does-not-outlive-its-supervisor-where-the-kernel-can-say-so.md):
+  **the first residual's live orphan is closed on Linux, and the residual is now macOS-only.** The
+  reasoning above stays intact — closing the *lock* half still requires the child to hold it, which
+  still needs an inherited fd, which ADR 0006 still forbids. What it did not weigh is a parent-death
+  signal, because the question was framed as who holds the lock rather than whether the agent
+  survives. The child now sets `PR_SET_PDEATHSIG`, so on Linux there is no live orphan for the
+  released lock to lie about, by any route including `SIGKILL` of the supervisor. macOS has no
+  equivalent and no userspace substitute after `exec`, so it keeps the residual as named asymmetry
+  #6._

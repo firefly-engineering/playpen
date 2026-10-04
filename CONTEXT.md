@@ -483,8 +483,13 @@ admits no grant and so is made with OS-owned binaries alone.
 
 A place where the two platforms are not equals, written down rather than absorbed. The
 compiled-profile ceiling on macOS, the mechanism's deprecation clock, denial visibility (free on
-macOS, four preconditions on Linux), namespaces for bind-mounting on Linux, and unix-socket
-**credential oracle** denial (every macOS version, Linux only from Landlock ABI 9) are the five so
+macOS, four preconditions on Linux), namespaces for bind-mounting on Linux, unix-socket
+**credential oracle** denial (every macOS version, Linux only from Landlock ABI 9), the
+parent-death signal that stops an agent outliving its **supervisor** (Linux only, and permanently
+so — nothing in userspace can watch for a parent's death after `exec`), and the readability of a
+signal's origin, which decides whether a signal sent straight to playpen while it holds the
+terminal is forwarded or dropped (Linux only: macOS reports a keypress and a `kill` alike) are the
+seven so
 far. The ledger is kept honest by the **enforcement
 test** set: an assertion that runs on only one platform must name the asymmetry it encodes,
 and a backend that makes such an assertion inapplicable has retired one rather than passed it.
@@ -506,13 +511,25 @@ required capability is unavailable, or a workspace is incoherent, playpen refuse
 than running with less than was asked for. A capability that can only be enforced
 *cooperatively* counts as unavailable, not as degraded.
 
+## Fault
+
+playpen dying of its own broken invariant, making no claim about the agent. The third outcome
+beside a **refusal** and the agent's own status, and the one the other two have no vocabulary
+for: a **refusal** says the agent never ran, a returned status says what it returned, and a fault
+says playpen cannot tell. It is reserved for a reached state that is not a contract case but a
+defect, so it is never a thing an operator can provoke or a consumer should handle — only report.
+Narrower than a crash: playpen stopping because it has detected its own bug, not because the host
+killed it.
+
 ## Code
 
-The stable, enumerated string naming *why* playpen said no. One namespace, two prefixes:
-`refusal.*` for a **refusal**, `broker.*` for a broker **denial** — different events, and
-conflating them would make "playpen refused" ambiguous to the consumers the enumeration exists
-to serve. The set is closed and versioned; consumers branch on the code, never on the prose
-beside it. Every backend error is translated into one, never leaked.
+The stable, enumerated string naming *why* playpen said what it said. One namespace, three
+prefixes: `refusal.*` for a **refusal**, `broker.*` for a broker **denial**, `bug.*` for a
+**fault** — different events, and conflating them would make "playpen refused" ambiguous to the
+consumers the enumeration exists to serve. The set is closed and versioned; consumers branch on
+the code, never on the prose beside it. Every backend error is translated into one, never leaked.
+Only the `refusal.*` prefix is bound by the release gate's requirement that every code have a
+producing **enforcement test**, since a **fault** cannot be provoked by one.
 
 ## Run record
 
@@ -521,7 +538,9 @@ profile and the selection trace that chose it, the **capability set**, the **cre
 table, the pid, the timestamps. Written *before* launch, since a run that refuses is the one whose record
 is most wanted. Lives outside every workspace and is unreachable from inside the boundary — a
 record the agent could read is one it could be confused by. A bounded ring of recent runs: a
-debugging aid, not an audit log.
+debugging aid, not an audit log — bounded in *history*, which is what that distinction protects, so
+a run still going is never evicted however many have started since. The longest-running run is the
+most interesting one, and was the one the ring was certain to drop.
 
 ## Named residual
 
@@ -532,19 +551,27 @@ client-side execution, network-reachable **credential oracles** (a cloud metadat
 credential service on host loopback), unix-socket credential oracles on Linux below Landlock ABI 9,
 a browser running without its
 own renderer isolation, an agent orphaned by the death of its **supervisor** while still holding
-a released **provisioned area**, the sequential cross-profile channel a `persistent` area
+a released **provisioned area** — on macOS only, since Linux closes it by parent-death signal for
+every route including `SIGKILL` (**named asymmetry** #6), and since a supervisor that has merely
+lost track of the agent's status kills it rather than stranding it on either platform — the
+sequential cross-profile channel a `persistent` area
 opens, git push *discovery* succeeding under a read-only **endpoint rule set**, an
 operator-written refreshing **minter** racing a host-level agent instance over the single-use
 login they share, an audit exclude rule on Linux emptying a denial trace that playpen
-cannot see the rules behind, and a profile-writable directory earlier on the host's `PATH` than a
-**shim** are the ten so far.
+cannot see the rules behind, a profile-writable directory earlier on the host's `PATH` than a
+**shim**, the **run scratch** and `ephemeral` **provisioned areas** a **fault** leaves on
+disk, because the alternative is running the most failure-prone code in playpen on a process that
+has just declared itself broken, and a signal addressed to the whole job reaching the agent twice,
+which is unclosable rather than unclosed — a receiver learns a signal's sender and never its
+target, so playpen cannot know the agent already has a copy — are the twelve so far.
 
 ## Supervisor
 
 The playpen process that outlives setup and remains the confined agent's direct parent for the
 whole run. It exists because playpen cannot be a pure `exec` shim — ephemeral areas must be torn
 down and the credential proxy hosted — and it is *transparent*: it inherits stdio untouched,
-forwards signals, and exits with the child's status. Its lifetime is what an `exclusive`
+forwards signals, and exits with the child's status, or with a **fault** where it cannot learn
+that status. Its lifetime is what an `exclusive`
 **concurrency** claim is pinned to, so a claim cannot outlive the run that took it.
 
 It stays unconfined, in the same trust class as the **minter** — it holds the real credentials the
