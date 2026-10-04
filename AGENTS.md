@@ -8,7 +8,7 @@ Issues live as GitHub issues in `firefly-engineering/playpen`, managed with the 
 
 ### Triage labels
 
-The five canonical triage roles, using their default label strings (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+The five canonical triage roles, using their default label strings (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). Alongside them, `os:darwin`, `os:linux` and `os:nixos` mark an issue specific to one OS flavour — a separate axis, applied in addition to a triage label. See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 
