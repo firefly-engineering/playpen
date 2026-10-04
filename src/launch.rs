@@ -213,7 +213,7 @@ fn run(
     // policy-declared nor state-derived ([ADR 0027]). A compiled-in FHS floor can never trigger it.
     //
     // [ADR 0027]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0027-the-state-directory-is-unreachable-by-refusal-because-a-carve-out-is-not-portable.md
-    record::unreachable(state, &caps.paths)?;
+    record::refuse_if_reachable(state, &caps.paths)?;
     record.launch(&caps)?;
     let run = record.id().clone();
     // Both callbacks write the record, and only one of them ever fires, but the borrow checker

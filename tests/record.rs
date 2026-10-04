@@ -111,6 +111,11 @@ fn no_state_directory_at_all_refuses_with_state_io() {
 /// not care whose home it is, so pointing it at the real `$HOME` would buy no realism and risk
 /// what [#118](https://github.com/firefly-engineering/playpen/issues/118) reports.
 ///
+/// The enforcement suite's `R-state-reachable` row asserts the same refusal against the suite's
+/// own contract — exit `125`, the code, and a record. This one is here for the half that row does
+/// not cover: that the line **names both paths**, which is the acceptance criterion the operator
+/// actually depends on to find the offending grant.
+///
 /// [ADR 0027]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0027-the-state-directory-is-unreachable-by-refusal-because-a-carve-out-is-not-portable.md
 #[test]
 fn a_root_above_the_state_directory_refuses_naming_both_paths() {

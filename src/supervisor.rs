@@ -244,17 +244,11 @@ impl HeldSignals {
     }
 }
 
-// `sigwaitinfo`, which the `libc` crate does not bind for `linux-gnu`. glibc exports it, and it
-// is the only way to read a blocked signal's `si_code` without a handler.
-#[cfg(target_os = "linux")]
-unsafe extern "C" {
-    fn sigwaitinfo(set: *const sigset_t, info: *mut libc::siginfo_t) -> c_int;
-}
-
 /// Take the next held signal, with what can be learnt about where it came from.
 ///
 /// On Linux `sigwaitinfo` reports a reliable `si_code` for a blocked signal: `SI_KERNEL` for one
-/// the terminal generated, `SI_USER` for a `kill` ([ADR 0026]).
+/// the terminal generated, `SI_USER` for a `kill` ([ADR 0026]). It is the only way to read a
+/// blocked signal's `si_code` without installing a handler to receive it.
 ///
 /// [ADR 0026]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0026-signal-origin-is-readable-on-linux-and-the-kill-target-is-readable-nowhere.md
 #[cfg(target_os = "linux")]
@@ -262,7 +256,7 @@ fn take(set: &sigset_t) -> Option<(c_int, Origin)> {
     let mut info = MaybeUninit::<libc::siginfo_t>::uninit();
     // SAFETY: `set` is initialised and every member is blocked; `info` is a valid out-pointer,
     // read only once sigwaitinfo has filled it.
-    let sig = unsafe { sigwaitinfo(set, info.as_mut_ptr()) };
+    let sig = unsafe { libc::sigwaitinfo(set, info.as_mut_ptr()) };
     if sig == -1 {
         return None;
     }

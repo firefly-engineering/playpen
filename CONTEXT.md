@@ -577,6 +577,14 @@ forwards signals, and exits with the child's status, or with a **fault** where i
 that status. Its lifetime is what an `exclusive`
 **concurrency** claim is pinned to, so a claim cannot outlive the run that took it.
 
+**The thread that forks is the thread that lives for the whole run.** This is a rule of its own,
+not a restatement of the single-threaded-at-fork one, and it has its own reason: the agent's
+parent-death signal fires on the death of the parent *thread*, not of the parent process, so a
+supervisor whose forking thread exits while the process lives would kill the agent for no reason.
+The older rule — no thread before the fork, or it would not have the signals blocked — can be
+satisfied by starting threads *after* the fork, which is correct for signals and fatal for this
+one. Hosting the **proxy** in the supervisor is the most likely thing to break it.
+
 It stays unconfined, in the same trust class as the **minter** — it holds the real credentials the
 **proxy** injects — while the confined agent is the forked child that applies the **capability set**
 to itself and `exec`s. The **proxy** is hosted in it rather than detached, so the proxy cannot

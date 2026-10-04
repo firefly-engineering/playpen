@@ -103,6 +103,9 @@ pub fn as_playpen_offering_nothing(
 /// and read back the record its refusal line names.
 fn decline(invocation: Invocation) -> Declined {
     let fixture = common::Fixture::with_mode("read");
+    // Where this invocation's records land. Usually the fixture's own state directory, but a row
+    // may move it, which is the whole point of `StateReachable`.
+    let mut runs = fixture.runs();
     let mut command = match invocation {
         Invocation::Usage => fixture.playpen(&["run"]),
         Invocation::MissingCapability => {
@@ -117,6 +120,13 @@ fn decline(invocation: Invocation) -> Declined {
                 .current_dir(fixture.root());
             command
         }
+        Invocation::StateReachable => {
+            let inside = fixture.root().join("state");
+            runs = inside.join("playpen/runs");
+            let mut command = fixture.run(&[canary_path().to_str().expect("utf-8 path")]);
+            command.env("XDG_STATE_HOME", &inside);
+            command
+        }
     };
     let output = command.stdin(Stdio::null()).output().expect("run playpen");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -125,7 +135,7 @@ fn decline(invocation: Invocation) -> Declined {
         _ => None,
     };
     let recorded = line.as_ref().and_then(|(_, run)| {
-        let bytes = fs::read(fixture.runs().join(format!("{run}.json"))).ok()?;
+        let bytes = fs::read(runs.join(format!("{run}.json"))).ok()?;
         // A record that does not parse as one is no record.
         let record: Record = serde_json::from_slice(&bytes).ok()?;
         Some(record.refusal.map(|refusal| refusal.code))

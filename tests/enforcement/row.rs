@@ -220,6 +220,15 @@ pub enum Invocation {
     ///
     /// [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
     MissingCapability,
+    /// `playpen run` with `XDG_STATE_HOME` inside the brought root, so the profile's grant is an
+    /// ancestor of playpen's own state directory and every run record is reachable from inside
+    /// ([ADR 0027]). The state directory is synthetic, as every row's is: the check compares
+    /// resolved paths and does not care whose home it is, so naming the real `$HOME` would buy no
+    /// realism and would leave a decoy behind if the suite were killed
+    /// ([#118](https://github.com/firefly-engineering/playpen/issues/118)).
+    ///
+    /// [ADR 0027]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0027-the-state-directory-is-unreachable-by-refusal-because-a-carve-out-is-not-portable.md
+    StateReachable,
 }
 
 /// What the row asserts of the action, outside and then inside.

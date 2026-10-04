@@ -114,6 +114,15 @@ pub const ROWS: &[Row] = &[
         from: &[Decision::Adr(7), Decision::Adr(16), Decision::Issue(54)],
     },
     Row {
+        id: "R-state-reachable",
+        class: Class::Refusal,
+        platform: BOTH,
+        fixture: Fixture::Outside,
+        action: Action::Refuse(Invocation::StateReachable),
+        expected: Expected::Recorded(Code::StateReachable),
+        from: &[Decision::Adr(27), Decision::Adr(16), Decision::Issue(116)],
+    },
+    Row {
         id: "R-missing-cap",
         class: Class::Refusal,
         platform: BOTH,

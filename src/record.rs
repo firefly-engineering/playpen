@@ -10,7 +10,7 @@
 //!
 //! The record lives in playpen's own state directory, beyond every granted path. That is enforced
 //! and not merely true of the default policy: a launch whose grants reach the directory refuses
-//! ([`unreachable`]).
+//! ([`refuse_if_reachable`]).
 //!
 //! [spec §14.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#141-the-run-record
 //! [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
@@ -92,7 +92,7 @@ pub fn state_dir(xdg_state_home: Option<OsString>, home: Option<OsString>) -> Op
 /// [ADR 0027]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0027-the-state-directory-is-unreachable-by-refusal-because-a-carve-out-is-not-portable.md
 /// [spec §14.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#141-the-run-record
 /// [Appendix C]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#appendix-c--assembly-choices
-pub fn unreachable(state: Option<&Path>, grants: &[PathGrant]) -> Result<(), Refusal> {
+pub fn refuse_if_reachable(state: Option<&Path>, grants: &[PathGrant]) -> Result<(), Refusal> {
     // No state directory means no records to reach; `RunRecord::open` has already refused.
     let Some(state) = state else {
         return Ok(());
@@ -269,11 +269,17 @@ struct Sidecar {
 }
 
 impl Sidecar {
-    /// Create the sidecar of run `id` and take its lock. A sidecar that cannot be made or locked
-    /// leaves the run looking dead, which costs the run its place in the ring but never its
-    /// launch: the record is a debugging aid, and refusing a launch over one would be worse than
-    /// the eviction it prevents.
-    fn take(runs: &Path, id: &RunId) -> Option<Self> {
+    /// Create the sidecar of run `id` and take its lock.
+    ///
+    /// A failure is `refusal.state.io`, which [Appendix A] already defines as playpen being unable
+    /// to create its own state, *the lock file included*. Carrying on without the lock was the
+    /// alternative and it is not available: §14.1 promises flatly that a live run's record is
+    /// never evicted, and a run with no lock reads as dead, so the next hundred runs would evict
+    /// it — which is #119 reopened, silently, on the one path nobody would look at. A promise
+    /// stated without qualification cannot have an unrecorded failure mode.
+    ///
+    /// [Appendix A]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#appendix-a--code-registry
+    fn take(runs: &Path, id: &RunId) -> Result<Self, Refusal> {
         let path = runs.join(format!("{id}.{LOCK_EXT}"));
         let file = File::options()
             .write(true)
@@ -281,8 +287,15 @@ impl Sidecar {
             .truncate(false)
             .mode(0o600)
             .open(&path)
-            .ok()?;
-        locked(&file).then_some(Self { path, file })
+            .map_err(|e| io_refusal("create the run record's lock file", &path, e))?;
+        if !take_lock(&file) {
+            return Err(io_refusal(
+                "lock the run record's lock file",
+                &path,
+                std::io::Error::other("another process holds it, so this run id is not fresh"),
+            ));
+        }
+        Ok(Self { path, file })
     }
 }
 
@@ -296,7 +309,7 @@ impl Drop for Sidecar {
 
 /// Take `file`'s advisory lock without waiting. Answering "is this run live?" is the only use:
 /// the kernel releases the lock on any death, so a lock nobody holds means nobody is running.
-fn locked(file: &File) -> bool {
+fn take_lock(file: &File) -> bool {
     use std::os::fd::AsRawFd;
     // SAFETY: flock acts on an open descriptor this process owns and touches no memory.
     unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
@@ -341,7 +354,7 @@ impl RunRecord {
         created.map_err(|e| io_refusal("create the run record", &path, e))?;
         // Taken before eviction runs, so this run is already live when the ring is swept and
         // cannot evict itself — which is the whole of #119.
-        let lock = Sidecar::take(&runs, id);
+        let lock = Some(Sidecar::take(&runs, id)?);
         evict(&runs, RETAINED);
         Ok(Self {
             id: id.clone(),
@@ -436,8 +449,14 @@ impl RunRecord {
     ///
     /// A rename that fails `ENOENT` is **deliberately not retried** ([ADR 0028]). Now that
     /// eviction leaves live runs alone, a live run's staging file has no legitimate remover, so
-    /// `ENOENT` here means the invariant is broken. Re-staging would convert a broken invariant
-    /// into a successful write, which is how the silent drop hid #119 in the first place.
+    /// `ENOENT` here means the invariant is broken, and re-staging would convert that into a
+    /// successful write.
+    ///
+    /// What this buys is the *message*, not propagation: only [`RunRecord::launch`] returns this
+    /// error, because it is the one write that happens before the fork. Every later write —
+    /// `spawned`, `finish`, `refuse`, `fault` — still drops it, since no teardown failure may
+    /// change the status playpen exits with. On those paths the breach is diagnosable only from
+    /// the record left un-ended, which is the same shape a `SIGKILL` leaves.
     ///
     /// [ADR 0028]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0028-the-run-record-ring-evicts-history-and-never-a-live-run.md
     fn write(&self) -> Result<(), Refusal> {
@@ -549,7 +568,7 @@ fn is_live(runs: &Path, id: &RunId) -> bool {
     };
     // Asking the question means taking the lock, so release it again at once: this is a read-only
     // sweep and must leave no lock of its own behind.
-    if locked(&file) {
+    if take_lock(&file) {
         use std::os::fd::AsRawFd;
         // SAFETY: unlocking a descriptor this process just locked.
         unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
@@ -828,7 +847,7 @@ mod tests {
 
         for access in [Access::Read, Access::ReadWrite] {
             let grants = [grant(home.path(), access, Scope::Subtree)];
-            let refusal = unreachable(Some(&state), &grants).expect_err("refuses");
+            let refusal = refuse_if_reachable(Some(&state), &grants).expect_err("refuses");
             assert_eq!(refusal.code, Code::StateReachable);
             // Both paths, so the operator can see what to change and what it reached.
             let said = refusal.message();
@@ -845,7 +864,7 @@ mod tests {
         }
         // Reachability is the breach, not writability, but the mode is named in the sentence.
         let read_only = [grant(home.path(), Access::Read, Scope::Subtree)];
-        let said = unreachable(Some(&state), &read_only)
+        let said = refuse_if_reachable(Some(&state), &read_only)
             .expect_err("a read root over the records is a breach too")
             .message()
             .to_string();
@@ -862,7 +881,7 @@ mod tests {
 
         let declared = [grant(&inside, Access::ReadWrite, Scope::Subtree)];
         assert_eq!(
-            unreachable(Some(state.path()), &declared)
+            refuse_if_reachable(Some(state.path()), &declared)
                 .expect_err("a declared path inside refuses")
                 .code,
             Code::StateReachable
@@ -874,7 +893,7 @@ mod tests {
             state_derived: true,
             ..grant(&inside, Access::ReadWrite, Scope::Subtree)
         }];
-        assert!(unreachable(Some(state.path()), &derived).is_ok());
+        assert!(refuse_if_reachable(Some(state.path()), &derived).is_ok());
     }
 
     /// Resolved on both sides, so the check cannot be walked around with a symlink.
@@ -889,7 +908,7 @@ mod tests {
 
         let grants = [grant(&link, Access::Read, Scope::Subtree)];
         assert_eq!(
-            unreachable(Some(&state), &grants)
+            refuse_if_reachable(Some(&state), &grants)
                 .expect_err("refuses")
                 .code,
             Code::StateReachable
@@ -907,12 +926,12 @@ mod tests {
         std::fs::create_dir_all(&elsewhere).expect("elsewhere");
 
         let beside = [grant(&elsewhere, Access::ReadWrite, Scope::Subtree)];
-        assert!(unreachable(Some(&state), &beside).is_ok());
+        assert!(refuse_if_reachable(Some(&state), &beside).is_ok());
         // A literal grant of an ancestor grants nothing beneath it, so it reaches no record.
         let literal = [grant(home.path(), Access::Read, Scope::Literal)];
-        assert!(unreachable(Some(&state), &literal).is_ok());
+        assert!(refuse_if_reachable(Some(&state), &literal).is_ok());
         // Nothing to reach without a state directory; `open` has already refused by then.
-        assert!(unreachable(None, &beside).is_ok());
+        assert!(refuse_if_reachable(None, &beside).is_ok());
     }
 
     #[test]

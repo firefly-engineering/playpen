@@ -1434,7 +1434,7 @@ belongs in the transparency suite instead. A `—` in that column means the asym
 | 4 | denial visibility: zero preconditions on macOS, four on Linux. Partly permanent: macOS's channel is certifiable *a priori*, Linux's only *a posteriori* | macOS | `R-trace-denials` (`n/a` on macOS) |
 | 5 | user namespaces (Chromium's nested userns) are Linux's | — | `P-unshare` (`n/a` on macOS) |
 | 6 | the parent-death signal that stops an agent outliving its supervisor. Permanent: after `exec` only a kernel mechanism can do this, and macOS has none. Narrows [§18](#18-named-residuals) item 4 to macOS | Linux | `the_agent_does_not_outlive_a_killed_supervisor`, transparency (`n/a` on macOS) |
-| 7 | signal **origin** is readable: `sigwaitinfo`'s `si_code` is `SI_KERNEL` for a tty keypress and `SI_USER` for a `kill`, where macOS reports `0` for both with `si_pid` set in both. Live consequence: a direct `kill -INT` to a foreground playpen is forwarded on Linux and silently dropped on macOS | Linux | `a_signal_sent_straight_to_a_foreground_playpen_is_forwarded`, transparency (`n/a` on macOS) |
+| 7 | signal **origin** is readable: `sigwaitinfo`'s `si_code` is `SI_KERNEL` for a tty keypress and `SI_USER` for a `kill`, where macOS reports `0` for both with `si_pid` set in both. Two live consequences, both macOS-only: a direct `kill -INT` to a foreground playpen is silently dropped, and `SIGTTIN`/`SIGTTOU` reach the agent twice, because the foreground proxy macOS falls back to is *inverted* for exactly those two — a process receiving one is by definition in a background group | Linux | `a_signal_sent_straight_to_a_foreground_playpen_is_forwarded`, transparency (`n/a` on macOS) |
 
 Linux's lack of a mechanism-native Keychain is recorded through `N-keychain` being `n/a` on
 Linux.
@@ -1761,7 +1761,7 @@ rather than a `refusal.*` code needing an exemption from the gate.
 | `refusal.root.missing` | existence | a brought root, toolchain root, symlink target or shim target is absent |
 | `refusal.exclusion.missing` | existence | an exclusion's path is absent |
 | `refusal.integrity.writable` | existence | the policy, the playpen executable, the shim link or its directory is profile-writable |
-| `refusal.state.reachable` † | existence | a granted path reaches playpen's state directory, in either containment direction, naming both paths and the mode. Covers brought roots, toolchain roots, exclusions and the floor; exempt are only subtrees playpen *derived from* that directory ([ADR 0027](adr/0027-the-state-directory-is-unreachable-by-refusal-because-a-carve-out-is-not-portable.md)) |
+| `refusal.state.reachable` † | existence | a granted path reaches playpen's state directory, in either containment direction, naming both paths and the mode. Checked per grant rather than per declaring construct, so it covers the floor and brought roots today and toolchain roots and exclusions as those arrive; exempt are only subtrees playpen *derived from* that directory ([ADR 0027](adr/0027-the-state-directory-is-unreachable-by-refusal-because-a-carve-out-is-not-portable.md)) |
 | `refusal.cwd.ungranted` | existence | the CWD is not inside a granted root |
 | `refusal.area.busy` † | launch | an `exclusive` area is held; names the holding run id |
 | `refusal.state.collision` | coherence | a share entry names the kind's instruction entry point and the kind has no import mechanism |
