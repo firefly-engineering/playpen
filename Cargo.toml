@@ -28,6 +28,13 @@ toml = "0.9"
 name = "floor_self_test"
 harness = false
 
+# The enforcement suite (spec §17). Its `P-canary` row is the floor self-test, so it too runs
+# outside the libtest harness.
+[[test]]
+name = "enforcement"
+path = "tests/enforcement/main.rs"
+harness = false
+
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 

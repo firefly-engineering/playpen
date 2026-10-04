@@ -1,6 +1,10 @@
-//! `playpen-probe`: the shipped actor for boundary assertions. It performs one action and writes
-//! its verdict as one JSON object per line on stdout. Its exit status carries one bit: the probe
-//! ran (0) or the probe broke (non-zero).
+//! `playpen-probe`: the shipped actor for boundary assertions. It performs the actions on its
+//! command line in order and writes one verdict per action, as one JSON object per line on stdout,
+//! so that one confined launch serves every row of a policy fixture ([spec §17.1]). Its exit
+//! status carries one bit: the probe ran (0) or the probe broke (non-zero), never "an assertion
+//! failed".
+//!
+//! [spec §17.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#171-form
 
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
@@ -33,26 +37,41 @@ const WAITED: &[libc::c_int] = &[
 ];
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let action = match args.as_slice() {
-        [verb, path] if verb == "read" => Action::Read(path.clone()),
-        [verb, path] if verb == "write" => Action::Write(path.clone()),
-        [verb] if verb == "fds" => Action::Fds,
-        [verb] if verb == "stdio" => Action::Stdio,
-        [verb] if verb == "wait-signal" => Action::WaitSignal,
-        _ => {
-            eprintln!(
-                "usage: playpen-probe (read <path> | write <path> | fds | stdio | wait-signal)"
-            );
-            return ExitCode::from(2);
-        }
+    let Some(actions) = parse(std::env::args().skip(1)) else {
+        eprintln!(
+            "usage: playpen-probe (read <path> | write <path> | fds | stdio)... | playpen-probe wait-signal"
+        );
+        return ExitCode::from(2);
     };
-    match action {
-        Action::WaitSignal => wait_signal(),
-        action => {
-            println!("{}", verdict(&action));
-            ExitCode::SUCCESS
-        }
+    if let [Action::WaitSignal] = actions.as_slice() {
+        return wait_signal();
+    }
+    for action in &actions {
+        println!("{}", verdict(action));
+    }
+    ExitCode::SUCCESS
+}
+
+/// One or more actions, each a verb followed by its operand if it takes one. `wait-signal` writes
+/// its own verdicts and does not return until signalled, so it stands alone.
+fn parse(args: impl IntoIterator<Item = String>) -> Option<Vec<Action>> {
+    let mut args = args.into_iter();
+    let mut actions = Vec::new();
+    while let Some(verb) = args.next() {
+        actions.push(match verb.as_str() {
+            "read" => Action::Read(args.next()?),
+            "write" => Action::Write(args.next()?),
+            "fds" => Action::Fds,
+            "stdio" => Action::Stdio,
+            "wait-signal" => Action::WaitSignal,
+            _ => return None,
+        });
+    }
+    match actions.as_slice() {
+        [] => None,
+        [Action::WaitSignal] => Some(actions),
+        _ if actions.iter().any(|a| matches!(a, Action::WaitSignal)) => None,
+        _ => Some(actions),
     }
 }
 

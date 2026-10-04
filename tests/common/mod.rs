@@ -13,7 +13,15 @@ use tempfile::TempDir;
 pub const PLAYPEN: &str = env!("CARGO_BIN_EXE_playpen");
 pub const PROBE: &str = env!("CARGO_BIN_EXE_playpen-probe");
 
-/// One workspace with one read-write brought root, holding a copy of the probe.
+/// The denial errnos of this platform ([spec §15.2]); `ENOENT` is never one.
+///
+/// [spec §15.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#152-capability-matrix
+#[cfg(target_os = "macos")]
+pub const DENIAL_ERRNOS: &[i32] = &[libc::EPERM];
+#[cfg(target_os = "linux")]
+pub const DENIAL_ERRNOS: &[i32] = &[libc::EACCES, libc::EXDEV, libc::EPERM];
+
+/// One workspace with one brought root, holding a copy of the probe.
 pub struct Fixture {
     root: TempDir,
     pub policy: PathBuf,
@@ -24,14 +32,20 @@ pub struct Fixture {
 }
 
 impl Fixture {
+    /// The root is read-write.
     pub fn new() -> Self {
+        Self::with_mode("readwrite")
+    }
+
+    /// The root is granted at `mode` (`read` or `readwrite`).
+    pub fn with_mode(mode: &str) -> Self {
         let root = TempDir::new().expect("root");
         std::fs::copy(PROBE, root.path().join("probe")).expect("copy probe");
         let policy_dir = TempDir::new().expect("policy dir");
         let policy = policy_dir.path().join("policy.json");
         let document = json!({
             "version": 1,
-            "workspaces": {"w": {"roots": [{"path": root.path(), "mode": "readwrite"}]}},
+            "workspaces": {"w": {"roots": [{"path": root.path(), "mode": mode}]}},
             "profiles": {"p": {"workspaces": ["w"]}},
         });
         std::fs::write(&policy, document.to_string()).expect("write policy");

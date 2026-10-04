@@ -11,13 +11,7 @@ use std::process::Command;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use common::{Fixture, PLAYPEN, PROBE, assert_refused, probe_outside, verdict};
-
-/// A denial errno on this platform ([spec §15.2]); `ENOENT` is never one.
-#[cfg(target_os = "macos")]
-const DENIAL_ERRNOS: &[i32] = &[libc::EPERM];
-#[cfg(target_os = "linux")]
-const DENIAL_ERRNOS: &[i32] = &[libc::EACCES, libc::EXDEV, libc::EPERM];
+use common::{DENIAL_ERRNOS, Fixture, PLAYPEN, PROBE, assert_refused, probe_outside, verdict};
 
 fn assert_denied(v: &Value) {
     assert_eq!(v["ok"], false, "{v}");
