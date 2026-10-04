@@ -1225,16 +1225,24 @@ The run record holds:
 - the route table, with provenance;
 - the unix-socket regime that applied ([§6.3](#63-credential-oracles));
 - minted `expires_at` values, never tokens;
-- the pid and timestamps;
+- the child's pid, the supervisor's own pid, and timestamps;
 - teardown failures.
 
 It is **opened before launch**, because the run that refuses is the one whose record is most
 wanted. It lives in playpen's own state directory: outside every workspace, not writable by any
 profile, and **unreachable from inside the boundary**. Retention is a bounded ring of recent
-runs; it is a debugging aid, not an audit log. The ring holds the **100** most recent runs.
-Opening a record removes every run older than those, with any staging file a crash left behind
-for it
+runs; it is a debugging aid, not an audit log. The ring holds the **100** most recent **ended**
+runs, plus **every live run**. Opening a record removes ended runs beyond those, with the staging
+file a crash left behind for one
 ([#52](https://github.com/firefly-engineering/playpen/issues/52)).
+
+**A live run's record is never evicted**, which is a promise `explain`'s consumers depend on: the
+run most worth inspecting is the longest-running one, and shims count as runs, so a long session
+would otherwise be certain to evict its own record
+([ADR 0028](adr/0028-the-run-record-ring-evicts-history-and-never-a-live-run.md)). The bound is on
+*history*, which is what "a debugging aid, not an audit log" protects; live runs are self-limiting
+because each one is a process. How liveness is established is an assembly choice
+([Appendix C](#appendix-c--assembly-choices), item C11).
 
 A run id is a ULID, so ids sort by the time their run started. The record is one JSON document
 per run, carrying its own format version, and holds the refusal's code and sentence when the run
@@ -1895,3 +1903,18 @@ Choices this spec made that no ticket decided. **Reviewed and accepted** in
 - **C10. Injection substitutes in place** ([§7.3](#73-session-phantom)): the real secret replaces
   the phantom in whichever header the client used. Serving a credential across shapes is handed
   off ([§20](#20-handed-off-questions)).
+- **C11. A live run is recognised by an advisory lock on a sidecar**
+  ([ADR 0028](adr/0028-the-run-record-ring-evicts-history-and-never-a-live-run.md)), decided after
+  #9 rather than reviewed in it. §14.1 specifies the invariant and not the mechanism, so a future
+  playpen could use a pidfd on Linux and change nothing a caller sees. The run holds the lock on
+  `runs/<run id>.lock` for its lifetime; the kernel releases it on any death, `SIGKILL` included,
+  so eviction needs **no age bound** — a constant would have to exceed any agent session and
+  undercut any tolerable leak, and the first half is not playpen's to guess. It needs a sidecar
+  because a lock follows the inode and every record write replaces `<run id>.json` by rename.
+  There are **two removers**: the run removes its own on the normal path, and eviction removes
+  whatever remains, since a fault ends by `abort` and runs no destructor
+  ([§11.6](#116-process-transparency)). A **missing** sidecar beside an un-ended record counts as
+  **dead**, so a record written by an older playpen is evictable rather than immortal. A staging
+  rename failing `ENOENT` is deliberately **not retried**: a live run's staging file has no
+  legitimate remover, so that errno means the invariant is broken, and re-staging would turn a
+  broken invariant into a successful write.

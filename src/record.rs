@@ -3,7 +3,10 @@
 //! the one whose record is most wanted — leaves one. `explain` launches nothing and opens none.
 //!
 //! The store is a bounded ring, not an audit log: opening a record evicts all but the
-//! [`RETAINED`] most recent runs ([spec §14.1]).
+//! [`RETAINED`] most recent **ended** runs, and never a live one ([spec §14.1]). The bound is on
+//! *history*, which is what "a debugging aid, not an audit log" was protecting; live runs are
+//! self-limiting because each one is a process. Liveness is an advisory lock on a sidecar
+//! ([`LOCK_EXT`]), so there is no age bound to pick.
 //!
 //! The record lives in playpen's own state directory, outside every workspace. It is unreachable
 //! from inside the boundary because nothing grants it: the floor never reaches under `$HOME`. A
@@ -44,6 +47,16 @@ pub const RETAINED: usize = 100;
 const RECORD_EXT: &str = "json";
 /// The extension of the staging file a record is written through.
 const STAGING_EXT: &str = "tmp";
+/// The extension of the sidecar a live run holds an advisory lock on ([ADR 0028]).
+///
+/// A lock follows the inode and every write replaces `<id>.json` by rename, so a record cannot
+/// carry its own liveness. The lock is released by the kernel on any death, `SIGKILL` included,
+/// which is why there is no age bound anywhere in eviction: the kernel answers the question
+/// exactly, where a constant would have to be longer than any agent session and shorter than any
+/// tolerable leak.
+///
+/// [ADR 0028]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0028-the-run-record-ring-evicts-history-and-never-a-live-run.md
+const LOCK_EXT: &str = "lock";
 
 /// playpen's state directory ([spec Appendix C], item C7): `$XDG_STATE_HOME/playpen`, else
 /// `$HOME/.local/state/playpen`. A relative value is invalid and ignored, as the XDG base
@@ -127,6 +140,14 @@ pub struct Record {
     pub launched_at_unix_ms: Option<u64>,
     /// The confined child's pid.
     pub pid: Option<libc::pid_t>,
+    /// The supervisor's own pid, so a stale record is diagnosable by hand once its lock is gone
+    /// ([ADR 0028]). Recording the child's pid without its parent's was odd on its own terms.
+    /// Liveness is never decided from it: pid reuse makes that wrong precisely on a busy host,
+    /// which is when a long session is most likely to be pushed out of the ring.
+    ///
+    /// [ADR 0028]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0028-the-run-record-ring-evicts-history-and-never-a-live-run.md
+    #[serde(default)]
+    pub supervisor_pid: Option<libc::pid_t>,
     pub ended_at_unix_ms: Option<u64>,
     /// The status playpen exited with after the child ran.
     pub status: Option<i32>,
@@ -155,12 +176,66 @@ pub struct RecordedFault {
     pub message: String,
 }
 
-/// An open run record: the stored [`Record`] and the file it is written to.
+/// An open run record: the stored [`Record`], the file it is written to, and the sidecar whose
+/// advisory lock marks this run live for as long as this value exists.
 #[derive(Debug)]
 pub struct RunRecord {
     id: RunId,
     path: PathBuf,
     record: Record,
+    /// Dropping it releases the lock and removes the sidecar, after which eviction may take the
+    /// record.
+    #[expect(
+        dead_code,
+        reason = "an RAII guard: the run is live for exactly as long as this field exists"
+    )]
+    lock: Option<Sidecar>,
+}
+
+/// The sidecar of a live run: an open, flocked file that is removed when the run ends.
+#[derive(Debug)]
+struct Sidecar {
+    path: PathBuf,
+    /// The lock is the open descriptor, so closing this file is what releases it.
+    #[expect(
+        dead_code,
+        reason = "an RAII guard: the lock is held for exactly as long as this descriptor is open"
+    )]
+    file: File,
+}
+
+impl Sidecar {
+    /// Create the sidecar of run `id` and take its lock. A sidecar that cannot be made or locked
+    /// leaves the run looking dead, which costs the run its place in the ring but never its
+    /// launch: the record is a debugging aid, and refusing a launch over one would be worse than
+    /// the eviction it prevents.
+    fn take(runs: &Path, id: &RunId) -> Option<Self> {
+        let path = runs.join(format!("{id}.{LOCK_EXT}"));
+        let file = File::options()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&path)
+            .ok()?;
+        locked(&file).then_some(Self { path, file })
+    }
+}
+
+impl Drop for Sidecar {
+    fn drop(&mut self) {
+        // The run's own remover, on the normal path. Eviction removes whatever remains, because
+        // ADR 0024's fault path ends by `abort` and runs no destructor.
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Take `file`'s advisory lock without waiting. Answering "is this run live?" is the only use:
+/// the kernel releases the lock on any death, so a lock nobody holds means nobody is running.
+fn locked(file: &File) -> bool {
+    use std::os::fd::AsRawFd;
+    // SAFETY: flock acts on an open descriptor this process owns and touches no memory.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
 }
 
 impl RunRecord {
@@ -185,6 +260,8 @@ impl RunRecord {
             capabilities: None,
             launched_at_unix_ms: None,
             pid: None,
+            // SAFETY: getpid has no preconditions.
+            supervisor_pid: Some(unsafe { libc::getpid() }),
             ended_at_unix_ms: None,
             status: None,
             refusal: None,
@@ -198,11 +275,15 @@ impl RunRecord {
             .and_then(|()| std::fs::hard_link(&staged, &path));
         let _ = std::fs::remove_file(&staged);
         created.map_err(|e| io_refusal("create the run record", &path, e))?;
+        // Taken before eviction runs, so this run is already live when the ring is swept and
+        // cannot evict itself — which is the whole of #119.
+        let lock = Sidecar::take(&runs, id);
         evict(&runs, RETAINED);
         Ok(Self {
             id: id.clone(),
             path,
             record,
+            lock,
         })
     }
 
@@ -288,12 +369,30 @@ impl RunRecord {
     }
 
     /// Replace the stored record whole, by rename, so a reader never sees half of one.
+    ///
+    /// A rename that fails `ENOENT` is **deliberately not retried** ([ADR 0028]). Now that
+    /// eviction leaves live runs alone, a live run's staging file has no legitimate remover, so
+    /// `ENOENT` here means the invariant is broken. Re-staging would convert a broken invariant
+    /// into a successful write, which is how the silent drop hid #119 in the first place.
+    ///
+    /// [ADR 0028]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0028-the-run-record-ring-evicts-history-and-never-a-live-run.md
     fn write(&self) -> Result<(), Refusal> {
         let staged = self.path.with_extension(STAGING_EXT);
         encode(&self.record)
             .and_then(|bytes| write_owner_only(&staged, &bytes))
             .and_then(|()| std::fs::rename(&staged, &self.path))
-            .map_err(|e| io_refusal("write the run record", &self.path, e))
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => Refusal::new(
+                    Code::StateIo,
+                    format!(
+                        "the staging file of live run {} went missing under it, which only \
+                         eviction could do and eviction does not touch live runs: {}: {e}",
+                        self.id,
+                        staged.display()
+                    ),
+                ),
+                _ => io_refusal("write the run record", &self.path, e),
+            })
     }
 }
 
@@ -329,32 +428,70 @@ pub fn list(state: Option<&Path>) -> Result<Vec<Record>, Refusal> {
         .collect())
 }
 
-/// Keep the `keep` most recent runs in `runs` and remove every older one, with any staging file a
-/// crash left behind for it. A staging file of a run at least as recent as the oldest kept may
-/// belong to a playpen writing it right now, so it stays; an older run still going is not told
-/// apart yet ([#119](https://github.com/firefly-engineering/playpen/issues/119)). Eviction never
-/// refuses: a failure only leaves the ring longer than its bound until the next run tries again.
+/// Keep the `keep` most recent **ended** runs in `runs`, plus every live run, and remove the rest
+/// along with each removed run's sidecar and any staging file a crash left behind for it
+/// ([ADR 0028]).
+///
+/// Eviction used to order by start time, which is a ULID's key and the opposite of what a
+/// debugging aid wants: the longest-running run is the most interesting and was the most certain
+/// to be dropped. Shims count as runs, so a long session was guaranteed to evict its own record.
+///
+/// A run is live exactly when something holds its sidecar's lock. There is no age bound: a missing
+/// sidecar beside an un-ended record counts as dead, so a record written by an older playpen is
+/// evictable rather than immortal. Eviction never refuses — a failure only leaves the ring longer
+/// than its bound until the next run tries again.
+///
+/// [ADR 0028]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0028-the-run-record-ring-evicts-history-and-never-a-live-run.md
 fn evict(runs: &Path, keep: usize) {
-    let Ok(mut ids) = stored_ids(runs) else {
+    let Ok(ids) = stored_ids(runs) else {
         return;
     };
-    if ids.len() <= keep {
+    // History is what the bound applies to. A live run takes no place in the ring: live runs are
+    // self-limiting because each one is a process.
+    let mut history: Vec<RunId> = ids.into_iter().filter(|id| !is_live(runs, id)).collect();
+    if history.len() <= keep {
         return;
     }
-    ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-    // Run ids sort by start time, so everything below the oldest kept id is older.
-    let oldest_kept = ids[ids.len() - keep].clone();
+    history.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    let evicted: std::collections::HashSet<&str> = history[..history.len() - keep]
+        .iter()
+        .map(RunId::as_str)
+        .collect();
     let Ok(entries) = std::fs::read_dir(runs) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let older = run_of(&path, &[RECORD_EXT, STAGING_EXT])
-            .is_some_and(|id| id.as_str() < oldest_kept.as_str());
-        if older {
+        // A live run's staging file has no legitimate remover, so the sweep is scoped to the runs
+        // being evicted rather than to everything older than a cutoff.
+        let ours = run_of(&path, &[RECORD_EXT, STAGING_EXT, LOCK_EXT])
+            .is_some_and(|id| evicted.contains(id.as_str()));
+        if ours {
             let _ = std::fs::remove_file(&path);
         }
     }
+}
+
+/// Whether run `id` is still going: something holds its sidecar's lock.
+///
+/// A sidecar that is absent, or that this process can lock, belongs to no live run — the kernel
+/// releases an advisory lock on any death, `SIGKILL` included. Two `flock`s from separate `open`
+/// calls conflict even within one process, so a run asking about itself correctly sees itself as
+/// live.
+fn is_live(runs: &Path, id: &RunId) -> bool {
+    let path = runs.join(format!("{id}.{LOCK_EXT}"));
+    let Ok(file) = File::open(&path) else {
+        return false;
+    };
+    // Asking the question means taking the lock, so release it again at once: this is a read-only
+    // sweep and must leave no lock of its own behind.
+    if locked(&file) {
+        use std::os::fd::AsRawFd;
+        // SAFETY: unlocking a descriptor this process just locked.
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+        return false;
+    }
+    true
 }
 
 /// The ids of every stored record in `runs`. Staging files, and names that are no run id, are
@@ -527,10 +664,25 @@ mod tests {
         assert_eq!(stored.capabilities, Some(caps));
         assert_eq!(stored.pid, Some(42));
         assert_eq!(stored.status, Some(3));
-        let runs: Vec<_> = std::fs::read_dir(state.path().join("runs"))
-            .expect("runs")
-            .collect();
-        assert_eq!(runs.len(), 1, "no staging file is left behind");
+        assert_eq!(
+            names(&state.path().join(RUNS)),
+            [format!("{id}.json"), format!("{id}.lock")],
+            "the record and its sidecar, and no staging file left behind"
+        );
+        assert_eq!(
+            stored.supervisor_pid,
+            Some(std::process::id() as libc::pid_t)
+        );
+
+        // The run's own remover: once it is dropped, nothing marks it live.
+        let runs = state.path().join(RUNS);
+        drop(record);
+        assert_eq!(
+            names(&runs),
+            [format!("{id}.json")],
+            "ending the run removes its sidecar"
+        );
+        assert!(!is_live(&runs, &id), "and the run no longer reads as live");
     }
 
     #[test]
@@ -672,19 +824,92 @@ mod tests {
         let state = tempfile::TempDir::new().expect("state");
         let runs = state.path().join(RUNS);
         std::fs::create_dir(&runs).expect("runs");
-        for unix_ms in 0..RETAINED as u64 {
+        // One more than the bound, all of them history: none has a sidecar, so none is live.
+        for unix_ms in 0..=RETAINED as u64 {
             plant(&runs, &format!("{}.json", id_at(unix_ms)));
         }
         let id = RunId::allocate().expect("id");
-        RunRecord::open(&id, Some(state.path())).expect("open");
+        let _run = RunRecord::open(&id, Some(state.path())).expect("open");
         let names = names(&runs);
-        assert_eq!(names.len(), RETAINED);
         assert!(
             !names.contains(&format!("{}.json", id_at(0))),
-            "the oldest went"
+            "the oldest piece of history went"
         );
         assert!(names.contains(&format!("{}.json", id_at(1))));
         assert!(names.contains(&format!("{id}.json")), "the new run stays");
+        assert_eq!(
+            names.iter().filter(|n| n.ends_with(".json")).count(),
+            RETAINED + 1,
+            "the bound's {RETAINED} most recent ended runs, plus the one live run"
+        );
+    }
+
+    /// The bug #119 reported: a long session's own record was guaranteed to be evicted, because
+    /// shims count as runs and the ring ordered by *start* time. `explain --run` then failed for
+    /// the one run most worth inspecting ([ADR 0028]).
+    ///
+    /// [ADR 0028]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0028-the-run-record-ring-evicts-history-and-never-a-live-run.md
+    #[test]
+    fn a_live_run_survives_any_number_of_runs_started_after_it() {
+        let state = tempfile::TempDir::new().expect("state");
+        // The long session: the oldest run there is, and still going.
+        let session = id_at(1);
+        let live = RunRecord::open(&session, Some(state.path())).expect("open");
+        let runs = state.path().join(RUNS);
+        // Shims, each one a run of its own, more than enough to fill the ring twice over.
+        for unix_ms in 2..=(2 * RETAINED as u64 + 2) {
+            plant(&runs, &format!("{}.json", id_at(unix_ms)));
+            evict(&runs, RETAINED);
+        }
+
+        assert!(is_live(&runs, &session), "the session still holds its lock");
+        assert_eq!(
+            read(Some(state.path()), &session).expect("the live run's record is still readable"),
+            *live.record()
+        );
+
+        // Once it ends, it is history like any other, and the oldest of it at that.
+        drop(live);
+        evict(&runs, RETAINED);
+        assert_eq!(
+            read(Some(state.path()), &session)
+                .expect_err("an ended run takes its place in the ring")
+                .code,
+            Code::RunUnknown
+        );
+    }
+
+    /// An un-ended record with no sidecar is dead, not immortal: a record a `SIGKILL`ed playpen
+    /// left behind, or one written by a playpen from before the sidecar existed, must still be
+    /// evictable or the ring would grow without bound ([ADR 0028]).
+    ///
+    /// [ADR 0028]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0028-the-run-record-ring-evicts-history-and-never-a-live-run.md
+    #[test]
+    fn an_unended_record_without_a_sidecar_counts_as_dead() {
+        let runs = tempfile::TempDir::new().expect("runs");
+        let runs = runs.path();
+        let zombie = id_at(1);
+        plant(runs, &format!("{zombie}.json"));
+        plant(runs, &format!("{}.json", id_at(2)));
+        assert!(!is_live(runs, &zombie));
+        evict(runs, 1);
+        assert_eq!(names(runs), [format!("{}.json", id_at(2))]);
+    }
+
+    /// A sidecar left beside an ended record — ADR 0024's fault path ends by `abort` and runs no
+    /// destructor — is removed by eviction, which is the second of the two removers.
+    #[test]
+    fn eviction_removes_a_sidecar_the_run_could_not() {
+        let runs = tempfile::TempDir::new().expect("runs");
+        let runs = runs.path();
+        let faulted = id_at(1);
+        plant(runs, &format!("{faulted}.json"));
+        plant(runs, &format!("{faulted}.lock"));
+        plant(runs, &format!("{}.json", id_at(2)));
+        // Nothing holds the planted sidecar's lock, so the run reads as dead despite it.
+        assert!(!is_live(runs, &faulted));
+        evict(runs, 1);
+        assert_eq!(names(runs), [format!("{}.json", id_at(2))]);
     }
 
     #[test]

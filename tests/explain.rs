@@ -171,11 +171,12 @@ fn explain_asks_one_question() {
 }
 
 #[test]
-fn the_ring_keeps_the_most_recent_runs() {
+fn the_ring_keeps_the_most_recent_ended_runs() {
     let fx = Fixture::new();
-    // A full ring of older runs: ids in the ULID alphabet, below any id allocated today.
+    // One more than the bound, all of them history: ids in the ULID alphabet, below any id
+    // allocated today, and none with a sidecar, so none reads as live.
     std::fs::create_dir_all(fx.runs()).expect("runs");
-    let planted: Vec<_> = (0..playpen::record::RETAINED)
+    let planted: Vec<_> = (0..=playpen::record::RETAINED)
         .map(|i| format!("0000000000000000000000{i:04}"))
         .collect();
     for id in &planted {
@@ -189,12 +190,14 @@ fn the_ring_keeps_the_most_recent_runs() {
     );
 
     let ids = fx.run_ids();
-    assert_eq!(ids.len(), playpen::record::RETAINED);
-    assert_eq!(ids[0], planted[1], "only the oldest went");
+    assert_eq!(ids[0], planted[1], "only the oldest piece of history went");
     assert!(
         ids[ids.len() - 1] > planted[planted.len() - 1],
         "the new run stays"
     );
+    // The bound is on history; the run that was live while the ring was swept took no place in
+    // it, which is what keeps a long session's own record (ADR 0028).
+    assert_eq!(ids.len(), playpen::record::RETAINED + 1);
 }
 
 #[test]
