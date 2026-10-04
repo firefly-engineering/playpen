@@ -236,13 +236,16 @@ fn catchable_signals_sent_to_playpen_reach_the_child_once() {
     let fx = Fixture::new();
     let probe = fx.probe();
     for signal in WAITED {
-        let run = Waiting::spawn(fx.run(&[probe.to_str().unwrap(), "wait-signal"]));
-        // SAFETY: getpgrp has no preconditions.
-        let job = unsafe { libc::getpgrp() };
+        // playpen runs as a job of its own, as a shell would start it. Left in the test's group,
+        // it would hold the terminal's foreground whenever the suite runs from one, and a direct
+        // `SIGINT` would then be taken for the terminal's and not forwarded (#112).
+        let mut command = fx.run(&[probe.to_str().unwrap(), "wait-signal"]);
+        command.process_group(0);
+        let run = Waiting::spawn(command);
         assert_eq!(
             run.child_group(),
-            job,
-            "the child stays in the caller's job"
+            run.pid(),
+            "the child stays in playpen's job"
         );
         run.signal(signal);
         let (lines, status) = run.finish();
