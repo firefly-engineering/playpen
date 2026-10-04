@@ -1,5 +1,5 @@
 //! The invocation contract ([spec §11]) and the launch sequence ([spec §4.2]), as far as the
-//! walking skeleton goes: open the run record, parse, read the policy, resolve one profile's
+//! walking skeleton goes: parse, open the run record, read the policy, resolve one profile's
 //! roots, check the CWD, self-test the floor, compile the floor plus those roots, complete the
 //! record, and run the target confined.
 //!
@@ -15,6 +15,7 @@ use clap::{Parser, Subcommand};
 use crate::capability::{PathGrant, Scope};
 use crate::child;
 use crate::code::Code;
+use crate::explain;
 use crate::floor::floor;
 use crate::policy::Policy;
 use crate::record::{RunId, RunRecord};
@@ -31,17 +32,22 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Run a target confined under a profile.
-    Run {
-        #[arg(long)]
-        profile: String,
-        #[arg(long)]
-        agent: String,
-        #[arg(long)]
-        policy: Option<PathBuf>,
-        /// Everything after `--`, passed through verbatim.
-        #[arg(last = true, required = true, value_parser = clap::value_parser!(OsString))]
-        argv: Vec<OsString>,
-    },
+    Run(RunArgs),
+    /// Replay a stored run record, or list the runs the ring holds.
+    Explain(explain::Args),
+}
+
+#[derive(Debug, clap::Args)]
+struct RunArgs {
+    #[arg(long)]
+    profile: String,
+    #[arg(long)]
+    agent: String,
+    #[arg(long)]
+    policy: Option<PathBuf>,
+    /// Everything after `--`, passed through verbatim.
+    #[arg(last = true, required = true, value_parser = clap::value_parser!(OsString))]
+    argv: Vec<OsString>,
 }
 
 /// The agent kinds this playpen knows. A kind is always stated, never inferred ([spec §11.2]).
@@ -57,6 +63,30 @@ pub fn main(
     cwd: std::io::Result<PathBuf>,
     state: Option<PathBuf>,
 ) -> i32 {
+    // Parsing has no effect, so it can come first. `explain` launches nothing ([spec §14.2]), so
+    // it opens no record and pushes no run out of the ring, and nor does a request for help;
+    // anything else is a launch, and a command line that does not parse is refused as one.
+    //
+    // [spec §14.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#142-playpen-explain
+    let parsed = match Cli::try_parse_from(args) {
+        Ok(Cli {
+            command: Command::Explain(args),
+        }) => {
+            return match explain::explain(&args, state.as_deref(), &mut std::io::stdout().lock()) {
+                Ok(()) => 0,
+                Err(refusal) => refuse(&refusal, None),
+            };
+        }
+        Ok(Cli {
+            command: Command::Run(args),
+        }) => Ok(args),
+        Err(err) if matches!(err.kind(), ErrorKind::DisplayHelp) => {
+            // No agent was going to run. stdout is sacred, so help goes to stderr.
+            eprint!("{}", err.render());
+            return 0;
+        }
+        Err(err) => Err(err),
+    };
     // Step 1, before anything that can refuse, so that every refusal leaves a record.
     let run = match RunId::allocate() {
         Ok(run) => run,
@@ -66,7 +96,7 @@ pub fn main(
         Ok(record) => record,
         Err(refusal) => return refuse(&refusal, Some(&run)),
     };
-    match invoke(args, cwd, &mut record) {
+    match invoke(parsed, cwd, &mut record) {
         Ok(status) => {
             record.finish(status);
             status
@@ -79,35 +109,25 @@ pub fn main(
 }
 
 fn invoke(
-    args: impl IntoIterator<Item = OsString>,
+    parsed: Result<RunArgs, clap::Error>,
     cwd: std::io::Result<PathBuf>,
     record: &mut RunRecord,
 ) -> Result<i32, Refusal> {
-    let cli = match Cli::try_parse_from(args) {
-        Ok(cli) => cli,
-        Err(err) if matches!(err.kind(), ErrorKind::DisplayHelp) => {
-            // Help was asked for; no agent was going to run. stdout is sacred, so it goes to stderr.
-            eprint!("{}", err.render());
-            return Ok(0);
-        }
-        Err(err) => return Err(usage_refusal(&err)),
-    };
-    match cli.command {
-        Command::Run {
-            profile,
-            agent,
-            policy,
-            argv,
-        } => run(
-            &profile,
-            &agent,
-            policy.as_deref(),
-            &argv,
-            cwd,
-            record,
-            self_test::floor,
-        ),
-    }
+    let RunArgs {
+        profile,
+        agent,
+        policy,
+        argv,
+    } = parsed.map_err(|err| usage_refusal(&err))?;
+    run(
+        &profile,
+        &agent,
+        policy.as_deref(),
+        &argv,
+        cwd,
+        record,
+        self_test::floor,
+    )
 }
 
 fn refuse(refusal: &Refusal, run: Option<&RunId>) -> i32 {
@@ -293,7 +313,9 @@ mod tests {
             "-v",
         ])
         .expect("parses");
-        let Command::Run { argv, profile, .. } = cli.command;
+        let Command::Run(RunArgs { argv, profile, .. }) = cli.command else {
+            panic!("parses as run");
+        };
         assert_eq!(profile, "p");
         assert_eq!(argv, ["x", "--profile", "-v"]);
     }

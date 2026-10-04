@@ -4,6 +4,7 @@ pub mod backend;
 pub mod capability;
 pub mod child;
 pub mod code;
+pub mod explain;
 pub mod floor;
 pub mod launch;
 pub mod policy;

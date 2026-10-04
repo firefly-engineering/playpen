@@ -1,6 +1,9 @@
-//! The run record ([spec §14.1]): what playpen knows and the kernel cannot. Every invocation
+//! The run record ([spec §14.1]): what playpen knows and the kernel cannot. Every launch
 //! allocates a run id and opens its record first ([spec §4.2], step 1), so the run that refuses —
-//! the one whose record is most wanted — leaves one.
+//! the one whose record is most wanted — leaves one. `explain` launches nothing and opens none.
+//!
+//! The store is a bounded ring, not an audit log: opening a record evicts all but the
+//! [`RETAINED`] most recent runs ([spec §14.1]).
 //!
 //! The record lives in playpen's own state directory, outside every workspace. It is unreachable
 //! from inside the boundary because nothing grants it: the floor never reaches under `$HOME`. A
@@ -29,6 +32,17 @@ pub const FORMAT: u32 = 1;
 
 /// The directory under the state directory that holds one `<run id>.json` per run.
 const RUNS: &str = "runs";
+
+/// How many runs the ring keeps ([spec §14.1]): enough to find the run that just misbehaved, and
+/// few enough that the store never needs pruning by hand.
+///
+/// [spec §14.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#141-the-run-record
+pub const RETAINED: usize = 100;
+
+/// The extension of a stored record.
+const RECORD_EXT: &str = "json";
+/// The extension of the staging file a record is written through.
+const STAGING_EXT: &str = "tmp";
 
 /// playpen's state directory ([spec Appendix C], item C7): `$XDG_STATE_HOME/playpen`, else
 /// `$HOME/.local/state/playpen`. A relative value is invalid and ignored, as the XDG base
@@ -75,6 +89,12 @@ impl RunId {
             .map(|digit| char::from(ALPHABET[(bits >> (5 * digit)) as usize & 31]))
             .collect();
         Self(id)
+    }
+
+    /// `id` if it is a run id as playpen writes them: 26 digits of the ULID alphabet. Nothing
+    /// else names a record, so nothing else can reach outside the store.
+    pub fn parse(id: &str) -> Option<Self> {
+        (id.len() == 26 && id.bytes().all(|b| ALPHABET.contains(&b))).then(|| Self(id.to_string()))
     }
 
     pub fn as_str(&self) -> &str {
@@ -131,20 +151,14 @@ impl RunRecord {
     /// Create the state directory if need be, and the record of run `id` in it. A failure is
     /// `refusal.state.io`; `state` is `None` when the environment names no state directory.
     pub fn open(id: &RunId, state: Option<&Path>) -> Result<Self, Refusal> {
-        let state = state.ok_or_else(|| {
-            Refusal::new(
-                Code::StateIo,
-                "no state directory: neither XDG_STATE_HOME nor HOME is an absolute path",
-            )
-        })?;
-        let runs = state.join(RUNS);
+        let runs = runs_dir(state)?;
         // Owner-only: a record names the policy and the paths of every grant.
         DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(&runs)
             .map_err(|e| io_refusal("create the state directory", &runs, e))?;
-        let path = runs.join(format!("{id}.json"));
+        let path = record_path(&runs, id);
         let record = Record {
             format: FORMAT,
             run: id.to_string(),
@@ -161,12 +175,13 @@ impl RunRecord {
         };
         // Staged whole, then linked into place: a reader never sees half of one, and a link
         // that exists already is a collision, which refuses rather than overwrites another run.
-        let staged = path.with_extension("tmp");
+        let staged = path.with_extension(STAGING_EXT);
         let created = encode(&record)
             .and_then(|bytes| write_owner_only(&staged, &bytes))
             .and_then(|()| std::fs::hard_link(&staged, &path));
         let _ = std::fs::remove_file(&staged);
         created.map_err(|e| io_refusal("create the run record", &path, e))?;
+        evict(&runs, RETAINED);
         Ok(Self {
             id: id.clone(),
             path,
@@ -244,12 +259,105 @@ impl RunRecord {
 
     /// Replace the stored record whole, by rename, so a reader never sees half of one.
     fn write(&self) -> Result<(), Refusal> {
-        let staged = self.path.with_extension("tmp");
+        let staged = self.path.with_extension(STAGING_EXT);
         encode(&self.record)
             .and_then(|bytes| write_owner_only(&staged, &bytes))
             .and_then(|()| std::fs::rename(&staged, &self.path))
             .map_err(|e| io_refusal("write the run record", &self.path, e))
     }
+}
+
+/// The stored record of run `id`. A run the ring has evicted, or never held, is
+/// `refusal.run.unknown`; a record this playpen cannot read is `refusal.state.io`.
+pub fn read(state: Option<&Path>, id: &RunId) -> Result<Record, Refusal> {
+    let path = record_path(&runs_dir(state)?, id);
+    let bytes = std::fs::read(&path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => Refusal::new(
+            Code::RunUnknown,
+            format!("no record of run {id} in {}", path.display()),
+        ),
+        _ => io_refusal("read the run record", &path, e),
+    })?;
+    decode(&bytes).map_err(|e| io_refusal("read the run record", &path, e))
+}
+
+/// Every record in the ring, most recent first. A record that cannot be read is left out: the
+/// ring is a debugging aid, and one unreadable entry, such as another playpen's format, must not
+/// hide the rest. A store not yet created holds no runs.
+pub fn list(state: Option<&Path>) -> Result<Vec<Record>, Refusal> {
+    let runs = runs_dir(state)?;
+    let mut ids = match stored_ids(&runs) {
+        Ok(ids) => ids,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(io_refusal("list the run records", &runs, e)),
+    };
+    ids.sort_by(|a, b| b.as_str().cmp(a.as_str()));
+    Ok(ids
+        .iter()
+        .filter_map(|id| std::fs::read(record_path(&runs, id)).ok())
+        .filter_map(|bytes| decode(&bytes).ok())
+        .collect())
+}
+
+/// Keep the `keep` most recent runs in `runs` and remove every older one, with any staging file a
+/// crash left behind for it. A staging file of a run at least as recent as the oldest kept may
+/// belong to a playpen writing it right now, so it stays; an older run still going is not told
+/// apart yet ([#119](https://github.com/firefly-engineering/playpen/issues/119)). Eviction never
+/// refuses: a failure only leaves the ring longer than its bound until the next run tries again.
+fn evict(runs: &Path, keep: usize) {
+    let Ok(mut ids) = stored_ids(runs) else {
+        return;
+    };
+    if ids.len() <= keep {
+        return;
+    }
+    ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    // Run ids sort by start time, so everything below the oldest kept id is older.
+    let oldest_kept = ids[ids.len() - keep].clone();
+    let Ok(entries) = std::fs::read_dir(runs) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let older = run_of(&path, &[RECORD_EXT, STAGING_EXT])
+            .is_some_and(|id| id.as_str() < oldest_kept.as_str());
+        if older {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// The ids of every stored record in `runs`. Staging files, and names that are no run id, are
+/// not records.
+fn stored_ids(runs: &Path) -> std::io::Result<Vec<RunId>> {
+    let mut ids = Vec::new();
+    for entry in std::fs::read_dir(runs)? {
+        ids.extend(run_of(&entry?.path(), &[RECORD_EXT]));
+    }
+    Ok(ids)
+}
+
+/// The run `path` belongs to, if it is `<run id>.<ext>` for one of `extensions`.
+fn run_of(path: &Path, extensions: &[&str]) -> Option<RunId> {
+    let extension = path.extension()?.to_str()?;
+    if !extensions.contains(&extension) {
+        return None;
+    }
+    RunId::parse(path.file_stem()?.to_str()?)
+}
+
+fn runs_dir(state: Option<&Path>) -> Result<PathBuf, Refusal> {
+    let state = state.ok_or_else(|| {
+        Refusal::new(
+            Code::StateIo,
+            "no state directory: neither XDG_STATE_HOME nor HOME is an absolute path",
+        )
+    })?;
+    Ok(state.join(RUNS))
+}
+
+fn record_path(runs: &Path, id: &RunId) -> PathBuf {
+    runs.join(format!("{id}.{RECORD_EXT}"))
 }
 
 fn write_owner_only(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -265,6 +373,22 @@ fn write_owner_only(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// A capability set holding a path that is not UTF-8 cannot be written as JSON, and is an error.
 fn encode(record: &Record) -> std::io::Result<Vec<u8>> {
     serde_json::to_vec_pretty(record).map_err(std::io::Error::other)
+}
+
+/// A record of another format is an error before its shape is read, so the message names the
+/// format rather than whichever field moved.
+fn decode(bytes: &[u8]) -> std::io::Result<Record> {
+    #[derive(Deserialize)]
+    struct Versioned {
+        format: u32,
+    }
+    let Versioned { format } = serde_json::from_slice(bytes).map_err(std::io::Error::other)?;
+    if format != FORMAT {
+        return Err(std::io::Error::other(format!(
+            "record format {format}, and this playpen reads format {FORMAT}"
+        )));
+    }
+    serde_json::from_slice(bytes).map_err(std::io::Error::other)
 }
 
 fn io_refusal(what: &str, path: &Path, err: std::io::Error) -> Refusal {
@@ -341,7 +465,7 @@ mod tests {
         assert_eq!(a.as_str().len(), 26);
     }
 
-    fn read(record: &RunRecord) -> Record {
+    fn read_back(record: &RunRecord) -> Record {
         serde_json::from_slice(&std::fs::read(record.path()).expect("read")).expect("parse")
     }
 
@@ -351,7 +475,7 @@ mod tests {
         let id = RunId::allocate().expect("id");
         let mut record = RunRecord::open(&id, Some(state.path())).expect("open");
         assert_eq!(record.path(), state.path().join(format!("runs/{id}.json")));
-        let opened = read(&record);
+        let opened = read_back(&record);
         assert_eq!(opened.run, id.as_str());
         assert_eq!(opened.refusal, None);
 
@@ -368,7 +492,7 @@ mod tests {
         record.launch(&caps).expect("launch");
         record.spawned(42);
         record.finish(3);
-        let stored = read(&record);
+        let stored = read_back(&record);
         assert_eq!(&stored, record.record());
         assert_eq!(stored.capabilities, Some(caps));
         assert_eq!(stored.pid, Some(42));
@@ -385,7 +509,7 @@ mod tests {
         let id = RunId::allocate().expect("id");
         let mut record = RunRecord::open(&id, Some(state.path())).expect("open");
         record.refuse(&Refusal::new(Code::CwdUngranted, "cwd /tmp is outside"));
-        let stored = read(&record);
+        let stored = read_back(&record);
         assert_eq!(
             stored.refusal,
             Some(RecordedRefusal {
@@ -394,6 +518,155 @@ mod tests {
             })
         );
         assert!(stored.ended_at_unix_ms >= Some(stored.started_at_unix_ms));
+    }
+
+    #[test]
+    fn only_a_run_id_as_playpen_writes_it_parses() {
+        let id = RunId::allocate().expect("id");
+        assert_eq!(RunId::parse(id.as_str()), Some(id.clone()));
+        for not_an_id in [
+            "",
+            "../../../../etc/passwd",
+            &id.as_str()[1..],
+            &format!("{id}0"),
+            &id.as_str().to_lowercase(),
+            // `U` is not in Crockford's alphabet.
+            "0000000000000000000000000U",
+        ] {
+            assert_eq!(RunId::parse(not_an_id), None, "{not_an_id:?}");
+        }
+    }
+
+    /// A run started at `unix_ms`, so ids sort by the argument.
+    fn id_at(unix_ms: u64) -> RunId {
+        RunId::encode(unix_ms, [7; 10])
+    }
+
+    fn plant(runs: &Path, name: &str) {
+        std::fs::write(runs.join(name), "{}").expect("plant");
+    }
+
+    fn names(runs: &Path) -> Vec<String> {
+        let mut names: Vec<_> = std::fs::read_dir(runs)
+            .expect("runs")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .into_string()
+                    .expect("utf-8")
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn eviction_keeps_the_most_recent_runs_and_sweeps_older_staging_files() {
+        let runs = tempfile::TempDir::new().expect("runs");
+        let runs = runs.path();
+        let ids: Vec<_> = (1..=5).map(id_at).collect();
+        for id in &ids {
+            plant(runs, &format!("{id}.json"));
+        }
+        // A crash left the oldest run's staging file; the newest is mid-write.
+        plant(runs, &format!("{}.tmp", ids[0]));
+        plant(runs, &format!("{}.tmp", ids[4]));
+        // Neither is a run's, so neither is the ring's to remove.
+        plant(runs, "notes.txt");
+        plant(runs, "planted.json");
+
+        evict(runs, 3);
+
+        let mut kept: Vec<_> = ids[2..].iter().map(|id| format!("{id}.json")).collect();
+        kept.push(format!("{}.tmp", ids[4]));
+        kept.extend(["notes.txt".into(), "planted.json".into()]);
+        kept.sort();
+        assert_eq!(names(runs), kept);
+    }
+
+    #[test]
+    fn a_ring_within_its_bound_is_left_alone() {
+        let runs = tempfile::TempDir::new().expect("runs");
+        let runs = runs.path();
+        plant(runs, &format!("{}.json", id_at(1)));
+        plant(runs, &format!("{}.tmp", id_at(0)));
+        let before = names(runs);
+        evict(runs, 1);
+        assert_eq!(names(runs), before);
+    }
+
+    #[test]
+    fn opening_a_record_evicts_beyond_the_bound() {
+        let state = tempfile::TempDir::new().expect("state");
+        let runs = state.path().join(RUNS);
+        std::fs::create_dir(&runs).expect("runs");
+        for unix_ms in 0..RETAINED as u64 {
+            plant(&runs, &format!("{}.json", id_at(unix_ms)));
+        }
+        let id = RunId::allocate().expect("id");
+        RunRecord::open(&id, Some(state.path())).expect("open");
+        let names = names(&runs);
+        assert_eq!(names.len(), RETAINED);
+        assert!(
+            !names.contains(&format!("{}.json", id_at(0))),
+            "the oldest went"
+        );
+        assert!(names.contains(&format!("{}.json", id_at(1))));
+        assert!(names.contains(&format!("{id}.json")), "the new run stays");
+    }
+
+    #[test]
+    fn a_stored_record_reads_back_and_lists_most_recent_first() {
+        let state = tempfile::TempDir::new().expect("state");
+        assert_eq!(
+            list(Some(state.path())).expect("list"),
+            vec![],
+            "no store yet"
+        );
+        let mut first = RunRecord::open(&id_at(1), Some(state.path())).expect("open");
+        first.finish(0);
+        let second = RunRecord::open(&id_at(2), Some(state.path())).expect("open");
+        assert_eq!(
+            read(Some(state.path()), first.id()).expect("read"),
+            *first.record()
+        );
+        assert_eq!(
+            list(Some(state.path())).expect("list"),
+            vec![second.record().clone(), first.record().clone()]
+        );
+    }
+
+    #[test]
+    fn a_record_the_ring_does_not_hold_is_an_unknown_run() {
+        let state = tempfile::TempDir::new().expect("state");
+        let refusal = read(Some(state.path()), &id_at(1)).expect_err("refuses");
+        assert_eq!(refusal.code, Code::RunUnknown);
+        assert!(refusal.message().contains(id_at(1).as_str()), "{refusal}");
+        let refusal = read(None, &id_at(1)).expect_err("refuses");
+        assert_eq!(refusal.code, Code::StateIo);
+        assert_eq!(list(None).expect_err("refuses").code, Code::StateIo);
+    }
+
+    #[test]
+    fn an_unreadable_record_refuses_on_read_and_is_left_out_of_the_list() {
+        let state = tempfile::TempDir::new().expect("state");
+        let kept = RunRecord::open(&id_at(1), Some(state.path())).expect("open");
+        let runs = state.path().join(RUNS);
+        let newer = format!(r#"{{"format": {}, "run": "x"}}"#, FORMAT + 1);
+        std::fs::write(runs.join(format!("{}.json", id_at(2))), newer).expect("plant");
+        std::fs::write(runs.join(format!("{}.json", id_at(3))), "not json").expect("plant");
+
+        let refusal = read(Some(state.path()), &id_at(2)).expect_err("refuses");
+        assert_eq!(refusal.code, Code::StateIo);
+        let named = format!("record format {}", FORMAT + 1);
+        assert!(refusal.message().contains(&named), "{refusal}");
+        let refusal = read(Some(state.path()), &id_at(3)).expect_err("refuses");
+        assert_eq!(refusal.code, Code::StateIo);
+        assert_eq!(
+            list(Some(state.path())).expect("list"),
+            vec![kept.record().clone()]
+        );
     }
 
     #[test]

@@ -58,6 +58,7 @@ registry! {
     SelectionUnknownProfile => "refusal.selection.unknown-profile",
     SelectionNoMatch => "refusal.selection.no-match",
     SelectionAmbiguous => "refusal.selection.ambiguous",
+    RunUnknown => "refusal.run.unknown",
     // Host state
     RootMissing => "refusal.root.missing",
     ExclusionMissing => "refusal.exclusion.missing",

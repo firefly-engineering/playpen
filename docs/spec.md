@@ -181,6 +181,11 @@ Each step either succeeds or refuses with exit `125` and one refusal line
 ([§14.3](#143-the-refusal-line)). The **run record** is opened first, so every refusal,
 including a failure to find a policy or select a profile, leaves a record.
 
+`playpen explain` launches nothing ([§14.2](#142-playpen-explain)), so it runs none of these
+steps and opens no record: a command line that parses as `explain` is answered before step 1, and
+takes no place in the ring of recent runs. Nor does a request for help. A command line that does
+not parse is refused as a launch, with a record ([#52](https://github.com/firefly-engineering/playpen/issues/52)).
+
 1. **Allocate a run id and open the run record** ([§14.1](#141-the-run-record)).
 2. **Identify the invocation.** If `argv[0]` is not `playpen`, look it up as `shims.<argv[0]>`
    ([§11.3](#113-shims)). Otherwise parse the `playpen` subcommand.
@@ -973,7 +978,9 @@ playpen check [--policy <path>] [--no-filesystem]
 - `run` takes **`--profile` and `--agent` as mandatory** arguments and performs no context
   resolution of its own. Context resolution belongs to the shim front-end and to `explain`.
 - **`--` is a hard wall.** Everything after it is opaque bytes, passed through verbatim.
-- On success, playpen writes **nothing** to stdout or stderr.
+- On success, `run` writes **nothing** to stdout or stderr. `explain` is a report: it writes
+  the report to stdout, and refuses as `run` does, on stderr
+  ([#52](https://github.com/firefly-engineering/playpen/issues/52)).
 
 ### 11.2 Kind
 
@@ -1038,7 +1045,7 @@ playpen owes this contract to its callers regardless of backend
 ([ADR 0002](adr/0002-playpen-does-not-interpret.md)):
 
 - **stdio is inherited untouched.** No PTY, no piping, no interposition.
-- **stdout is sacred**: playpen never writes to it. Diagnostics go to stderr.
+- **stdout is sacred**: a run never writes to it. Diagnostics go to stderr.
 - Catchable **signals are forwarded** to the child. The child stays in the caller's process
   group, its job, so a pipeline around playpen keeps the terminal and the terminal's own
   signals reach the child directly. While playpen's group holds the terminal's foreground, the
@@ -1184,7 +1191,10 @@ The run record holds:
 It is **opened before launch**, because the run that refuses is the one whose record is most
 wanted. It lives in playpen's own state directory: outside every workspace, not writable by any
 profile, and **unreachable from inside the boundary**. Retention is a bounded ring of recent
-runs; it is a debugging aid, not an audit log.
+runs; it is a debugging aid, not an audit log. The ring holds the **100** most recent runs.
+Opening a record removes every run older than those, with any staging file a crash left behind
+for it
+([#52](https://github.com/firefly-engineering/playpen/issues/52)).
 
 A run id is a ULID, so ids sort by the time their run started. The record is one JSON document
 per run, carrying its own format version, and holds the refusal's code and sentence when the run
@@ -1201,12 +1211,15 @@ refused.
 
 `explain` launches nothing. `explain --run <id>` replays a stored record and prints the exact
 platform command that pulls that run's denials, with the pid filled in. The run id appears on
-every refusal line, and `explain --list` lists recent runs.
+every refusal line, and `explain --list` lists recent runs, most recent first. A run the ring
+does not hold, or an id that is not a run id, is `refusal.run.unknown`
+([#52](https://github.com/firefly-engineering/playpen/issues/52)).
 
 ### 14.3 The refusal line
 
 A refusal is **one line on stderr**, followed by exit `125`. The line carries the prefix, a
-stable code, a human sentence, the offending value, and the run id:
+stable code, a human sentence, the offending value, and the run id. `explain` has no run of its
+own ([§4.2](#42-launch-sequence)), so its refusal line ends at the offending value:
 
 ```
 playpen: refusal.area.busy: persistent area playpen/landing is held by another run — run 01J9… (holder 01J8…)
@@ -1624,6 +1637,7 @@ item C1). "Tier" is when the refusal can fire ([§10.5](#105-validation-tiers)).
 | `refusal.selection.unknown-profile` | launch | an explicit or `PLAYPEN_PROFILE` profile is not in the policy |
 | `refusal.selection.no-match` | launch | no step of the chain selected a profile |
 | `refusal.selection.ambiguous` | launch | two equally long matching prefixes |
+| `refusal.run.unknown` † | explain | `explain --run` names a run the ring does not hold, or no run id at all |
 
 ### Host state
 

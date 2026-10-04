@@ -33,7 +33,8 @@ impl Refusal {
         &self.message
     }
 
-    /// The refusal line of run `run`. `None` only when no run id could be allocated.
+    /// The refusal line of run `run`. `None` when no run id could be allocated, or when the
+    /// invocation is `explain`, which launches nothing and so has no run of its own.
     pub fn line(&self, run: Option<&RunId>) -> String {
         match run {
             Some(run) => format!("{self} — run {run}"),
@@ -51,9 +52,17 @@ impl Refusal {
 
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "playpen: {}: ", self.code)?;
-        // A value can carry any byte; the line must stay one line.
-        for c in self.message.chars() {
+        write!(f, "playpen: {}: {}", self.code, OneLine(&self.message))
+    }
+}
+
+/// `text` with every control character escaped. A value can carry any byte, and a line that
+/// shows one must stay one line.
+pub struct OneLine<'a>(pub &'a str);
+
+impl fmt::Display for OneLine<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for c in self.0.chars() {
             if c.is_control() {
                 write!(f, "{}", c.escape_default())?;
             } else {
