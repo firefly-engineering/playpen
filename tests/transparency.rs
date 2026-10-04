@@ -141,6 +141,13 @@ impl Waiting {
             .expect("spawn playpen");
         let mut stdout = BufReader::new(spawned.stdout.take().expect("stdout"));
         let ready = read_verdict(&mut stdout);
+        if !ready["pid"].is_i64() {
+            // The probe never ran, so there is nothing to wait for. Stop the spawned process
+            // here: a `Waiting` without a probe pid could not clean up after itself.
+            let _ = spawned.kill();
+            let _ = spawned.wait();
+            panic!("the probe never reported ready; first line: {ready}");
+        }
         let run = Self {
             spawned,
             stdout,
@@ -319,11 +326,12 @@ fn at_an_interactive_shell_ctrl_c_arrives_once_and_ctrl_z_stops_the_whole_job() 
         .current_dir(fx.root())
         .stderr(slave.try_clone().expect("dup"));
     with_controlling_terminal(&mut command, &slave);
-    let mut run = Waiting::spawn(command);
-    drop(slave);
-    // Read the terminal's echo and the shell's job messages, so closing it never waits on them.
+    // Read the terminal's echo and the shell's job messages from the start, so the shell's exit
+    // never waits on them, even when the run fails before the probe is ready.
     let mut screen = File::from(master.try_clone().expect("dup"));
     std::thread::spawn(move || std::io::copy(&mut screen, &mut std::io::sink()));
+    let mut run = Waiting::spawn(command);
+    drop(slave);
 
     // The child is in the foreground job, where a TUI may read its terminal.
     let job = run.child_group();
