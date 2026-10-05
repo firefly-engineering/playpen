@@ -165,3 +165,69 @@ fn an_ephemeral_area_is_writable_for_the_run_at_a_real_path_and_removed_at_teard
     );
     assert!(!area.exists(), "the area outlived its run");
 }
+
+#[test]
+fn a_persistent_area_survives_across_runs() {
+    let fx = Fixture::new();
+    let policy = with_areas(&fx, json!({"landing": {"lifetime": "persistent"}}));
+    let from = "workspace:w.areas.landing";
+    let (area, output) = with_area_on_stdin(&fx, &policy, from, WRITE_AREA);
+    assert!(output.status.success(), "{output:?}");
+    assert!(area.join("f").exists(), "the area did not survive its run");
+    let (again, output) = with_area_on_stdin(&fx, &policy, from, r#"read area; cat "$area/f""#);
+    assert_eq!(again, area);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "x\n", "{output:?}");
+}
+
+/// Hold an `exclusive` area in a run that waits on its stdin; returns the run and its id.
+fn hold(fx: &Fixture, policy: &Path) -> (Child, String) {
+    let before = fx.run_ids();
+    // `read` fails at end of file, which is how the test lets it go.
+    let child = spawn(fx, policy, "read _ || :");
+    let record = launched(fx, &before);
+    (child, record["run"].as_str().expect("a run id").to_owned())
+}
+
+#[test]
+fn a_held_exclusive_area_refuses_naming_the_holder_and_releases_when_the_supervisor_dies() {
+    let fx = Fixture::new();
+    // `exclusive` is the default.
+    let policy = with_areas(&fx, json!({"landing": {"lifetime": "persistent"}}));
+    let (mut holder, id) = hold(&fx, &policy);
+    let output = fx
+        .run_under(&policy, &[&os_bin("true")])
+        .output()
+        .expect("playpen");
+    common::assert_refused(&output, "refusal.area.busy");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(&format!("held by run {id}")), "{stderr}");
+
+    // The supervisor dies with no chance to clean up; the kernel releases its lock.
+    holder.kill().expect("SIGKILL the supervisor");
+    holder.wait().expect("reap it");
+    // Closing its stdin ends the agent, which on macOS outlives its supervisor (ADR 0025).
+    drop(holder.stdin.take());
+    let output = fx
+        .run_under(&policy, &[&os_bin("true")])
+        .output()
+        .expect("playpen");
+    assert!(
+        output.status.success(),
+        "the lock outlived its supervisor: {output:?}"
+    );
+}
+
+#[test]
+fn two_runs_share_a_shared_area_concurrently() {
+    let fx = Fixture::new();
+    let policy = with_areas(
+        &fx,
+        json!({"cache": {"lifetime": "persistent", "concurrency": "shared"}}),
+    );
+    let (mut first, _) = hold(&fx, &policy);
+    let (area, output) = with_area_on_stdin(&fx, &policy, "workspace:w.areas.cache", WRITE_AREA);
+    assert!(output.status.success(), "{output:?}");
+    assert!(area.join("f").exists());
+    drop(first.stdin.take());
+    assert!(first.wait().expect("first run").success());
+}

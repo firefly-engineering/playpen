@@ -7,19 +7,26 @@
 //! `explain` states them without creating anything; `run` creates them at launch steps 8 and 9
 //! and removes what is the run's own at teardown ([spec §4.2]).
 //!
+//! playpen arbitrates only what it provisions ([ADR 0010]): an `ephemeral` area is keyed by run, so
+//! there is nothing to arbitrate; a `persistent` one is keyed by workspace, and is either `shared`,
+//! or `exclusive` under an advisory lock the supervisor holds for the run.
+//!
 //! [spec §5.7]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#57-run-scratch
 //! [spec §5.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#54-provisioned-areas
 //! [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
+//! [ADR 0010]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0010-concurrency-is-a-property-of-a-provisioned-area.md
 //! [ADR 0027]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0027-the-state-directory-is-unreachable-by-refusal-because-a-carve-out-is-not-portable.md
 
 use std::fmt::Write as _;
-use std::fs::DirBuilder;
-use std::os::unix::fs::DirBuilderExt;
+use std::fs::{DirBuilder, File};
+use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::capability::{Access, PathGrant, Scope};
 use crate::code::Code;
-use crate::policy::{Area, Policy, Profile};
+use crate::policy::{Area, Concurrency, Policy, Profile};
 use crate::record::RunId;
 use crate::refusal::Refusal;
 
@@ -38,6 +45,11 @@ const AREAS: &str = "areas";
 const EPHEMERAL: &str = "ephemeral";
 /// Under [`AREAS`]: persistent areas, one directory per workspace.
 const PERSISTENT: &str = "persistent";
+/// The directory under the state directory holding the lock file of each `exclusive` area. Beside
+/// the areas rather than inside one, so no run is ever granted a lock file ([ADR 0010]).
+///
+/// [ADR 0010]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0010-concurrency-is-a-property-of-a-provisioned-area.md
+const LOCKS: &str = "locks";
 
 /// Where a run's provisioned state lives.
 #[derive(Debug, Clone)]
@@ -116,6 +128,79 @@ impl Layout {
             .join(component(&planned.name))
     }
 
+    /// The lock file of an `exclusive` area.
+    fn lock(&self, planned: &Planned) -> PathBuf {
+        self.state
+            .join(LOCKS)
+            .join(component(&planned.workspace))
+            .join(format!("{}.lock", component(&planned.name)))
+    }
+
+    /// Claim every `exclusive` area of this layout ([spec §4.2], step 8): an advisory `flock` on
+    /// its lock file, held by the supervisor until it exits, for any reason, which is what
+    /// releases it. A held lock refuses at once with `refusal.area.busy`, naming the run that holds
+    /// it; launch never queues.
+    ///
+    /// [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
+    fn claim(&self) -> Result<Vec<File>, Refusal> {
+        let exclusive = self.areas.iter().filter(|planned| {
+            planned.area
+                == Area::Persistent {
+                    concurrency: Concurrency::Exclusive,
+                }
+        });
+        let mut claims = Vec::new();
+        for planned in exclusive {
+            let path = self.lock(planned);
+            let io = |e: std::io::Error| {
+                Refusal::new(
+                    Code::StateIo,
+                    format!(
+                        "cannot lock area {} at {}: {e}",
+                        planned.from(),
+                        path.display()
+                    ),
+                )
+            };
+            if let Some(parent) = path.parent() {
+                create(
+                    parent,
+                    &format!("the lock directory of area {}", planned.from()),
+                )?;
+            }
+            let mut file = File::options()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .mode(0o600)
+                .open(&path)
+                .map_err(io)?;
+            // SAFETY: flock acts on an open descriptor this process owns and touches no memory.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() != Some(libc::EWOULDBLOCK) {
+                    return Err(io(err));
+                }
+                return Err(Refusal::new(
+                    Code::AreaBusy,
+                    format!(
+                        "area {} is held by {}, and its concurrency is exclusive",
+                        planned.from(),
+                        holder(&mut file)
+                    ),
+                ));
+            }
+            // The holder's id, for the next run to name. Written under the lock, so a reader that
+            // finds the lock held finds an id or, in the instant before this write, none.
+            file.set_len(0)
+                .and_then(|()| file.write_all(self.run.as_bytes()))
+                .map_err(io)?;
+            claims.push(file);
+        }
+        Ok(claims)
+    }
+
     /// The grants a run of this layout holds on what playpen provisions for it: read-write, as
     /// state playpen derived.
     pub fn grants(&self) -> Vec<PathGrant> {
@@ -139,8 +224,10 @@ impl Layout {
     /// the returned value is dropped, which is teardown, and also any refusal after this point. A
     /// failure is `refusal.state.io`.
     pub fn provision(&self) -> Result<Provisioned, Refusal> {
+        // Claimed first, so a run refused for a busy area creates nothing.
         let mut provisioned = Provisioned {
             removed: Vec::new(),
+            claims: self.claim()?,
         };
         let scratch = self.scratch();
         create(&scratch, "the run scratch")?;
@@ -164,6 +251,14 @@ impl Layout {
 pub struct Provisioned {
     /// Removed at teardown: the run's own, which nothing after it can refer to.
     removed: Vec<PathBuf>,
+    /// The lock file of every `exclusive` area, held for as long as this value exists. Opened
+    /// close-on-exec, and the child closes every descriptor above 2 besides, so the lock stays
+    /// the supervisor's.
+    #[expect(
+        dead_code,
+        reason = "an RAII guard: each claim is held for exactly as long as its descriptor is open"
+    )]
+    claims: Vec<File>,
 }
 
 impl Drop for Provisioned {
@@ -174,6 +269,19 @@ impl Drop for Provisioned {
         for path in &self.removed {
             let _ = std::fs::remove_dir_all(path);
         }
+    }
+}
+
+/// Who holds a lock file: the run id it holds, or a sentence saying it cannot be read.
+fn holder(file: &mut File) -> String {
+    let mut id = String::new();
+    match file
+        .read_to_string(&mut id)
+        .ok()
+        .and_then(|_| RunId::parse(id.trim()))
+    {
+        Some(id) => format!("run {id}"),
+        None => "a run whose id is not yet written".into(),
     }
 }
 
@@ -361,6 +469,106 @@ mod tests {
         assert!(
             refusal.message().contains("workspace:w.areas.t"),
             "{refusal}"
+        );
+    }
+
+    fn persistent(concurrency: Option<&str>) -> Policy {
+        let mut area = serde_json::json!({"lifetime": "persistent"});
+        if let Some(concurrency) = concurrency {
+            area["concurrency"] = concurrency.into();
+        }
+        policy(serde_json::json!({"landing": area}))
+    }
+
+    #[test]
+    fn a_persistent_area_survives_its_run_and_is_found_by_the_next() {
+        let state = tempfile::TempDir::new().expect("state");
+        let policy = persistent(Some("shared"));
+        let first = layout_of(state.path(), &policy);
+        let path = area(&first.grants(), "workspace:w.areas.landing")
+            .path
+            .clone();
+        let provisioned = first.provision().expect("provisioned");
+        std::fs::write(path.join("cloned"), "x").expect("writable");
+        drop(provisioned);
+        assert!(
+            path.join("cloned").exists(),
+            "playpen removed a persistent area"
+        );
+        let second = layout_of(state.path(), &policy);
+        assert_eq!(
+            area(&second.grants(), "workspace:w.areas.landing").path,
+            path
+        );
+    }
+
+    /// `exclusive` is the default: a held area refuses at once, naming the run holding it.
+    #[test]
+    fn a_held_exclusive_area_refuses_naming_its_holder_until_released() {
+        let state = tempfile::TempDir::new().expect("state");
+        for concurrency in [None, Some("exclusive")] {
+            let policy = persistent(concurrency);
+            let holder = layout_of(state.path(), &policy);
+            let held = holder.provision().expect("the first run claims it");
+            let refusal = layout_of(state.path(), &policy)
+                .provision()
+                .expect_err("the second run is refused");
+            assert_eq!(refusal.code, Code::AreaBusy, "{concurrency:?}");
+            assert!(refusal.message().contains(&holder.run), "{refusal}");
+            assert!(
+                refusal.message().contains("workspace:w.areas.landing"),
+                "{refusal}"
+            );
+            drop(held);
+            let _again = layout_of(state.path(), &policy)
+                .provision()
+                .expect("released with its run");
+        }
+    }
+
+    #[test]
+    fn a_refused_claim_creates_nothing_of_its_own() {
+        let state = tempfile::TempDir::new().expect("state");
+        let policy = persistent(None);
+        let _held = layout_of(state.path(), &policy).provision().expect("held");
+        let refused = layout_of(state.path(), &policy);
+        refused.provision().expect_err("busy");
+        assert!(
+            !refused.scratch().exists(),
+            "a refused run left its scratch"
+        );
+    }
+
+    #[test]
+    fn two_runs_share_a_shared_area_at_once() {
+        let state = tempfile::TempDir::new().expect("state");
+        let policy = persistent(Some("shared"));
+        let (first, second) = (
+            layout_of(state.path(), &policy),
+            layout_of(state.path(), &policy),
+        );
+        let _a = first.provision().expect("first");
+        let _b = second.provision().expect("second, concurrently");
+        assert_eq!(
+            area(&first.grants(), "workspace:w.areas.landing").path,
+            area(&second.grants(), "workspace:w.areas.landing").path
+        );
+    }
+
+    /// The lock file is playpen's, outside every path a run is granted.
+    #[test]
+    fn the_lock_is_outside_every_grant() {
+        let policy = persistent(None);
+        let layout = layout_of(Path::new("/state"), &policy);
+        let planned = &layout.areas[0];
+        let lock = layout.lock(planned);
+        assert!(lock.starts_with("/state"));
+        assert!(
+            !layout
+                .grants()
+                .iter()
+                .any(|grant| lock.starts_with(&grant.path)),
+            "{lock:?}"
         );
     }
 
