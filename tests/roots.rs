@@ -118,3 +118,65 @@ fn a_missing_root_is_refused() {
         .expect("playpen");
     assert_refused(&output, "refusal.root.missing");
 }
+
+/// A policy names a stable link; the mechanism enforces on the resolved path, so playpen grants
+/// both ([spec §8.5]).
+///
+/// [spec §8.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#85-symlinks
+#[test]
+fn a_root_named_through_a_symlink_is_usable_from_inside() {
+    let fx = Fixture::new();
+    let target = TempDir::new().expect("target");
+    let file = target.path().join("notes");
+    std::fs::write(&file, "content").expect("seed");
+    let links = TempDir::new().expect("links");
+    let link = links.path().join("current");
+    std::os::unix::fs::symlink(target.path(), &link).expect("symlink");
+    let policy = fx.policy_named(
+        "linked.json",
+        &json!({
+            "version": 1,
+            "workspaces": {
+                "code": {"roots": [{"path": fx.root(), "mode": "readwrite"}]},
+                "notes": {"roots": [{"path": link, "mode": "read"}]},
+            },
+            "profiles": {"p": {"workspaces": ["code", "notes"], "toolchain": []}},
+        }),
+    );
+    let through_link = link.join("notes");
+    for path in [through_link.as_path(), file.as_path()] {
+        let path = path.to_str().unwrap();
+        assert_eq!(probe_outside(&["read", path])["ok"], true);
+        assert_eq!(
+            fx.probe_under(&policy, &["read", path])["ok"],
+            true,
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn a_dangling_link_is_refused_naming_the_path() {
+    let fx = Fixture::new();
+    let links = TempDir::new().expect("links");
+    let link = links.path().join("stale");
+    std::os::unix::fs::symlink(links.path().join("gone"), &link).expect("symlink");
+    let policy = fx.policy_named(
+        "stale.json",
+        &json!({
+            "version": 1,
+            "workspaces": {
+                "code": {"roots": [{"path": fx.root(), "mode": "readwrite"}]},
+                "stale": {"roots": [{"path": link, "mode": "read"}]},
+            },
+            "profiles": {"p": {"workspaces": ["code", "stale"], "toolchain": []}},
+        }),
+    );
+    let output = fx
+        .run_under(&policy, &[&os_bin("true")])
+        .output()
+        .expect("playpen");
+    assert_refused(&output, "refusal.root.missing");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(link.to_str().unwrap()), "{stderr}");
+}

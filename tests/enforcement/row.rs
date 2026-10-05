@@ -248,6 +248,12 @@ pub enum Target {
     HostTemp,
     /// A fresh directory outside every grant.
     DecoyDir,
+    /// [`Target::SshKey`], [`Target::SshConfig`] and [`Target::Npmrc`], each reached through a
+    /// symlink inside the probe's own granted root: the link is granted, its target is not, and
+    /// the mechanism decides on the resolved path ([spec §8.5]).
+    ///
+    /// [spec §8.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#85-symlinks
+    LinkedCredentials,
 }
 
 /// Mach services, named by what they serve.

@@ -12,7 +12,7 @@
 //!
 //! [spec §10.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#104-the-resolved-form
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -40,6 +40,7 @@ pub fn roots(policy: &Policy, selected: &Profile) -> Result<Vec<PathGrant>, Refu
                     format!("{from}: root {} is unavailable: {e}", root.path.display()),
                 )
             })?;
+            grants.extend(link(&root.path, &from)?);
             grants.push(PathGrant {
                 path,
                 access: root.mode.into(),
@@ -52,6 +53,34 @@ pub fn roots(policy: &Policy, selected: &Profile) -> Result<Vec<PathGrant>, Refu
         }
     }
     Ok(grants)
+}
+
+/// The grant on `named` itself, where it is a symlink: read-only, and the link alone ([spec §8.5]).
+/// The mechanism enforces on the resolved path, which the caller grants; this one is what lets a
+/// path through the link be followed. The link is located through its resolved parent, since an
+/// ancestor can be a link too and the mechanism sees the real path of the link itself.
+///
+/// [spec §8.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#85-symlinks
+fn link(named: &Path, from: &str) -> Result<Option<PathGrant>, Refusal> {
+    let is_link = named
+        .symlink_metadata()
+        .is_ok_and(|meta| meta.file_type().is_symlink());
+    let (Some(parent), Some(name), true) = (named.parent(), named.file_name(), is_link) else {
+        return Ok(None);
+    };
+    let parent = parent.canonicalize().map_err(|e| {
+        Refusal::new(
+            Code::RootMissing,
+            format!("{from}: link {} is unavailable: {e}", named.display()),
+        )
+    })?;
+    Ok(Some(PathGrant {
+        path: parent.join(name),
+        access: Access::Read,
+        scope: Scope::Literal,
+        from: from.to_owned(),
+        state_derived: false,
+    }))
 }
 
 /// The whole capability set a launch of `selected` applies: the floor, then the profile's roots.
@@ -138,5 +167,62 @@ impl Resolved {
                 from: BUILT_IN.into(),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn policy(root: &Path) -> Policy {
+        let text = serde_json::json!({
+            "version": 1,
+            "workspaces": {"w": {"roots": [{"path": root, "mode": "readwrite"}]}},
+            "profiles": {"p": {"workspaces": ["w"], "toolchain": []}},
+        });
+        Policy::parse(&text.to_string(), Path::new("/p.json")).expect("parses")
+    }
+
+    fn roots_of(root: &Path) -> Vec<PathGrant> {
+        let policy = policy(root);
+        roots(&policy, &policy.profiles["p"]).expect("resolves")
+    }
+
+    #[test]
+    fn a_root_is_granted_at_its_resolved_path() {
+        let dir = tempfile::TempDir::new().expect("root");
+        let grants = roots_of(dir.path());
+        let resolved = dir.path().canonicalize().expect("canonical");
+        assert_eq!(grants.len(), 1, "{grants:?}");
+        assert_eq!(grants[0].path, resolved);
+        assert_eq!(grants[0].access, Access::ReadWrite);
+        assert_eq!(grants[0].scope, Scope::Subtree);
+        assert_eq!(grants[0].from, "workspace:w.roots[0]");
+    }
+
+    /// The link itself is granted read-only, alone; its target at the root's mode, as a subtree.
+    #[test]
+    fn a_root_named_by_a_link_grants_the_link_and_its_target() {
+        let target = tempfile::TempDir::new().expect("target");
+        let links = tempfile::TempDir::new().expect("links");
+        let link = links.path().join("current");
+        std::os::unix::fs::symlink(target.path(), &link).expect("symlink");
+        let grants = roots_of(&link);
+        let resolved = target.path().canonicalize().expect("canonical");
+        let named = links
+            .path()
+            .canonicalize()
+            .expect("canonical")
+            .join("current");
+        assert_eq!(grants.len(), 2, "{grants:?}");
+        assert!(grants.iter().any(|g| g.path == resolved
+            && g.access == Access::ReadWrite
+            && g.scope == Scope::Subtree));
+        assert!(
+            grants
+                .iter()
+                .any(|g| g.path == named && g.access == Access::Read && g.scope == Scope::Literal)
+        );
+        assert!(grants.iter().all(|g| g.from == "workspace:w.roots[0]"));
     }
 }

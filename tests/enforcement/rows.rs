@@ -80,6 +80,15 @@ pub const ROWS: &[Row] = &[
         from: &[Decision::Adr(6), Decision::Adr(16), Decision::Issue(54)],
     },
     Row {
+        id: "N-symlink",
+        class: Class::Negative,
+        platform: IN_HOME,
+        fixture: Fixture::ProbeRoot,
+        action: Action::Read(Target::LinkedCredentials),
+        expected: Expected::Denial,
+        from: &[Decision::Adr(14), Decision::Adr(16), Decision::Issue(64)],
+    },
+    Row {
         id: "N-hosttemp",
         class: Class::Negative,
         platform: BOTH,

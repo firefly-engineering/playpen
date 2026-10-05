@@ -573,7 +573,8 @@ pub const SSH_KEY_DECOY: &str = "id_playpen-decoy";
 /// The file marking a decoy directory as one, holding [`DECOY`].
 pub const DECOY_MARKER: &str = "playpen-decoy";
 
-fn prepare(action: Action, home: &Path, made: &mut Made) -> Result<Prepared, String> {
+/// `root` is the probe's granted root, where a target reached through a link puts its links.
+fn prepare(action: Action, home: &Path, root: &Path, made: &mut Made) -> Result<Prepared, String> {
     let mut decoys = Vec::new();
     let mut decoy_dir = None;
     let mut target = |target: Target| -> Result<Vec<PathBuf>, String> {
@@ -609,6 +610,22 @@ fn prepare(action: Action, home: &Path, made: &mut Made) -> Result<Prepared, Str
             Target::DecoyDir => {
                 let dir = TempDir::new().map_err(|e| format!("decoy directory: {e}"))?;
                 Ok(vec![decoy_dir.insert(dir).path().to_owned()])
+            }
+            Target::LinkedCredentials => {
+                let key = ssh_key(home, made)?;
+                let ssh = ssh_dir(home, made)?;
+                let config = decoy_file(&ssh.join("config"), made)?;
+                let npmrc = decoy_file(&home.join(".npmrc"), made)?;
+                // Inside the root's temp directory, so the links go with it.
+                [("id", key), ("config", config), ("npmrc", npmrc)]
+                    .into_iter()
+                    .map(|(name, credential)| {
+                        let link = root.join(format!("link-to-{name}"));
+                        std::os::unix::fs::symlink(&credential, &link)
+                            .map_err(|e| format!("link {}: {e}", link.display()))?;
+                        Ok(link)
+                    })
+                    .collect()
             }
         }
     };
@@ -853,10 +870,13 @@ fn is_private_key(path: &Path) -> bool {
 
 /// Every row of the probe-root fixture, under one confined launch.
 fn probe_root(rows: &[&Row], home: &Path) -> Vec<Verdict> {
+    // Read-only: the probe's root is a stated perturbation, and the smallest one that runs it.
+    // Made first, so a target reached through a link can put the link in it.
+    let fixture = common::Fixture::with_mode("read");
     let mut made = Made::default();
     let prepared: Vec<Result<Prepared, String>> = rows
         .iter()
-        .map(|row| prepare(row.action, home, &mut made))
+        .map(|row| prepare(row.action, home, fixture.root(), &mut made))
         .collect();
     let ops: Vec<&String> = prepared
         .iter()
@@ -891,8 +911,6 @@ fn probe_root(rows: &[&Row], home: &Path) -> Vec<Verdict> {
     for created in prepared.iter().flatten().flat_map(|p| &p.created) {
         let _ = fs::remove_file(created);
     }
-    // Read-only: the probe's root is a stated perturbation, and the smallest one that runs it.
-    let fixture = common::Fixture::with_mode("read");
     let probe = fixture.probe();
     let mut argv = vec![probe.to_str().expect("a UTF-8 probe path")];
     argv.extend(ops.iter().map(|op| op.as_str()));

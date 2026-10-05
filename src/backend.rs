@@ -79,6 +79,15 @@ fn add_path(set: &mut nono::CapabilitySet, grant: &PathGrant) -> Result<(), Refu
         Access::Read => AccessMode::Read,
         Access::ReadWrite => AccessMode::ReadWrite,
     };
+    // A literal grant on a link is a grant on the link itself, never on what it points at: that
+    // is granted on its own, at its resolved path ([`crate::resolve`]).
+    let meta = grant
+        .path
+        .symlink_metadata()
+        .map_err(|e| missing(&grant.path, &grant.from, e))?;
+    if grant.scope == Scope::Literal && meta.file_type().is_symlink() {
+        return add_link(set, &grant.path, mode);
+    }
     let is_dir = grant
         .path
         .metadata()
@@ -123,6 +132,20 @@ fn add_literal_dir(
     }
     set.add_platform_rule(format!("(allow file-read* (literal \"{text}\"))"))
         .map_err(translate)
+}
+
+/// Seatbelt checks a path through a link against the link as well as its target, so the link
+/// itself is granted, alone.
+#[cfg(target_os = "macos")]
+fn add_link(set: &mut nono::CapabilitySet, path: &Path, mode: AccessMode) -> Result<(), Refusal> {
+    add_literal_dir(set, path, mode)
+}
+
+/// Landlock gates what a path resolves to and never the walk to it, so a link needs no grant of
+/// its own.
+#[cfg(target_os = "linux")]
+fn add_link(_: &mut nono::CapabilitySet, _: &Path, _: AccessMode) -> Result<(), Refusal> {
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
