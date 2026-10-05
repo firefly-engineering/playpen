@@ -9,7 +9,10 @@
 //! [spec §10]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#10-the-policy-document
 
 pub mod coherence;
+mod locate;
 mod syntax;
+
+pub use locate::SearchPath;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

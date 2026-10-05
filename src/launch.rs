@@ -20,7 +20,7 @@ use crate::code::Code;
 use crate::explain;
 use crate::floor::floor;
 use crate::mechanism::{self, Mechanism};
-use crate::policy::{Policy, Profile, coherence};
+use crate::policy::{Policy, Profile, SearchPath, coherence};
 use crate::record::{self, RunId, RunRecord};
 use crate::refusal::{EXIT_REFUSED, Refusal};
 use crate::self_test;
@@ -60,19 +60,33 @@ struct RunArgs {
 /// [spec §11.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#112-kind
 const KINDS: &[&str] = &["claude", "omp"];
 
-/// Run playpen with `args` (including `argv[0]`) from the caller's working directory `cwd`, with
-/// playpen's state directory at `state` (`None` when the environment names none). Returns the
-/// process exit status; on a refusal, the refusal line has already been written.
+/// What playpen takes from the process it runs in, read once by `main` and handed in, so nothing
+/// below reads the environment or the working directory for itself.
+pub struct Host {
+    /// The caller's working directory.
+    pub cwd: std::io::Result<PathBuf>,
+    /// playpen's state directory, `None` when the environment names none.
+    pub state: Option<PathBuf>,
+    /// Where to look for the policy when `--policy` is not given.
+    pub policies: SearchPath,
+}
+
+/// Run playpen with `args` (including `argv[0]`) on `host`. Returns the process exit status; on a
+/// refusal, the refusal line has already been written.
 ///
 /// `probe` is [`Mechanism::probe`] in every launch; it is a parameter so the suite's
 /// `R-missing-cap` row can launch on a mechanism that lacks a capability, which no host it runs
 /// on does.
 pub fn main(
     args: impl IntoIterator<Item = OsString>,
-    cwd: std::io::Result<PathBuf>,
-    state: Option<PathBuf>,
+    host: Host,
     probe: impl FnOnce() -> Mechanism,
 ) -> i32 {
+    let Host {
+        cwd,
+        state,
+        policies,
+    } = host;
     // Parsing has no effect, so it can come first. `explain` and `check` launch nothing
     // ([spec §14.2], [spec §10.5]), so they open no record and push no run out of the ring, and nor
     // does a request for help; anything else is a launch, and a command line that does not parse
@@ -84,7 +98,7 @@ pub fn main(
         Ok(Cli {
             command: Command::Check(args),
         }) => {
-            return match check::check(&args) {
+            return match check::check(&args, &policies) {
                 Ok(()) => 0,
                 Err(refusal) => refuse(&refusal, None),
             };
@@ -116,7 +130,7 @@ pub fn main(
         Ok(record) => record,
         Err(refusal) => return refuse(&refusal, Some(&run)),
     };
-    match invoke(parsed, cwd, state.as_deref(), &mut record, probe) {
+    match invoke(parsed, cwd, state.as_deref(), &policies, &mut record, probe) {
         Ok(status) => {
             record.finish(status);
             status
@@ -132,6 +146,7 @@ fn invoke(
     parsed: Result<RunArgs, clap::Error>,
     cwd: std::io::Result<PathBuf>,
     state: Option<&Path>,
+    policies: &SearchPath,
     record: &mut RunRecord,
     probe: impl FnOnce() -> Mechanism,
 ) -> Result<i32, Refusal> {
@@ -141,10 +156,21 @@ fn invoke(
         policy,
         argv,
     } = parsed.map_err(|err| usage_refusal(&err))?;
+    // Step 2 ends with the kind, which is part of the invocation; step 3 locates the policy.
+    if !KINDS.contains(&agent.as_str()) {
+        return Err(Refusal::new(
+            Code::KindUnknown,
+            format!(
+                "unknown agent kind {agent:?}; known kinds: {}",
+                KINDS.join(", ")
+            ),
+        ));
+    }
+    record.kind(&agent);
+    let policy = policies.locate(policy.as_deref())?;
     run(
         &profile,
-        &agent,
-        policy.as_deref(),
+        &policy,
         &argv,
         cwd,
         state,
@@ -180,8 +206,7 @@ fn usage_refusal(err: &clap::Error) -> Refusal {
 )]
 fn run(
     profile: &str,
-    agent: &str,
-    policy: Option<&Path>,
+    policy_path: &Path,
     argv: &[OsString],
     cwd: std::io::Result<PathBuf>,
     state: Option<&Path>,
@@ -189,22 +214,6 @@ fn run(
     probe: impl FnOnce() -> Mechanism,
     floor_self_test: impl FnOnce() -> Result<(), Refusal>,
 ) -> Result<i32, Refusal> {
-    if !KINDS.contains(&agent) {
-        return Err(Refusal::new(
-            Code::KindUnknown,
-            format!(
-                "unknown agent kind {agent:?}; known kinds: {}",
-                KINDS.join(", ")
-            ),
-        ));
-    }
-    record.kind(agent);
-    let policy_path = policy.ok_or_else(|| {
-        Refusal::new(
-            Code::PolicyNotFound,
-            "no policy given; pass --policy <path>",
-        )
-    })?;
     // Absolute, so a stored record names the file whatever directory it is read from.
     match &cwd {
         Ok(cwd) => record.policy(&cwd.join(policy_path)),
@@ -395,8 +404,7 @@ mod tests {
         let mut record = RunRecord::open(&id, Some(state.path())).expect("record");
         let refusal = run(
             "p",
-            "claude",
-            Some(&policy),
+            &policy,
             &argv,
             Ok(root.path().into()),
             Some(state.path()),

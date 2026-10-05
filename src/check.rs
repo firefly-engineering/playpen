@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::code::Code;
-use crate::policy::{Policy, coherence};
+use crate::policy::{Policy, SearchPath, coherence};
 use crate::refusal::Refusal;
 
 #[derive(Debug, clap::Args)]
@@ -25,15 +25,10 @@ pub struct Args {
     no_filesystem: bool,
 }
 
-/// Validate the policy `args` names.
-pub fn check(args: &Args) -> Result<(), Refusal> {
-    let path = args.policy.as_deref().ok_or_else(|| {
-        Refusal::new(
-            Code::PolicyNotFound,
-            "no policy given; pass --policy <path>",
-        )
-    })?;
-    let loaded = Policy::load(path)?;
+/// Validate the policy `args` names, or the first on the search path `policies`.
+pub fn check(args: &Args, policies: &SearchPath) -> Result<(), Refusal> {
+    let path = policies.locate(args.policy.as_deref())?;
+    let loaded = Policy::load(&path)?;
     coherence::check(&loaded)?;
     if args.no_filesystem {
         return Ok(());

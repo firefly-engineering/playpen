@@ -223,7 +223,13 @@ pub fn as_playpen_offering_nothing(
 ) -> i32 {
     let state = playpen::record::state_dir(args.next(), None);
     let argv = std::iter::once(OsString::from("playpen")).chain(args);
-    playpen::launch::main(argv, cwd, state, || {
+    // The row always names its policy, so no location of the host's own is ever searched.
+    let host = playpen::launch::Host {
+        cwd,
+        state,
+        policies: playpen::policy::SearchPath::of(Vec::new()),
+    };
+    playpen::launch::main(argv, host, || {
         Mechanism::new("a mechanism offering nothing", &[])
     })
 }
