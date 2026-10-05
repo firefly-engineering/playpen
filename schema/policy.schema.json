@@ -117,7 +117,9 @@
           "type": "string"
         },
         "path": {
-          "type": "string"
+          "description": "Host-absolute, matched with the two-token segment glob playpen parses itself\n([`crate::endpoint::Glob`]). A pattern richer than those two tokens is refused here, where\nit was written.",
+          "$ref": "#/$defs/Glob",
+          "pattern": "^/[^?\\[\\]{}()|^$\\\\]*$"
         }
       },
       "additionalProperties": false,
@@ -125,6 +127,10 @@
         "method",
         "path"
       ]
+    },
+    "Glob": {
+      "description": "A parsed endpoint path glob.",
+      "type": "string"
     },
     "Workspace": {
       "description": "Everything a run may reach for one body of work ([spec §5.1]).\n\n[spec §5.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#51-workspace",

@@ -173,6 +173,37 @@ fn mode_no_is_an_invalid_variant() {
     assert!(refusal.message().contains("`no`"), "{refusal}");
 }
 
+/// An endpoint `path` richer than the two tokens is refused where it was written, with its line
+/// and column ([spec §7.6]): playpen parses the glob itself, so a pattern it does not have is
+/// never taken literally.
+///
+/// [spec §7.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#76-endpoint-rule-sets
+#[test]
+fn a_richer_endpoint_glob_is_refused_where_it_is_written() {
+    for (path, fragment) in [
+        ("/repos/{a,b}/**", "two tokens"),
+        ("/repos/[ab]/**", "two tokens"),
+        ("/repos/a*b/**", "whole segments"),
+        ("repos/a", "host-absolute"),
+    ] {
+        let text = format!(
+            "version: 1\nfragments:\n  endpoints:\n    read-only:\n      \
+             - {{ method: GET, path: \"{path}\" }}\n"
+        );
+        let refusal = refused(&text, Code::PolicyType);
+        assert!(names(&refusal, 5, 30), "{path}: {refusal}");
+        assert!(refusal.message().contains(fragment), "{path}: {refusal}");
+    }
+    // The spec's own worked rule sets parse.
+    for path in ["/*/*/info/refs", "/repos/*/*/**", "/v1/messages"] {
+        let text = format!(
+            "version: 1\nfragments:\n  endpoints:\n    ok:\n      \
+             - {{ method: GET, path: \"{path}\" }}\n"
+        );
+        Policy::parse(&text, Path::new(ORIGIN)).unwrap_or_else(|e| panic!("{path}: {e}"));
+    }
+}
+
 #[test]
 fn a_nul_in_a_value_is_a_type_refusal() {
     let text = MINIMAL.replace("/src/playpen,", "\"/src/play\\0pen\",");

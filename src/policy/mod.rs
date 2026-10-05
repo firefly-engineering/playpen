@@ -84,7 +84,11 @@ pub struct Fragments {
 #[serde(deny_unknown_fields)]
 pub struct EndpointRule {
     pub method: String,
-    pub path: String,
+    /// Host-absolute, matched with the two-token segment glob playpen parses itself
+    /// ([`crate::endpoint::Glob`]). A pattern richer than those two tokens is refused here, where
+    /// it was written.
+    #[schemars(extend("pattern" = crate::endpoint::PATTERN))]
+    pub path: crate::endpoint::Glob,
 }
 
 /// Everything a run may reach for one body of work ([spec §5.1]).
