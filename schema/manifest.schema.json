@@ -272,7 +272,7 @@
       "type": "object",
       "properties": {
         "denial_errnos": {
-          "description": "The errno names that mean the boundary refused, on this platform.",
+          "description": "The errno names that can mean the boundary refused, on this platform.\n\nIt is the set an agent must treat as \"denied\", not a set each member of which always is:\nLinux's `ENOSYS` is a denial only where a user-notify supervisor has died ([spec §13.2]),\nand otherwise means what it always means. The set errs that way on purpose — an agent that\nread a denial as an absence would retry the wrong thing, where one that reads a missing\nsyscall as a denial merely stops.\n\n[spec §13.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#132-content",
           "type": "array",
           "items": {
             "type": "string"

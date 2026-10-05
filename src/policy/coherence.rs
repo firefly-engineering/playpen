@@ -26,6 +26,7 @@ const CHECKS: &[Check] = &[
     env_is_not_reserved,
     areas_are_declared,
     minters_are_declared,
+    shared_entry_points_can_be_imported,
 ];
 
 /// Run the coherence tier over `loaded`.
@@ -201,6 +202,48 @@ fn areas_are_declared(loaded: &Loaded) -> Result<(), Refusal> {
     Ok(())
 }
 
+/// A share entry naming a kind's instruction entry point is composed by reference, so the kind
+/// must have an import mechanism (`refusal.state.collision`): the presentation adapter owns that
+/// file, and playpen will not drop the rendered file to make room for a copy of someone else's
+/// ([spec §5.6]).
+///
+/// Decidable from the policy alone — the share list is keyed by kind name, and the kind table is
+/// compiled in — so it belongs here, and holds every profile to the rule rather than only the one
+/// a launch selects.
+///
+/// [spec §5.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#56-agent-state-directory
+fn shared_entry_points_can_be_imported(loaded: &Loaded) -> Result<(), Refusal> {
+    let Loaded { path, policy } = loaded;
+    for (profile, selected) in &policy.profiles {
+        for (name, state) in &selected.agent_state {
+            // A kind this playpen does not know has no entry point to collide with; the
+            // invocation that states it refuses as `refusal.kind.unknown` of its own accord.
+            let Some(presentation) = crate::kind::get(name).and_then(|k| k.presentation.as_ref())
+            else {
+                continue;
+            };
+            let Some(i) = state
+                .share
+                .iter()
+                .position(|entry| presentation.collides_with(entry))
+            else {
+                continue;
+            };
+            return Err(Refusal::new(
+                Code::StateCollision,
+                format!(
+                    "{}: profile:{profile}.agent_state.{name}.share[{i}] is {:?}, the instruction \
+                     entry point of kind {name:?}, which has no import mechanism, so it cannot be \
+                     composed by reference",
+                    path.display(),
+                    presentation.entry_point,
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Every credential route names a declared minter (`refusal.minter.unknown`): a route whose minter
 /// does not exist would authenticate nothing, and would do it silently.
 fn minters_are_declared(loaded: &Loaded) -> Result<(), Refusal> {
@@ -236,15 +279,9 @@ fn minters_are_declared(loaded: &Loaded) -> Result<(), Refusal> {
     }
 }
 
-/// `names`, comma-separated, or `none`.
-fn known<'a>(names: impl Iterator<Item = &'a String>) -> String {
-    let names: Vec<_> = names.map(String::as_str).collect();
-    if names.is_empty() {
-        "none".into()
-    } else {
-        names.join(", ")
-    }
-}
+/// `names`, comma-separated, or `none`. Every refusal that says "and here is what *is* declared"
+/// renders its list through this, so the launch front-end shares it ([`crate::policy::known`]).
+pub use crate::policy::known;
 
 #[cfg(test)]
 mod tests {
@@ -501,6 +538,21 @@ profiles:
   p: { workspaces: [w], toolchain: [], env: { set: { X: !area w/a } } }
 ";
         assert_eq!(checked(text), Ok(()));
+    }
+
+    /// `claude` imports, so sharing its entry point is composed by reference rather than refused;
+    /// a kind this playpen does not know has no entry point to collide with, and the invocation
+    /// that states it refuses as `refusal.kind.unknown` of its own accord. Which shape *does*
+    /// collide is [`crate::kind::Presentation::collides_with`]'s own test.
+    #[test]
+    fn sharing_an_importable_entry_point_passes() {
+        for kind in ["claude", "omp", "not-a-kind"] {
+            let text = format!(
+                "version: 1\nprofiles:\n  p:\n    workspaces: []\n    toolchain: []\n    \
+                 agent_state: {{ {kind}: {{ share: [CLAUDE.md] }} }}\n"
+            );
+            assert_eq!(checked(&text), Ok(()), "{kind}");
+        }
     }
 
     #[test]

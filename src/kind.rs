@@ -72,6 +72,17 @@ pub const KINDS: &[Kind] = &[
     },
 ];
 
+impl Presentation {
+    /// Whether a share entry named `entry` collides with this kind's instruction entry point in
+    /// the one way that cannot be resolved: the adapter owns that file, and a kind with no import
+    /// mechanism has no way to compose the shared one in by reference ([spec §5.6]).
+    ///
+    /// [spec §5.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#56-agent-state-directory
+    pub fn collides_with(&self, entry: &str) -> bool {
+        self.entry_point == entry && self.import.is_none()
+    }
+}
+
 impl Kind {
     /// The provenance of everything this kind authors ([spec §10.4]), which is the only bridge
     /// from a constructed entry back to the table that wrote it.
@@ -119,6 +130,25 @@ mod tests {
         assert_eq!(refusal.code, Code::KindUnknown);
         assert!(refusal.message().contains("\"codex\""), "{refusal}");
         assert!(refusal.message().contains("claude, omp"), "{refusal}");
+    }
+
+    /// The one unresolvable collision is the entry point of a kind that cannot import: anything
+    /// else a share list names is linked, and a kind that imports composes its own entry point by
+    /// reference.
+    #[test]
+    fn only_an_unimportable_entry_point_collides() {
+        let imports = Presentation {
+            entry_point: "CLAUDE.md",
+            import: Some("@"),
+        };
+        assert!(!imports.collides_with("CLAUDE.md"));
+        assert!(!imports.collides_with("settings.json"));
+        let cannot = Presentation {
+            entry_point: "CLAUDE.md",
+            import: None,
+        };
+        assert!(cannot.collides_with("CLAUDE.md"));
+        assert!(!cannot.collides_with("settings.json"));
     }
 
     /// Every kind has a private state-dir redirect: a kind whose binary has none never gets an

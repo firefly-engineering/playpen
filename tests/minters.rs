@@ -183,6 +183,127 @@ fn a_minter_that_fails_refuses_the_whole_run() {
     }
 }
 
+/// A workspace route's minter receives that workspace's own forge scope, and a profile with two
+/// workspaces mints each of them with its own: forge scope is never unioned across a profile's
+/// workspaces ([spec §7.4]). Both kinds of route resolve into one table.
+///
+/// [spec §7.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#74-attachment
+#[test]
+fn each_workspace_route_is_minted_with_its_own_forge_scope() {
+    let fx = Fixture::new();
+    // One minter for every route, appending what it was handed to one file: the request already
+    // ends in a newline, and minting is sequential, so the file is one request per line.
+    let script = format!(
+        r#"cat >> {}/requests.jsonl; printf '{{"token":"t","expires_at":"2027-01-01T00:00:00Z"}}'"#,
+        fx.root().display()
+    );
+    let policy = fx.policy_named(
+        "attached.json",
+        &json!({
+            "version": 1,
+            "minters": {"m": {"command": [os_bin("sh"), "-c", script]}},
+            "workspaces": {
+                "work": {
+                    "roots": [{"path": fx.root(), "mode": "readwrite"}],
+                    "forge": {"org": "firefly-engineering"},
+                    "credentials": [{
+                        "host": "work.example",
+                        "path_prefix": "/firefly-engineering/",
+                        "minter": "m",
+                        "delivery": {"env": "WORK_TOKEN"},
+                    }],
+                },
+                "notes": {
+                    "roots": [],
+                    "forge": {"repos": ["op/notes"]},
+                    "credentials": [{
+                        "host": "notes.example",
+                        "path_prefix": "/op/",
+                        "minter": "m",
+                        "delivery": {"env": "NOTES_TOKEN"},
+                    }],
+                },
+            },
+            "profiles": {"p": {
+                "workspaces": ["work", "notes"],
+                "toolchain": [],
+                "credentials": [{
+                    "host": "model.example",
+                    "path_prefix": "/",
+                    "minter": "m",
+                    "delivery": {"env": "MODEL_TOKEN"},
+                }],
+            }},
+        }),
+    );
+    let output = fx
+        .run_under(&policy, &[&os_bin("true")])
+        .output()
+        .expect("playpen");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let requests: Vec<Value> = std::fs::read_to_string(fx.root().join("requests.jsonl"))
+        .expect("the requests")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("each request is JSON"))
+        .collect();
+    let request = |host: &str| -> Value {
+        requests
+            .iter()
+            .find(|request| request["route"]["host"] == host)
+            .unwrap_or_else(|| panic!("no request for {host} in {requests:?}"))
+            .clone()
+    };
+    // Each workspace route carries its own workspace's scope, in its own shape.
+    assert_eq!(
+        request("work.example")["scope"],
+        json!({"org": "firefly-engineering"})
+    );
+    assert_eq!(
+        request("notes.example")["scope"],
+        json!({"repos": ["op/notes"]})
+    );
+    // The profile route carries none: it does not minimize to one workspace.
+    assert_eq!(request("model.example")["scope"], Value::Null);
+    assert_eq!(requests.len(), 3, "{requests:?}");
+
+    // One route table, in the profile's own order — its workspaces as it listed them, then its
+    // own routes — with both kinds of attachment named by their provenance.
+    let ids = fx.run_ids();
+    let credentials = fx.record(&ids[0])["credentials"].clone();
+    let table: Vec<_> = credentials
+        .as_array()
+        .expect("a route table")
+        .iter()
+        .map(|route| {
+            (
+                route["host"].as_str().expect("a host").to_owned(),
+                route["from"].as_str().expect("provenance").to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        table,
+        [
+            (
+                "work.example".to_owned(),
+                "workspace:work.credentials[0]".to_owned()
+            ),
+            (
+                "notes.example".to_owned(),
+                "workspace:notes.credentials[0]".to_owned()
+            ),
+            (
+                "model.example".to_owned(),
+                "profile:p.credentials[0]".to_owned()
+            ),
+        ]
+    );
+}
+
 /// No credential route means no minter runs at all, and the record holds none.
 #[test]
 fn a_profile_with_no_route_mints_nothing() {

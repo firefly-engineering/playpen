@@ -61,6 +61,7 @@ pub fn run(rows: &[Row], home: &Path) -> Vec<Outcome> {
             Fixture::Toolchain => members.iter().map(|row| toolchain(row)).collect(),
             Fixture::Excluded => members.iter().map(|row| excluded(row)).collect(),
             Fixture::Manifest => members.iter().map(|row| manifest_is_true(row)).collect(),
+            Fixture::Shim => members.iter().map(|row| argv_matches(row)).collect(),
         };
         for (i, verdict) in batch.into_iter().zip(verdicts) {
             outcomes[i] = Some(Outcome::Runs(verdict));
@@ -403,6 +404,124 @@ fn manifest_is_true(row: &Row) -> Verdict {
         })
         .find(|verdict| *verdict != Verdict::Pass)
         .unwrap_or(Verdict::Pass)
+}
+
+/// `P-argv`: the injected argv `explain --shim --json` states is the argv the child received
+/// ([spec §11.3]).
+///
+/// A shim installed as an operator installs one — a symlink to the playpen binary, and the policy
+/// where the search path finds it. `HOME` names that search path rather than `XDG_CONFIG_HOME`,
+/// because `HOME` is in the floor and so means the same thing on both sides of the boundary.
+///
+/// The target is the floor's shell, printing one argument a line. `sh -c` consumes the first three
+/// injected tokens — `-c`, the script, and the name it takes as `$0` — so what the child prints is
+/// every injected token after those, then the caller's own.
+///
+/// [spec §11.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#113-shims
+fn argv_matches(row: &Row) -> Verdict {
+    if row.action != Action::ArgvMatches {
+        return Verdict::Setup(format!("{:?} is not the shim's argv check", row.action));
+    }
+    /// How many injected tokens `sh -c` consumes before `"$@"` begins.
+    const CONSUMED_BY_SH: usize = 3;
+    let fixture = common::Fixture::new();
+    let (links, home) = match (TempDir::new(), TempDir::new()) {
+        (Ok(links), Ok(home)) => (links, home),
+        _ => return Verdict::Setup("a directory for the shim and its policy".into()),
+    };
+    let link = links.path().join("claude");
+    let search = home.path().join(".config/playpen");
+    let installed = fs::create_dir_all(&search)
+        .and_then(|()| std::os::unix::fs::symlink(common::PLAYPEN, &link));
+    if let Err(e) = installed {
+        return Verdict::Setup(format!("installing the shim: {e}"));
+    }
+    let playpen_dir = match Path::new(common::PLAYPEN).parent() {
+        Some(dir) => dir,
+        None => return Verdict::Setup("the playpen binary has no directory".into()),
+    };
+    // Read-only, so self-integrity passes: nothing a shim launch reaches is writable from inside.
+    let document = serde_json::json!({
+        "version": 1,
+        "workspaces": {"w": {"roots": [{"path": fixture.root(), "mode": "readwrite"}]}},
+        "profiles": {"p": {
+            "workspaces": ["w"],
+            "toolchain": [{"path": &search}, {"path": links.path()}, {"path": playpen_dir}],
+            "prefixes": [fixture.root()],
+        }},
+        "shims": {"claude": {
+            "target": common::os_bin("sh"),
+            "kind": "claude",
+            "flags": ["-c", "printf '%s\\n' \"$@\"", "argv", "--injected", "--and-another"],
+        }},
+    });
+    if let Err(e) = fs::write(search.join("policy.json"), document.to_string()) {
+        return Verdict::Setup(format!("writing the policy: {e}"));
+    }
+    // Outside first: what playpen says it injects, with its provenance.
+    let explained = fixture
+        .playpen(&["explain", "--shim", "claude", "--json"])
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("PLAYPEN_PROFILE")
+        .env("HOME", home.path())
+        .output()
+        .expect("run playpen explain");
+    if !explained.status.success() {
+        return Verdict::Setup(format!(
+            "explain --shim: {}",
+            String::from_utf8_lossy(&explained.stderr)
+        ));
+    }
+    let resolved: Value = match serde_json::from_slice(&explained.stdout) {
+        Ok(resolved) => resolved,
+        Err(e) => return Verdict::Setup(format!("explain --shim --json: {e}")),
+    };
+    let Some(stated) = resolved["argv"].as_array() else {
+        return Verdict::Fail("explain --shim --json states no argv".into());
+    };
+    if stated.len() <= CONSUMED_BY_SH {
+        return Verdict::Setup(format!(
+            "the shim injects too little to assert on: {stated:?}"
+        ));
+    }
+    let tokens: Vec<String> = stated
+        .iter()
+        .map(|arg| arg["value"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    // Inside: the same shim, run as the caller runs it, printing what it actually received.
+    let mut command = Command::new(&link);
+    command
+        .arg("--from-the-caller")
+        .current_dir(fixture.root())
+        .stdin(Stdio::null())
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("PLAYPEN_PROFILE")
+        .env("XDG_STATE_HOME", fixture.state_home())
+        .env("HOME", home.path());
+    let seen = command.output().expect("run the shim");
+    if !seen.status.success() {
+        return Verdict::Fail(format!(
+            "the shim did not launch: {}, stderr {:?}",
+            seen.status,
+            String::from_utf8_lossy(&seen.stderr)
+        ));
+    }
+    let received: Vec<String> = String::from_utf8_lossy(&seen.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    // The target is `argv[0]`, and `sh -c` swallows the three after it; everything else reached
+    // the child, in order, with the caller's own argument last.
+    let mut expected = tokens[1 + CONSUMED_BY_SH..].to_vec();
+    expected.push("--from-the-caller".into());
+    if received == expected {
+        Verdict::Pass
+    } else {
+        Verdict::Fail(format!(
+            "explain states {tokens:?}, so the child should have received {expected:?}, and it \
+             received {received:?}"
+        ))
+    }
 }
 
 /// What a toolchain row made: the root its toolchain grants, a file under it, and the targets
@@ -1099,6 +1218,9 @@ fn prepare(action: Action, home: &Path, root: &Path, made: &mut Made) -> Result<
         }
         Action::Refuse(_) | Action::CheckDocument => {
             return Err("a refusal has no boundary for the probe to run under".into());
+        }
+        Action::ArgvMatches => {
+            return Err("a shim's argv is read from the child's own stdout, not the probe".into());
         }
         Action::ManifestIsTrue => {
             return Err(

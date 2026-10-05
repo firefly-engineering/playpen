@@ -174,7 +174,7 @@ fn render_failure(manifest: &Manifest, text: &mut String) {
     let _ = writeln!(text, "\n## How a failure reads\n");
     let _ = writeln!(
         text,
-        "- The boundary refused, on this platform, when the errno is one of: {}.",
+        "- The errnos that can mean the boundary refused, on this platform, are: {}.",
         failure
             .denial_errnos
             .iter()
@@ -233,6 +233,7 @@ mod tests {
     use super::*;
     use crate::manifest::{Area, BrokerDenial, Forge, Mode, Root, Route, Rule, RuleSet, Workspace};
     use crate::policy::Policy;
+    use crate::provision::Layout;
     use crate::record::RunId;
 
     fn claude() -> &'static Kind {
@@ -264,8 +265,9 @@ mod tests {
             &policy.profiles["p"],
             claude(),
         );
-        let mut manifest =
-            Manifest::new(&policy, &policy.profiles["p"], claude(), &layout).with_broker_denial();
+        let agent_state = layout.agent_state().expect("a kind was stated");
+        let mut manifest = Manifest::new(&policy, &policy.profiles["p"], &layout, &agent_state)
+            .with_broker_denial();
         manifest.network.routes.push(Route {
             host: "api.github.com".into(),
             path_prefix: "/repos/firefly-engineering/".into(),
@@ -280,8 +282,6 @@ mod tests {
         });
         manifest
     }
-
-    use crate::provision::Layout;
 
     fn rendered(manifest: &Manifest) -> Rendered {
         render(manifest, claude(), Path::new("/state/agents/p/claude"), &[])

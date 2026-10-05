@@ -22,7 +22,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::code::Code;
-use crate::kind::Kind;
 use crate::policy::{self, Policy, Profile};
 use crate::provision::Layout;
 use crate::refusal::Refusal;
@@ -175,7 +174,15 @@ pub struct Rule {
 /// [spec §13.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#132-content
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Failure {
-    /// The errno names that mean the boundary refused, on this platform.
+    /// The errno names that can mean the boundary refused, on this platform.
+    ///
+    /// It is the set an agent must treat as "denied", not a set each member of which always is:
+    /// Linux's `ENOSYS` is a denial only where a user-notify supervisor has died ([spec §13.2]),
+    /// and otherwise means what it always means. The set errs that way on purpose — an agent that
+    /// read a denial as an absence would retry the wrong thing, where one that reads a missing
+    /// syscall as a denial merely stops.
+    ///
+    /// [spec §13.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#132-content
     pub denial_errnos: Vec<String>,
     /// `ENOENT` means absent, and is never a denial.
     pub enoent_means_absent: bool,
@@ -211,10 +218,15 @@ pub const DENIAL_ERRNOS: &[&str] = &["EACCES", "EXDEV", "EPERM", "ENOSYS"];
 const DENIED_HEADER: &str = "X-Playpen-Denied";
 
 impl Manifest {
-    /// The manifest of a launch of profile `selected` from `policy` as `kind`, under `layout`. A
-    /// pure function of the same inputs the capability set is resolved from, so what the agent is
-    /// told and what the kernel enforces cannot drift.
-    pub fn new(policy: &Policy, selected: &Profile, kind: &Kind, layout: &Layout) -> Self {
+    /// The manifest of a launch of profile `selected` from `policy`, under `layout`, whose agent
+    /// state directory is `agent_state`. A pure function of the same inputs the capability set is
+    /// resolved from, so what the agent is told and what the kernel enforces cannot drift.
+    ///
+    /// `agent_state` is handed in rather than read back from `layout` because a manifest that
+    /// could not name it must not be written at all: every path this file states is one
+    /// `P-manifest` holds reachable, so a placeholder would be a false fact in the one file whose
+    /// job is true ones.
+    pub fn new(policy: &Policy, selected: &Profile, layout: &Layout, agent_state: &Path) -> Self {
         let workspaces = selected
             .workspaces
             .iter()
@@ -257,10 +269,7 @@ impl Manifest {
         Self {
             manifest_version: VERSION,
             workspaces,
-            // A launch always states a kind, so a launch always has one.
-            agent_state: layout
-                .agent_state()
-                .unwrap_or_else(|| PathBuf::from(kind.home)),
+            agent_state: agent_state.to_owned(),
             run_scratch: layout.scratch(),
             network: Network {
                 egress: Egress::Unconfined,
@@ -319,7 +328,8 @@ mod tests {
         let kind = crate::kind::require("claude").expect("a known kind");
         let id = RunId::allocate().expect("id");
         let layout = Layout::new(state, &id, policy, "p", &policy.profiles["p"], kind);
-        Manifest::new(policy, &policy.profiles["p"], kind, &layout)
+        let agent_state = layout.agent_state().expect("a kind was stated");
+        Manifest::new(policy, &policy.profiles["p"], &layout, &agent_state)
     }
 
     /// Even with nothing provisioned, the manifest is a whole statement: an absent one and an
@@ -486,7 +496,8 @@ mod tests {
         let layout = Layout::new(state.path(), &id, &policy, "p", &policy.profiles["p"], kind);
         let _provisioned = layout.provision().expect("provisioned");
         let at = layout.manifest();
-        Manifest::new(&policy, &policy.profiles["p"], kind, &layout)
+        let agent_state = layout.agent_state().expect("a kind was stated");
+        Manifest::new(&policy, &policy.profiles["p"], &layout, &agent_state)
             .write(&at)
             .expect("written");
         assert_eq!(at.parent(), Some(layout.scratch().as_path()));

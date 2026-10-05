@@ -33,10 +33,10 @@ pub fn check(
         ("the playpen executable", Some(executable)),
         ("the invoking shim link", shim),
     ];
-    for (what, path) in subjects.into_iter().filter_map(|(what, path)| {
-        let path = path?;
-        Some((what, path))
-    }) {
+    for (what, path) in subjects
+        .into_iter()
+        .filter_map(|(what, path)| path.map(|path| (what, path)))
+    {
         for entry in entries(what, path)? {
             if let Some(from) = writable_by(caps, &entry) {
                 return Err(Refusal::new(

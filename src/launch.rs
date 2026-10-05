@@ -25,7 +25,7 @@ use crate::kind::{self, Kind};
 use crate::manifest::Manifest;
 use crate::mechanism::{self, Mechanism};
 use crate::minter;
-use crate::policy::{Policy, SearchPath, coherence};
+use crate::policy::{Policy, SearchPath, coherence, known};
 use crate::present;
 use crate::provision::Layout;
 use crate::record::{self, RunId, RunRecord};
@@ -455,16 +455,6 @@ fn reenter(name: &str, argv: &[OsString], host: &Host) -> Refusal {
     )
 }
 
-/// `names`, comma-separated, or `none`.
-fn known<'a>(names: impl Iterator<Item = &'a String>) -> String {
-    let names: Vec<_> = names.map(String::as_str).collect();
-    if names.is_empty() {
-        "none".into()
-    } else {
-        names.join(", ")
-    }
-}
-
 /// Read the policy at `path`, recording the absolute path it was read from first, so a stored
 /// record names the file whatever directory it is read from.
 fn load(
@@ -600,34 +590,45 @@ fn run(
     floor_self_test()?;
     // Step 9. Removed again when this returns: at teardown, or on any refusal from here on.
     let _provisioned = layout.provision()?;
-    // The manifest, written on every run even when nothing is provisioned ([spec §13.1]): it is
-    // derived from the same resolution pass as the capability set, so what the agent is told and
-    // what the kernel enforces cannot drift.
-    //
-    // [spec §13.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#131-form
-    let manifest = Manifest::new(&loaded.policy, selected, kind, &layout);
-    manifest.write(&layout.manifest())?;
-    // The kind's presentation adapter, rendered into the kind's instruction entry point inside the
-    // agent state directory ([spec §13.3]). Nothing is rendered for a kind whose entry point
-    // playpen does not know.
-    //
-    // [spec §13.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#133-presentation
-    if let Some(agent_state) = layout.agent_state()
-        && let Some(rendered) = present::render(&manifest, kind, &agent_state, &layout.imports())
-    {
-        rendered.write()?;
-    }
     // Step 10: every credential this profile's routes resolve, minted unconfined on the host
     // before anything is confined ([spec §7.2]). A failure refuses the whole run: launching
     // without the credential would produce a run that works for ten minutes and then fails at the
     // first push. Held here, in the supervisor, for as long as the run lasts — the proxy is what
     // uses it (#86), and nothing of it crosses the boundary.
     //
+    // Before the manifest, as the sequence has it: the manifest states the route table, and a
+    // refusal here must not have rewritten the profile's rendered entry point, which outlives the
+    // run that wrote it.
+    //
     // [spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters
     let credentials = minter::resolve(&loaded.policy, profile, selected)?;
-    record.credentials(credentials.iter().map(minter::Resolved::recorded).collect());
+    record.credentials(credentials.iter().map(minter::Minting::recorded).collect());
     // Step 12: the capability set compiles on this mechanism.
     backend::check(&caps)?;
+    // Step 13: the manifest, written on every run even when nothing is provisioned
+    // ([spec §13.1]). It is derived from the same resolution pass as the capability set, so what
+    // the agent is told and what the kernel enforces cannot drift.
+    //
+    // A launch always states a kind, so it always has an agent state directory to name.
+    //
+    // [spec §13.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#131-form
+    let agent_state = layout.agent_state().ok_or_else(|| {
+        Refusal::new(
+            Code::StateIo,
+            "a launch states a kind, so it has an agent state directory; this one has none"
+                .to_string(),
+        )
+    })?;
+    let manifest = Manifest::new(&loaded.policy, selected, &layout, &agent_state);
+    manifest.write(&layout.manifest())?;
+    // The kind's presentation adapter, rendered into the kind's instruction entry point inside
+    // that directory ([spec §13.3]). Nothing is rendered for a kind whose entry point playpen does
+    // not know.
+    //
+    // [spec §13.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#133-presentation
+    if let Some(rendered) = present::render(&manifest, kind, &agent_state, &layout.imports()) {
+        rendered.write()?;
+    }
     // Step 14.
     let env = resolve::environment(&loaded.policy, profile, selected, env, &layout, Some(kind));
     record.launch(&caps, backend::denial_tag(record.id()))?;

@@ -29,6 +29,17 @@ pub const ROWS: &[Row] = &[
         expected: Expected::Succeeds,
         from: &[Decision::Adr(11), Decision::Adr(16), Decision::Issue(78)],
     },
+    // playpen reads no argument anywhere, so what it injects and what the child gets are held
+    // together by one function and nothing else.
+    Row {
+        id: "P-argv",
+        class: Class::Positive,
+        platform: BOTH,
+        fixture: Fixture::Shim,
+        action: Action::ArgvMatches,
+        expected: Expected::Succeeds,
+        from: &[Decision::Adr(2), Decision::Adr(16), Decision::Issue(82)],
+    },
     Row {
         id: "P-canary",
         class: Class::Positive,

@@ -216,6 +216,11 @@ pub enum Fixture {
     ///
     /// [spec §13]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#13-the-manifest
     Manifest,
+    /// A shim installed as a symlink to the playpen binary, with a policy where the search path
+    /// finds it, whose target prints its own argv ([spec §11.3]).
+    ///
+    /// [spec §11.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#113-shims
+    Shim,
 }
 
 /// The closed set of checks.
@@ -267,6 +272,13 @@ pub enum Action {
     ///
     /// [spec §13]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#13-the-manifest
     ManifestIsTrue,
+    /// The injected argv `explain --shim --json` states is the argv the child received
+    /// ([spec §11.3]). playpen reads no argument anywhere, so the only thing holding the two
+    /// together is that one function builds both — and nothing in a launch would complain if it
+    /// stopped, which is what makes this a positive worth having.
+    ///
+    /// [spec §11.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#113-shims
+    ArgvMatches,
 }
 
 impl Action {
@@ -290,6 +302,7 @@ impl Action {
             Action::Refuse(_) | Action::CheckDocument => fixture == Fixture::Outside,
             Action::PullDenials => fixture == Fixture::DescendantDenied,
             Action::ManifestIsTrue => fixture == Fixture::Manifest,
+            Action::ArgvMatches => fixture == Fixture::Shim,
         }
     }
 }

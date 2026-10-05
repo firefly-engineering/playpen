@@ -104,6 +104,20 @@ impl Planned {
     }
 }
 
+/// One share entry as a run gets it: where it was written, the name it appears under inside, the
+/// real path outside, and whether the presentation adapter owns that name. The four travel
+/// together everywhere a share entry is handled, so they are one thing.
+struct Share<'a> {
+    /// The authored source, the bridge back to the policy.
+    from: String,
+    /// The name as the policy wrote it, which is also where it appears inside.
+    entry: &'a str,
+    /// The real path outside, or `None` where the entry names nothing in the kind's agent home —
+    /// because it is not one name in it, or because the host names no home.
+    source: Option<PathBuf>,
+    is_entry_point: bool,
+}
+
 impl Layout {
     /// The layout of run `run` of profile `profile`, `selected` from `policy`, launched as `kind`,
     /// under the state directory `state`, which should be resolved: the mechanism enforces on real
@@ -186,44 +200,34 @@ impl Layout {
         }
     }
 
-    /// Every share entry, as the provenance of where it was written, the name it appears under
-    /// inside, and the real path outside — `None` where the host names no home, or the entry is
-    /// not one name in that home.
-    fn shared(&self) -> impl Iterator<Item = (String, &str, Option<PathBuf>)> {
+    /// Every share entry this layout's kind declares.
+    fn shared(&self) -> impl Iterator<Item = Share<'_>> {
         let kind = self.kind;
         let agent_home = kind.and_then(|kind| self.home.as_ref().map(|home| home.join(kind.home)));
-        self.share.iter().enumerate().map(move |(i, entry)| {
-            let from = format!(
+        self.share.iter().enumerate().map(move |(i, entry)| Share {
+            from: format!(
                 "profile:{}.agent_state.{}.share[{i}]",
                 self.profile,
                 kind.map_or("", |kind| kind.name)
-            );
+            ),
+            entry,
             // A share entry is one name in the kind's agent home. Anything else — a nested path,
-            // `..`, an absolute path — names nothing playpen can share, and so has no source.
-            let source = agent_home
+            // `..`, an absolute path — names nothing in that home, and so has no source at all.
+            source: agent_home
                 .as_ref()
                 .filter(|_| one_name(entry))
-                .map(|agent_home| agent_home.join(entry));
-            (from, entry.as_str(), source)
+                .map(|agent_home| agent_home.join(entry)),
+            // The adapter owns the kind's instruction entry point, so an entry naming it is
+            // composed **by reference**: the rendered file ends with the kind's import line
+            // pointing at the real file, rather than the real file replacing the rendered one
+            // ([spec §13.3]). The coherence tier has already refused a kind with no import
+            // mechanism sharing its own entry point.
+            //
+            // [spec §13.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#133-presentation
+            is_entry_point: kind
+                .and_then(|kind| kind.presentation.as_ref())
+                .is_some_and(|presentation| presentation.entry_point == entry),
         })
-    }
-
-    /// The grants the share list adds ([spec §5.6]): each named entry at its real path, read-only,
-    /// so it is readable inside and never writable. A source that is missing — or a name that
-    /// could never be one — refuses, because a share list that silently shared nothing would read
-    /// as a working policy.
-    ///
-    /// [spec §5.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#56-agent-state-directory
-    /// Whether `entry` names the kind's instruction entry point, which the presentation adapter
-    /// owns ([spec §13.3]). Such an entry is composed **by reference**: the rendered file ends
-    /// with the kind's import line pointing at the real file, rather than the real file replacing
-    /// the rendered one.
-    ///
-    /// [spec §13.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#133-presentation
-    fn is_entry_point(&self, entry: &str) -> bool {
-        self.kind
-            .and_then(|kind| kind.presentation.as_ref())
-            .is_some_and(|presentation| presentation.entry_point == entry)
     }
 
     /// The real paths of the share entries that name the kind's instruction entry point, for the
@@ -231,42 +235,30 @@ impl Layout {
     /// already refused one that is missing.
     pub fn imports(&self) -> Vec<PathBuf> {
         self.shared()
-            .filter(|(_, entry, _)| self.is_entry_point(entry))
-            .filter_map(|(_, _, source)| source?.canonicalize().ok())
+            .filter(|share| share.is_entry_point)
+            .filter_map(|share| share.source?.canonicalize().ok())
             .collect()
     }
 
+    /// The grants the share list adds ([spec §5.6]): each named entry at its real path, read-only,
+    /// so it is readable inside and never writable. A source that is missing — or a name that
+    /// names nothing in the kind's agent home — refuses, because a share list that silently shared
+    /// nothing would read as a working policy.
+    ///
+    /// [spec §5.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#56-agent-state-directory
     pub fn shares(&self) -> Result<Vec<PathGrant>, Refusal> {
         let mut grants = Vec::new();
-        for (from, entry, source) in self.shared() {
-            // The adapter owns the entry point, so a share entry naming it can only be composed
-            // by reference. A kind with no import mechanism has no way to do that, and playpen
-            // will not drop the rendered file to make room: the collision is the refusal.
-            if self.is_entry_point(entry)
-                && self
-                    .kind
-                    .and_then(|kind| kind.presentation.as_ref())
-                    .and_then(|presentation| presentation.import)
-                    .is_none()
-            {
-                return Err(Refusal::new(
-                    Code::StateCollision,
-                    format!(
-                        "{from}: share entry {entry:?} is the instruction entry point of kind {:?}, \
-                         which has no import mechanism, so it cannot be composed by reference",
-                        self.kind.map_or("", |kind| kind.name),
-                    ),
-                ));
-            }
+        for share in self.shared() {
             let missing = |detail: String| {
                 Refusal::new(
                     Code::RootMissing,
-                    format!("{from}: share entry {entry:?} {detail}"),
+                    format!("{}: share entry {:?} {detail}", share.from, share.entry),
                 )
             };
-            let source = source.ok_or_else(|| {
+            let source = share.source.as_deref().ok_or_else(|| {
                 missing(
-                    "is not one name in the kind's agent home, or the host names no home"
+                    "names nothing in the kind's agent home: a share entry is one name in it, and \
+                     the host must name a home for it to be in"
                         .to_string(),
                 )
             })?;
@@ -277,12 +269,56 @@ impl Layout {
                 path,
                 access: Access::Read,
                 scope: Scope::Subtree,
-                from,
+                from: share.from,
                 // Policy-declared, and outside the state directory: never exempt.
                 state_derived: false,
             });
         }
         Ok(grants)
+    }
+
+    /// Make each share entry visible inside `agent_state`, by reference: a symlink named for the
+    /// entry, pointing at the real path, which [`Layout::shares`] has granted read-only. Rewritten
+    /// on every launch, so a policy edit shows up at the next one.
+    fn link_shares(&self, agent_state: &Path) -> Result<(), Refusal> {
+        for share in self.shared() {
+            // Sourceless entries have already refused in `shares`, which runs at step 6; the entry
+            // point is the adapter's, composed by reference rather than linked, and the rendered
+            // file lands here after this.
+            let Some(source) = share.source else { continue };
+            if share.is_entry_point {
+                continue;
+            }
+            let at = agent_state.join(share.entry);
+            let io = |detail: String| {
+                Refusal::new(
+                    Code::StateIo,
+                    format!(
+                        "{}: cannot share {:?} at {}: {detail}",
+                        share.from,
+                        share.entry,
+                        at.display()
+                    ),
+                )
+            };
+            match at.symlink_metadata() {
+                // playpen's own link from a previous launch: repointed, in case the policy moved.
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    std::fs::remove_file(&at).map_err(|e| io(e.to_string()))?;
+                }
+                // Something the agent itself wrote. playpen does not delete the agent's own state
+                // to make room, so it cannot create what it must create, which is what
+                // `refusal.state.io` is.
+                Ok(_) => {
+                    return Err(io(
+                        "the agent's own file is there, and playpen will not replace it".into(),
+                    ));
+                }
+                Err(_) => {}
+            }
+            std::os::unix::fs::symlink(&source, &at).map_err(|e| io(e.to_string()))?;
+        }
+        Ok(())
     }
 
     /// The run scratch: the run's own, and nobody else's.
@@ -468,52 +504,6 @@ impl Layout {
             create(&self.path(planned), &format!("area {}", planned.from()))?;
         }
         Ok(provisioned)
-    }
-}
-
-impl Layout {
-    /// Make each share entry visible inside `agent_state`, by reference: a symlink named for the
-    /// entry, pointing at the real path, which [`Layout::shares`] has granted read-only. Rewritten
-    /// on every launch, so a policy edit shows up at the next one.
-    ///
-    /// A share entry whose name is already taken by something the agent itself wrote is
-    /// `refusal.state.collision`: playpen never deletes the agent's own state to make room.
-    fn link_shares(&self, agent_state: &Path) -> Result<(), Refusal> {
-        for (from, entry, source) in self.shared() {
-            // Sourceless entries have already refused in `shares`, which runs at step 6.
-            let Some(source) = source else { continue };
-            // The entry point is the adapter's, composed by reference rather than linked: the
-            // rendered file lands here after this, carrying the import line.
-            if self.is_entry_point(entry) {
-                continue;
-            }
-            let at = agent_state.join(entry);
-            let io = |e: std::io::Error| {
-                Refusal::new(
-                    Code::StateIo,
-                    format!("{from}: cannot share {entry:?} at {}: {e}", at.display()),
-                )
-            };
-            match at.symlink_metadata() {
-                // playpen's own link from a previous launch: repointed, in case the policy moved.
-                Ok(meta) if meta.file_type().is_symlink() => {
-                    std::fs::remove_file(&at).map_err(io)?;
-                }
-                Ok(_) => {
-                    return Err(Refusal::new(
-                        Code::StateCollision,
-                        format!(
-                            "{from}: share entry {entry:?} collides with the agent's own {}, \
-                             which playpen will not replace",
-                            at.display()
-                        ),
-                    ));
-                }
-                Err(_) => {}
-            }
-            std::os::unix::fs::symlink(&source, &at).map_err(io)?;
-        }
-        Ok(())
     }
 }
 
@@ -1071,13 +1061,14 @@ mod tests {
         std::fs::remove_file(&at).expect("unlink");
         std::fs::write(&at, "the agent's own").expect("plant");
         let refusal = layout.provision().expect_err("refused");
-        assert_eq!(refusal.code, Code::StateCollision);
+        assert_eq!(refusal.code, Code::StateIo);
         assert!(
             refusal
                 .message()
                 .contains("profile:p.agent_state.claude.share[0]"),
             "{refusal}"
         );
+        assert!(refusal.message().contains("will not replace"), "{refusal}");
     }
 
     /// A share entry naming the kind's instruction entry point is the adapter's to compose by
@@ -1128,48 +1119,6 @@ mod tests {
             !dir.join("CLAUDE.md").exists(),
             "the entry point was linked over instead of imported"
         );
-    }
-
-    /// A kind with no import mechanism cannot compose the entry point by reference, and playpen
-    /// will not drop the rendered file to make room.
-    #[test]
-    fn a_kind_with_no_import_mechanism_refuses_the_entry_point_collision() {
-        // A kind of its own, since neither shipped kind is in this shape: `claude` imports, and
-        // `omp`'s entry point is a handed-off question, so it has none to collide with.
-        static NO_IMPORT: Kind = Kind {
-            name: "no-import",
-            redirect: "NO_IMPORT_DIR",
-            suppression: &[],
-            home: ".no-import",
-            presentation: Some(crate::kind::Presentation {
-                entry_point: "CLAUDE.md",
-                import: None,
-            }),
-        };
-        let text = serde_json::json!({
-            "version": 1,
-            "workspaces": {"w": {"roots": []}},
-            "profiles": {"p": {
-                "workspaces": ["w"],
-                "toolchain": [],
-                "agent_state": {"no-import": {"share": ["CLAUDE.md"]}},
-            }},
-        });
-        let policy = Policy::parse(&text.to_string(), Path::new("/p.json")).expect("parses");
-        let id = RunId::allocate().expect("id");
-        let layout = Layout::new(
-            Path::new("/state"),
-            &id,
-            &policy,
-            "p",
-            &policy.profiles["p"],
-            &NO_IMPORT,
-        )
-        .with_home(Some(Path::new("/home/u")));
-        let refusal = layout.shares().expect_err("refused");
-        assert_eq!(refusal.code, Code::StateCollision);
-        assert!(refusal.message().contains("no-import"), "{refusal}");
-        assert!(refusal.message().contains("import mechanism"), "{refusal}");
     }
 
     /// A name is one component, whatever it holds: nothing climbs out of where playpen put it.

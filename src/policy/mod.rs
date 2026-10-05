@@ -339,6 +339,17 @@ fn literal<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<PathBuf,
     Ok(path)
 }
 
+/// `names`, comma-separated, or `none`: how every refusal that names what *is* declared renders
+/// its list, so two of them never disagree on the wording.
+pub fn known<'a>(names: impl Iterator<Item = &'a String>) -> String {
+    let names: Vec<_> = names.map(String::as_str).collect();
+    if names.is_empty() {
+        "none".into()
+    } else {
+        names.join(", ")
+    }
+}
+
 /// A policy as read from one file: the document, and the file it came from, which every later
 /// refusal about it names.
 #[derive(Debug)]

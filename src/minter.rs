@@ -60,12 +60,12 @@ pub struct Destination {
 /// [spec §7.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#74-attachment
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Scope {
+pub enum ForgeScope {
     Org(String),
     Repos(Vec<String>),
 }
 
-impl From<&Forge> for Scope {
+impl From<&Forge> for ForgeScope {
     fn from(forge: &Forge) -> Self {
         match forge {
             Forge::Org(org) => Self::Org(org.clone()),
@@ -82,11 +82,11 @@ pub struct Request {
     pub version: u32,
     pub route: Destination,
     /// `null` for a profile route.
-    pub scope: Option<Scope>,
+    pub scope: Option<ForgeScope>,
 }
 
 impl Request {
-    pub fn new(route: Destination, scope: Option<Scope>) -> Self {
+    pub fn new(route: Destination, scope: Option<ForgeScope>) -> Self {
         Self {
             version: VERSION,
             route,
@@ -105,9 +105,10 @@ impl Request {
     }
 }
 
-/// What a minter returns, as it comes off stdout.
+/// What a minter returns, as it comes off stdout. Extra fields are ignored rather than refused:
+/// the contract asks for `{token, expires_at}`, and a provider's own `token_type` beside them is
+/// not a malformed answer.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Response {
     token: String,
     expires_at: String,
@@ -146,12 +147,20 @@ impl fmt::Debug for Minted {
 /// does not. Its stderr is inherited, so an operator debugging a minter sees it; its stdout is
 /// never shown.
 pub fn mint(name: &str, minter: &Minter, request: &Request) -> Result<Minted, Refusal> {
+    // Every refusal names the minter *and the scope* it was minting for ([spec §7.2]): an operator
+    // with four minters and two workspaces needs both to know which call broke.
     let refusal = |code: Code, detail: String| {
         Refusal::new(
             code,
             format!(
-                "minter {name:?} for {}{}: {detail}",
-                request.route.host, request.route.path_prefix
+                "minter {name:?} for {}{} scoped to {}: {detail}",
+                request.route.host,
+                request.route.path_prefix,
+                match &request.scope {
+                    Some(ForgeScope::Org(org)) => format!("org {org}"),
+                    Some(ForgeScope::Repos(repos)) => format!("repos {}", repos.join(", ")),
+                    None => "the profile, not one workspace".to_string(),
+                },
             ),
         )
     };
@@ -298,12 +307,12 @@ fn is_rfc_3339(text: &str) -> bool {
 }
 
 /// One route this launch minted a credential for, with the provenance of where the route was
-/// written ([spec §7.4]). Workspace routes join this table at
-/// [#88](https://github.com/firefly-engineering/playpen/issues/88).
+/// written ([spec §7.4]). Workspace routes and profile routes resolve into **one** table, which is
+/// what lets `explain` answer why a credential is present.
 ///
 /// [spec §7.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#74-attachment
 #[derive(Debug)]
-pub struct Resolved {
+pub struct Minting {
     pub route: Destination,
     /// The declared minter's name, which every refusal about it names.
     pub minter: String,
@@ -311,7 +320,7 @@ pub struct Resolved {
     pub credential: Minted,
 }
 
-impl Resolved {
+impl Minting {
     /// What the run record holds about this credential: never the token.
     pub fn recorded(&self) -> crate::record::RecordedCredential {
         crate::record::RecordedCredential {
@@ -335,10 +344,9 @@ pub fn resolve(
     policy: &crate::policy::Policy,
     name: &str,
     selected: &crate::policy::Profile,
-) -> Result<Vec<Resolved>, Refusal> {
+) -> Result<Vec<Minting>, Refusal> {
     let mut minted = Vec::new();
-    for (i, route) in selected.credentials.iter().enumerate() {
-        let from = format!("profile:{name}.credentials[{i}]");
+    for (from, route, scope) in attached(policy, name, selected) {
         let declared = policy.minters.get(&route.minter).ok_or_else(|| {
             Refusal::new(
                 Code::MinterUnknown,
@@ -349,11 +357,9 @@ pub fn resolve(
             host: route.host.clone(),
             path_prefix: route.path_prefix.clone(),
         };
-        // A profile route is for everything that does not minimize to one workspace, so its scope
-        // is `null` ([spec §7.4]).
-        let request = Request::new(destination.clone(), None);
+        let request = Request::new(destination.clone(), scope);
         let credential = mint(&route.minter, declared, &request)?;
-        minted.push(Resolved {
+        minted.push(Minting {
             route: destination,
             minter: route.minter.clone(),
             from,
@@ -361,6 +367,45 @@ pub fn resolve(
         });
     }
     Ok(minted)
+}
+
+/// Every route profile `name` resolves ([spec §7.4]): each of its selected workspaces' routes,
+/// with that workspace's own forge scope, then the profile's own, with none.
+///
+/// **Forge scope is never unioned across a profile's workspaces.** The point of a workspace route
+/// is that its credential minimizes to that workspace, and a union would hand every workspace's
+/// minter the reach of all of them.
+///
+/// [spec §7.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#74-attachment
+fn attached<'a>(
+    policy: &'a crate::policy::Policy,
+    name: &str,
+    selected: &'a crate::policy::Profile,
+) -> Vec<(String, &'a crate::policy::Route, Option<ForgeScope>)> {
+    let mut routes = Vec::new();
+    for workspace in selected.workspaces.iter().map(|w| &w.value) {
+        let Some(declared) = policy.workspaces.get(workspace) else {
+            continue;
+        };
+        let scope = declared.forge.as_ref().map(ForgeScope::from);
+        routes.extend(declared.credentials.iter().enumerate().map(|(i, route)| {
+            (
+                format!("workspace:{workspace}.credentials[{i}]"),
+                route,
+                scope.clone(),
+            )
+        }));
+    }
+    // A profile route is for everything that does not minimize to one workspace — a model API key,
+    // a SaaS token — so its scope is `null`.
+    routes.extend(
+        selected
+            .credentials
+            .iter()
+            .enumerate()
+            .map(|(i, route)| (format!("profile:{name}.credentials[{i}]"), route, None)),
+    );
+    routes
 }
 
 #[cfg(test)]
@@ -415,7 +460,7 @@ mod tests {
                 host: "github.com".into(),
                 path_prefix: "/firefly-engineering/".into(),
             },
-            Some(Scope::Org("firefly-engineering".into())),
+            Some(ForgeScope::Org("firefly-engineering".into())),
         );
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&request.body()).expect("JSON")["scope"],
@@ -423,7 +468,7 @@ mod tests {
         );
         let repos = Request::new(
             request.route.clone(),
-            Some(Scope::Repos(vec!["a/b".into()])),
+            Some(ForgeScope::Repos(vec!["a/b".into()])),
         );
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&repos.body()).expect("JSON")["scope"],
