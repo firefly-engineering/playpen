@@ -7,7 +7,7 @@ use playpen::code::Code;
 
 use crate::row::{
     Action, Asymmetry, BOTH, Class, Decision, Expected, Fixture, Invocation, Listening, Os,
-    Platform, Precondition, Row, Scope, Services, Signalled, Target,
+    POLICY_SPAN_SITES, Platform, Precondition, Row, Scope, Services, Signalled, Target,
 };
 
 /// Both platforms, for a row that puts a decoy in the caller's home when the host lacks the real
@@ -183,5 +183,23 @@ pub const ROWS: &[Row] = &[
         action: Action::Refuse(Invocation::MissingCapability),
         expected: Expected::Recorded(Code::MechanismUnavailable),
         from: &[Decision::Adr(3), Decision::Adr(16), Decision::Issue(55)],
+    },
+    Row {
+        id: "R-policy-span",
+        class: Class::Refusal,
+        platform: BOTH,
+        fixture: Fixture::Outside,
+        action: Action::Refuse(Invocation::MergedTypo),
+        expected: Expected::RecordedAt(Code::PolicyUnknownField, POLICY_SPAN_SITES),
+        from: &[Decision::Adr(9), Decision::Adr(16), Decision::Issue(56)],
+    },
+    Row {
+        id: "R-no-filesystem",
+        class: Class::Refusal,
+        platform: BOTH,
+        fixture: Fixture::Outside,
+        action: Action::CheckDocument,
+        expected: Expected::Unexamined(Code::RootMissing),
+        from: &[Decision::Adr(9), Decision::Adr(16), Decision::Issue(56)],
     },
 ];

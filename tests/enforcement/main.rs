@@ -20,8 +20,9 @@ use std::path::{Path, PathBuf};
 
 use playpen::code::Code;
 use row::{
-    Action, Asymmetry, BOTH, Cause, Class, Declined, Expected, Fixture, Os, Outcome, Platform,
-    Precondition, Row, Scope, Seen, Target, Verdict, judge, judge_refusal,
+    Action, Asymmetry, BOTH, Cause, Checked, Class, Declined, Expected, Fixture, Os, Outcome,
+    Platform, Precondition, Row, Scope, Seen, Target, Verdict, judge, judge_refusal,
+    judge_unexamined,
 };
 use rows::ROWS;
 use run::{DECOY, DECOY_MARKER, SSH_KEY_DECOY};
@@ -71,6 +72,14 @@ fn main() {
         (
             "a_recorded_refusal_needs_the_exit_the_code_and_the_record",
             a_recorded_refusal_needs_the_exit_the_code_and_the_record,
+        ),
+        (
+            "a_spanned_refusal_needs_every_site_on_its_line",
+            a_spanned_refusal_needs_every_site_on_its_line,
+        ),
+        (
+            "an_unexamined_check_needs_the_examined_one_to_refuse",
+            an_unexamined_check_needs_the_examined_one_to_refuse,
         ),
         (
             "a_row_scoped_to_the_other_platform_is_na_and_never_runs",
@@ -233,6 +242,7 @@ fn a_recorded_refusal_needs_the_exit_the_code_and_the_record() {
     let declined = Declined {
         status: Some(playpen::refusal::EXIT_REFUSED),
         line: Some((code.to_string(), "01J9".into())),
+        text: format!("playpen: {code}: /p/policy.yaml:8:13 (defined at /p/policy.yaml:4:5): x"),
         recorded: Some(Some(code.to_string())),
         detail: String::new(),
     };
@@ -271,6 +281,58 @@ fn a_recorded_refusal_needs_the_exit_the_code_and_the_record() {
             "{broken:?}: {verdict:?}"
         );
     }
+}
+
+fn a_spanned_refusal_needs_every_site_on_its_line() {
+    let code = Code::PolicyUnknownField;
+    let declined = Declined {
+        status: Some(playpen::refusal::EXIT_REFUSED),
+        line: Some((code.to_string(), "01J9".into())),
+        text: format!("playpen: {code}: /p/policy.yaml:8:13 (defined at /p/policy.yaml:4:5): x"),
+        recorded: Some(Some(code.to_string())),
+        detail: String::new(),
+    };
+    let expected = Expected::RecordedAt(code, &[(8, 13), (4, 5)]);
+    assert_eq!(judge_refusal(expected, &declined), Verdict::Pass);
+    let verdict = judge_refusal(Expected::RecordedAt(code, &[(8, 13), (4, 6)]), &declined);
+    assert!(matches!(verdict, Verdict::Fail(_)), "{verdict:?}");
+    // The code alone is not the assertion.
+    let unplaced = Declined {
+        text: format!("playpen: {code}: /p/policy.yaml: x"),
+        ..declined
+    };
+    let verdict = judge_refusal(expected, &unplaced);
+    assert!(matches!(verdict, Verdict::Fail(_)), "{verdict:?}");
+}
+
+fn an_unexamined_check_needs_the_examined_one_to_refuse() {
+    let code = Code::RootMissing;
+    let expected = Expected::Unexamined(code);
+    let checked = Checked {
+        examined: Some(code.to_string()),
+        unexamined_silent_success: true,
+        detail: String::new(),
+    };
+    assert_eq!(judge_unexamined(expected, &checked), Verdict::Pass);
+    // A check that never looks at the filesystem would pass the second half alone.
+    for examined in [None, Some(Code::PolicySyntax.to_string())] {
+        let verdict = judge_unexamined(
+            expected,
+            &Checked {
+                examined,
+                ..checked.clone()
+            },
+        );
+        assert!(matches!(verdict, Verdict::Setup(_)), "{verdict:?}");
+    }
+    let verdict = judge_unexamined(
+        expected,
+        &Checked {
+            unexamined_silent_success: false,
+            ..checked
+        },
+    );
+    assert!(matches!(verdict, Verdict::Fail(_)), "{verdict:?}");
 }
 
 /// Under a home that does not exist the row could only be a setup failure if it ran, so `n/a` is

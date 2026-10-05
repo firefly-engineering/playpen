@@ -14,6 +14,7 @@ use clap::{Parser, Subcommand};
 
 use crate::backend;
 use crate::capability::{PathGrant, Scope};
+use crate::check;
 use crate::child;
 use crate::code::Code;
 use crate::explain;
@@ -37,6 +38,8 @@ enum Command {
     Run(RunArgs),
     /// Replay a stored run record, or list the runs the ring holds.
     Explain(explain::Args),
+    /// Validate a policy without launching anything.
+    Check(check::Args),
 }
 
 #[derive(Debug, clap::Args)]
@@ -70,12 +73,22 @@ pub fn main(
     state: Option<PathBuf>,
     probe: impl FnOnce() -> Mechanism,
 ) -> i32 {
-    // Parsing has no effect, so it can come first. `explain` launches nothing ([spec §14.2]), so
-    // it opens no record and pushes no run out of the ring, and nor does a request for help;
-    // anything else is a launch, and a command line that does not parse is refused as one.
+    // Parsing has no effect, so it can come first. `explain` and `check` launch nothing
+    // ([spec §14.2], [spec §10.5]), so they open no record and push no run out of the ring, and nor
+    // does a request for help; anything else is a launch, and a command line that does not parse
+    // is refused as one.
     //
     // [spec §14.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#142-playpen-explain
+    // [spec §10.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#105-validation-tiers
     let parsed = match Cli::try_parse_from(args) {
+        Ok(Cli {
+            command: Command::Check(args),
+        }) => {
+            return match check::check(&args) {
+                Ok(()) => 0,
+                Err(refusal) => refuse(&refusal, None),
+            };
+        }
         Ok(Cli {
             command: Command::Explain(args),
         }) => {
@@ -197,7 +210,7 @@ fn run(
         Ok(cwd) => record.policy(&cwd.join(policy_path)),
         Err(_) => record.policy(policy_path),
     }
-    let policy = Policy::load(policy_path)?;
+    let policy = Policy::load(policy_path)?.policy;
     let roots = resolve_roots(&policy, profile)?;
     record.profile(profile);
     check_cwd(cwd, &roots)?;
@@ -243,7 +256,7 @@ fn resolve_roots(policy: &Policy, profile: &str) -> Result<Vec<PathGrant>, Refus
         )
     })?;
     let mut grants = Vec::new();
-    for name in &selected.workspaces {
+    for name in selected.workspaces.iter().map(|name| &name.value) {
         let workspace = policy.workspaces.get(name).ok_or_else(|| {
             Refusal::new(
                 Code::WorkspaceUnknown,
@@ -381,7 +394,7 @@ mod tests {
         let document = serde_json::json!({
             "version": 1,
             "workspaces": {"w": {"roots": [{"path": root.path(), "mode": "read"}]}},
-            "profiles": {"p": {"workspaces": ["w"]}},
+            "profiles": {"p": {"workspaces": ["w"], "toolchain": []}},
         });
         std::fs::write(&policy, document.to_string()).expect("policy");
         let argv = [];

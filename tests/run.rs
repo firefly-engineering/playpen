@@ -259,13 +259,13 @@ fn every_refusal_is_one_line_and_exit_125() {
             json!({
                 "version": 1,
                 "workspaces": {"w": {"roots": [{"path": path, "mode": "read"}]}},
-                "profiles": {"p": {"workspaces": ["w"]}},
+                "profiles": {"p": {"workspaces": ["w"], "toolchain": []}},
             }),
         )
     };
     let unknown_workspace = write_policy(
         "unknown-ws.json",
-        json!({"version": 1, "profiles": {"p": {"workspaces": ["nope"]}}}),
+        json!({"version": 1, "profiles": {"p": {"workspaces": ["nope"], "toolchain": []}}}),
     );
     let missing_root = with_root("missing-root.json", json!(root.join("gone")));
     let relative_root = with_root("relative-root.json", json!("src/playpen"));

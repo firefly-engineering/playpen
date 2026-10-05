@@ -23,9 +23,10 @@ use tempfile::{NamedTempFile, TempDir};
 
 use crate::common::{self, PROBE};
 use crate::row::{
-    Action, Cause, Declined, Fixture, Invocation, Listening, Outcome, Row, Seen, Services,
-    Signalled, Target, Verdict, applies, judge, judge_refusal,
+    Action, Cause, Checked, Declined, Fixture, Invocation, Listening, MERGED_TYPO, Outcome, Row,
+    Seen, Services, Signalled, Target, Verdict, applies, judge, judge_refusal, judge_unexamined,
 };
+use playpen::refusal::EXIT_REFUSED;
 
 /// Every row's outcome, in table order. `home` is the caller's home directory, where the
 /// credential targets live; it is handed in, never read from the environment here.
@@ -202,6 +203,7 @@ fn shell(command: &str) -> Result<String, String> {
 fn refusal(row: &Row) -> Verdict {
     match row.action {
         Action::Refuse(invocation) => judge_refusal(row.expected, &decline(invocation)),
+        Action::CheckDocument => judge_unexamined(row.expected, &check_document()),
         action => Verdict::Setup(format!(
             "{action:?} runs under a boundary, and a refusal has none"
         )),
@@ -247,6 +249,15 @@ fn decline(invocation: Invocation) -> Declined {
                 .current_dir(fixture.root());
             command
         }
+        Invocation::MergedTypo => {
+            let root = fixture.root().to_str().expect("utf-8 path");
+            let policy = fixture.policy_dir.path().join("policy.yaml");
+            fs::write(&policy, MERGED_TYPO.replace("{root}", root)).expect("write policy");
+            let mut command =
+                fixture.playpen(&["run", "--profile", "p", "--agent", "claude", "--policy"]);
+            command.arg(&policy).arg("--").arg(canary_path());
+            command
+        }
         Invocation::StateReachable => {
             let inside = fixture.root().join("state");
             runs = inside.join("playpen/runs");
@@ -257,10 +268,11 @@ fn decline(invocation: Invocation) -> Declined {
     };
     let output = command.stdin(Stdio::null()).output().expect("run playpen");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let line = match stderr.lines().collect::<Vec<_>>().as_slice() {
-        [line] => refusal_line(line),
-        _ => None,
+    let text = match stderr.lines().collect::<Vec<_>>().as_slice() {
+        [line] => (*line).to_owned(),
+        _ => String::new(),
     };
+    let line = refusal_line(&text);
     let recorded = line.as_ref().and_then(|(_, run)| {
         let bytes = fs::read(runs.join(format!("{run}.json"))).ok()?;
         // A record that does not parse as one is no record.
@@ -270,6 +282,7 @@ fn decline(invocation: Invocation) -> Declined {
     Declined {
         status: output.status.code(),
         line,
+        text,
         recorded,
         detail: format!("{}, stderr {stderr:?}", output.status),
     }
@@ -278,6 +291,46 @@ fn decline(invocation: Invocation) -> Declined {
 /// The code and run id of a refusal line `playpen: <code>: <sentence> — run <id>` ([spec §14.3]).
 ///
 /// [spec §14.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#143-the-refusal-line
+/// `playpen check` of a policy whose one root is absent, with the filesystem and without it.
+fn check_document() -> Checked {
+    let fixture = common::Fixture::with_mode("read");
+    let absent = fixture.root().join("absent");
+    let policy = fixture.policy_dir.path().join("absent-root.json");
+    let document = serde_json::json!({
+        "version": 1,
+        "workspaces": {"w": {"roots": [{"path": absent, "mode": "read"}]}},
+        "profiles": {"p": {"workspaces": ["w"], "toolchain": []}},
+    });
+    fs::write(&policy, document.to_string()).expect("write policy");
+    let check = |extra: &[&str]| {
+        let mut command = fixture.playpen(&["check", "--policy"]);
+        command.arg(&policy).args(extra).stdin(Stdio::null());
+        command.output().expect("run playpen check")
+    };
+    let examined = check(&[]);
+    let unexamined = check(&["--no-filesystem"]);
+    let stderr = String::from_utf8_lossy(&examined.stderr);
+    let code = match stderr.lines().collect::<Vec<_>>().as_slice() {
+        [line] => line
+            .strip_prefix("playpen: ")
+            .and_then(|rest| rest.split_once(": "))
+            .map(|(code, _)| code.to_owned()),
+        _ => None,
+    };
+    Checked {
+        examined: code.filter(|_| examined.status.code() == Some(EXIT_REFUSED)),
+        unexamined_silent_success: unexamined.status.success()
+            && unexamined.stdout.is_empty()
+            && unexamined.stderr.is_empty(),
+        detail: format!(
+            "with the filesystem {}, stderr {stderr:?}; without it {}, stderr {:?}",
+            examined.status,
+            unexamined.status,
+            String::from_utf8_lossy(&unexamined.stderr)
+        ),
+    }
+}
+
 fn refusal_line(line: &str) -> Option<(String, String)> {
     let (code, _) = line.strip_prefix("playpen: ")?.split_once(": ")?;
     let (_, run) = line.rsplit_once(" — run ")?;
@@ -554,7 +607,7 @@ fn prepare(action: Action, home: &Path, made: &mut Made) -> Result<Prepared, Str
                 "the canary runs under the bare floor alone, never beside the probe".into(),
             );
         }
-        Action::Refuse(_) => {
+        Action::Refuse(_) | Action::CheckDocument => {
             return Err("a refusal has no boundary for the probe to run under".into());
         }
         Action::PullDenials => {

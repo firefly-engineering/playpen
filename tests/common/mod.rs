@@ -62,7 +62,7 @@ impl Fixture {
         let document = json!({
             "version": 1,
             "workspaces": {"w": {"roots": [{"path": root.path(), "mode": mode}]}},
-            "profiles": {"p": {"workspaces": ["w"]}},
+            "profiles": {"p": {"workspaces": ["w"], "toolchain": []}},
         });
         std::fs::write(&policy, document.to_string()).expect("write policy");
         Self {

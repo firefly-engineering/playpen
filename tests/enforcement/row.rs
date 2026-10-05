@@ -197,6 +197,11 @@ pub enum Action {
     Connect(Listening),
     /// playpen is invoked so that it refuses, and leaves what it leaves behind.
     Refuse(Invocation),
+    /// `playpen check` of a policy whose one root is absent: first with the filesystem, then with
+    /// `--no-filesystem` ([spec §10.5]).
+    ///
+    /// [spec §10.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#105-validation-tiers
+    CheckDocument,
     /// The command `explain --run` prints is run, and must return the denial of a read the probe,
     /// forked by the confined child rather than being it, made of a decoy outside every grant
     /// ([spec §14.2]).
@@ -219,7 +224,7 @@ impl Action {
             | Action::LookUp(_)
             | Action::Signal(_)
             | Action::Connect(_) => fixture == Fixture::ProbeRoot,
-            Action::Refuse(_) => fixture == Fixture::Outside,
+            Action::Refuse(_) | Action::CheckDocument => fixture == Fixture::Outside,
             Action::PullDenials => fixture == Fixture::DescendantDenied,
         }
     }
@@ -295,7 +300,32 @@ pub enum Invocation {
     ///
     /// [ADR 0027]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0027-the-state-directory-is-unreachable-by-refusal-because-a-carve-out-is-not-portable.md
     StateReachable,
+    /// `playpen run` under a YAML policy whose one root holds a key misspelt inside
+    /// `definitions:`, arriving through a merge key ([spec §10.2]). [`POLICY_SPAN_SITES`] are the
+    /// use site and the definition site, in that document.
+    ///
+    /// [spec §10.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#102-syntax-and-strictness
+    MergedTypo,
 }
+
+/// The policy [`Invocation::MergedTypo`] runs under, with `{root}` for its one root's path.
+pub const MERGED_TYPO: &str = "\
+version: 1
+definitions:
+  root: &root
+    mdoe: read
+workspaces:
+  w:
+    roots:
+      - <<: *root
+        path: \"{root}\"
+        mode: read
+profiles:
+  p: { workspaces: [w], toolchain: [] }
+";
+
+/// Where [`MERGED_TYPO`]'s misspelt key is used, and where it is defined.
+pub const POLICY_SPAN_SITES: &[(u32, u32)] = &[(8, 13), (4, 5)];
 
 /// What the row asserts of the action, outside and then inside.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -316,6 +346,12 @@ pub enum Expected {
     ///
     /// [spec §14.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#141-the-run-record
     Recorded(Code),
+    /// As [`Expected::Recorded`], and the refusal line names each `line:column` of the YAML
+    /// policy the invocation ran under.
+    RecordedAt(Code, &'static [(u32, u32)]),
+    /// `playpen check` refuses the document with this code, which shows the existence check is
+    /// there to skip; `check --no-filesystem` of the same document then succeeds, silently.
+    Unexamined(Code),
 }
 
 impl Expected {
@@ -324,7 +360,9 @@ impl Expected {
         match self {
             Expected::Denial | Expected::Closed => Class::Negative,
             Expected::Succeeds => Class::Positive,
-            Expected::Recorded(_) => Class::Refusal,
+            Expected::Recorded(_) | Expected::RecordedAt(..) | Expected::Unexamined(_) => {
+                Class::Refusal
+            }
         }
     }
 }
@@ -372,6 +410,8 @@ pub struct Declined {
     pub status: Option<i32>,
     /// The code and run id on the refusal line, if stderr held exactly one line that reads as one.
     pub line: Option<(String, String)>,
+    /// That line as written, or empty.
+    pub text: String,
     /// The record of that run, if it exists, by the refusal code it stores: the inner `None` is a
     /// record that holds no refusal.
     pub recorded: Option<Option<String>>,
@@ -463,18 +503,22 @@ pub fn judge(expected: Expected, outside: &Seen, inside: &Seen) -> Verdict {
             Some(Cause::Errno(libc::EBADF)) => Verdict::Pass,
             _ => Verdict::Fail(format!("not EBADF: {detail}")),
         },
-        (Expected::Recorded(_), _) => Verdict::Setup(
-            "a refusal has no inside: playpen declined to launch, so it is judged by what it left"
-                .into(),
-        ),
+        (Expected::Recorded(_) | Expected::RecordedAt(..) | Expected::Unexamined(_), _) => {
+            Verdict::Setup(
+                "a refusal has no inside: playpen declined to launch, so it is judged by what it left"
+                    .into(),
+            )
+        }
     }
 }
 
 /// A refusal row: exit `125` with the expected code, then the record that the line names holds
 /// it. Neither half alone is the assertion: a run that launched leaves a record too.
 pub fn judge_refusal(expected: Expected, declined: &Declined) -> Verdict {
-    let Expected::Recorded(code) = expected else {
-        return Verdict::Setup(format!("{expected:?} is not a refusal's assertion"));
+    let (code, sites) = match expected {
+        Expected::Recorded(code) => (code, &[][..]),
+        Expected::RecordedAt(code, sites) => (code, sites),
+        _ => return Verdict::Setup(format!("{expected:?} is not a refusal's assertion")),
     };
     let detail = &declined.detail;
     if declined.status != Some(EXIT_REFUSED) {
@@ -484,11 +528,51 @@ pub fn judge_refusal(expected: Expected, declined: &Declined) -> Verdict {
         Some((seen, _)) if seen == code.as_str() => {}
         _ => return Verdict::Fail(format!("not one refusal line with {code}: {detail}")),
     }
+    if let Some((line, column)) = sites
+        .iter()
+        .find(|(line, column)| !declined.text.contains(&format!(".yaml:{line}:{column}")))
+    {
+        return Verdict::Fail(format!(
+            "the refusal line does not name {line}:{column} of the policy: {detail}"
+        ));
+    }
     match &declined.recorded {
         None => Verdict::Fail(format!("no run record after the refusal: {detail}")),
         Some(Some(recorded)) if recorded == code.as_str() => Verdict::Pass,
         Some(recorded) => Verdict::Fail(format!(
             "the run record holds refusal {recorded:?}, not {code}: {detail}"
         )),
+    }
+}
+
+/// What `playpen check` did with one document, with the filesystem and without it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checked {
+    /// The code on the refusal line `check` wrote with the filesystem, if it wrote exactly one.
+    pub examined: Option<String>,
+    /// Whether `check --no-filesystem` exited 0 having written nothing at all.
+    pub unexamined_silent_success: bool,
+    /// What was observed, for the report.
+    pub detail: String,
+}
+
+/// `R-no-filesystem`: without the first half, a `check` that looked at nothing at all would pass.
+pub fn judge_unexamined(expected: Expected, checked: &Checked) -> Verdict {
+    let Expected::Unexamined(code) = expected else {
+        return Verdict::Setup(format!(
+            "{expected:?} is not an unexamined check's assertion"
+        ));
+    };
+    let detail = &checked.detail;
+    if checked.examined.as_deref() != Some(code.as_str()) {
+        return Verdict::Setup(format!(
+            "with the filesystem, check did not refuse with {code}, so there is nothing to skip: \
+             {detail}"
+        ));
+    }
+    if checked.unexamined_silent_success {
+        Verdict::Pass
+    } else {
+        Verdict::Fail(format!("check --no-filesystem looked: {detail}"))
     }
 }

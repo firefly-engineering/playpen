@@ -15,7 +15,10 @@ nono = { git = "https://github.com/firefly-engineering/nono", rev = "5ee60f6fceb
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
-serde-saphyr = "1"
+# Exact: the policy parser reads the kind of an error raised through an alias back from its message
+# (src/policy/syntax.rs), so a bump is a reviewed change whose tests show the wording held, until
+# serde-saphyr keeps the inner error (https://github.com/firefly-engineering/playpen/issues/125).
+serde-saphyr = "=1.3.0"
 serde_json = "1"
 
 # The probe's Mach lookups, and the bootstrap codes that tell a denial from an unknown service.
