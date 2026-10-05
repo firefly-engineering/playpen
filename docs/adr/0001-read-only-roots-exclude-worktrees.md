@@ -36,6 +36,20 @@ failure surfaces to the agent as `index.lock: Permission denied` from deep insid
 with nothing connecting it to a sandbox policy. Under playpen's standing "refusal, never
 silent downgrade" law, a check that can be made before exec belongs before exec.
 
+_Amended by [#74](https://github.com/firefly-engineering/playpen/issues/74): **the launch refusal is dropped, and the
+consequence above stands.** The refusal rested on the condition being "statically detectable from the workspace definition",
+and it is not. An area declares its `lifetime` and `concurrency`
+([ADR 0010](0010-concurrency-is-a-property-of-a-provisioned-area.md)), never what it is for, so
+nothing marks one as a worktree area. Nothing ties an area to the root it would be a worktree
+*of*, so "every source root is `read`" has no subject: one unrelated `readwrite` root would satisfy
+it. And an agent can create a worktree in any writable path, which no launch check sees. Adding a
+field to make it detectable would put per-tool knowledge of git and jj into playpen, against
+[ADR 0002](0002-playpen-does-not-interpret.md). A worktree over a read-only source still fails, and
+fails closed: the agent breaks and nothing escapes. So the shape stays unsupported and stated, not
+refused, and `refusal.workspace.worktree-on-read-root` is retired. Letting the operator declare
+such relations as checks of their own is
+[#135](https://github.com/firefly-engineering/playpen/issues/135)._
+
 ## Rejected alternatives
 
 **Grant write to the source's metadata directory only, keeping the working tree read-only.**

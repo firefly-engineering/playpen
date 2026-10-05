@@ -45,7 +45,6 @@ registry! {
     FragmentUnknown => "refusal.fragment.unknown",
     MinterUnknown => "refusal.minter.unknown",
     AreaUnknown => "refusal.area.unknown",
-    WorkspaceWorktreeOnReadRoot => "refusal.workspace.worktree-on-read-root",
     RouteAmbiguous => "refusal.route.ambiguous",
     EndpointUnknown => "refusal.endpoint.unknown",
     EndpointUnsatisfiable => "refusal.endpoint.unsatisfiable",

@@ -264,12 +264,14 @@ routes** ([§7.4](#74-attachment)).
   ([ADR 0014](adr/0014-the-toolchain-is-a-declared-closure.md)).
 - Optional **exclusions** ([§8.4](#84-exclusions)).
 - The path must exist at launch, or playpen refuses (`refusal.root.missing`).
-- **A workspace that declares a worktree area while every source root is `read` is refused at
-  launch** (`refusal.workspace.worktree-on-read-root`). A git worktree or jj workspace writes to
-  the source's metadata directory on every ref update and index lock, so the shape is broken,
-  not hardened ([ADR 0001](adr/0001-read-only-roots-exclude-worktrees.md)). Any workspace whose
-  agent uses worktrees must grant its source roots `readwrite`, and the blast radius then
-  includes the source repository's history.
+- **A git worktree or jj workspace over a `read` source root does not work.** Both write to the
+  source's metadata directory on every ref update and index lock, so the shape is broken, not
+  hardened, and it fails closed inside the tool. Any workspace whose agent uses worktrees must
+  grant its source roots `readwrite`, and the blast radius then includes the source repository's
+  history ([ADR 0001](adr/0001-read-only-roots-exclude-worktrees.md)). playpen does not refuse
+  the combination: nothing in a workspace says an area is a worktree, or of which root
+  ([#74](https://github.com/firefly-engineering/playpen/issues/74)). Operator-declared checks for such
+  relations are [#135](https://github.com/firefly-engineering/playpen/issues/135).
 
 ### 5.3 Forge scope
 
@@ -1809,7 +1811,6 @@ rather than a `refusal.*` code needing an exemption from the gate.
 | `refusal.fragment.unknown` | coherence | a reference to an undeclared environment fragment |
 | `refusal.minter.unknown` | coherence | a route names an undeclared minter |
 | `refusal.area.unknown` | coherence | an `!area` reference dangles |
-| `refusal.workspace.worktree-on-read-root` | coherence | a worktree area while every source root is `read` |
 | `refusal.route.ambiguous` | coherence | two routes on one host, neither prefix extending the other |
 | `refusal.endpoint.unknown` † | coherence | a reference to an undeclared endpoint rule set |
 | `refusal.endpoint.unsatisfiable` † | coherence | a rule set that no path under the route's prefix can match |
@@ -1899,6 +1900,9 @@ because §14.3's rule holds here too — a caller meeting a crash should be able
 ([#27](https://github.com/firefly-engineering/playpen/issues/27)). There is no
 `refusal.env.*` value-validation code ([#31](https://github.com/firefly-engineering/playpen/issues/31)),
 and no catch-all backend code: a backend failure that maps to no listed code is a playpen bug.
+`refusal.workspace.worktree-on-read-root` was retired by
+[#74](https://github.com/firefly-engineering/playpen/issues/74): nothing in a workspace can say that an
+area is a worktree, so nothing could produce it.
 
 ---
 
