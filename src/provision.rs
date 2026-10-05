@@ -73,6 +73,21 @@ pub struct Layout {
     /// [spec §11.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#112-kind
     kind: Option<&'static Kind>,
     areas: Vec<Planned>,
+    /// The profile's share list for that kind, in the order it was written ([spec §5.6]). Each
+    /// entry names something in the kind's real agent home and is made visible read-only inside
+    /// the agent state directory, **by reference**: playpen confines and never remaps
+    /// ([spec §11.6]), so the entry appears inside as a symlink to the real path, and that path is
+    /// what is granted — read, never write.
+    ///
+    /// Default-deny: nothing from the agent home is visible unless it is named here.
+    ///
+    /// [spec §5.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#56-agent-state-directory
+    /// [spec §11.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#116-process-transparency
+    share: Vec<String>,
+    /// The caller's home directory, where the kind's agent home — and so every share entry — is
+    /// resolved. `None` where the host names none, which leaves every share entry sourceless and
+    /// so refuses rather than sharing nothing.
+    home: Option<PathBuf>,
 }
 
 /// One area of a selected workspace, as a run gets it.
@@ -123,6 +138,15 @@ impl Layout {
         Self::of(state, UNLAUNCHED.into(), policy, profile, selected, kind)
     }
 
+    /// This layout with `home` as the caller's home directory, where every share entry is
+    /// resolved. Separate from construction because the layout's own paths do not depend on it:
+    /// only the share list does.
+    #[must_use]
+    pub fn with_home(mut self, home: Option<&Path>) -> Self {
+        self.home = home.map(Path::to_owned);
+        self
+    }
+
     fn of(
         state: &Path,
         run: String,
@@ -146,13 +170,78 @@ impl Layout {
                 })
             })
             .collect();
+        // Default-deny: only the stated kind's own list is read, and only what it names.
+        let share = kind
+            .and_then(|kind| selected.agent_state.get(kind.name))
+            .map(|state| state.share.clone())
+            .unwrap_or_default();
         Self {
             state: state.to_owned(),
             run,
             profile: profile.to_owned(),
             kind,
             areas,
+            share,
+            home: None,
         }
+    }
+
+    /// Every share entry, as the provenance of where it was written, the name it appears under
+    /// inside, and the real path outside — `None` where the host names no home, or the entry is
+    /// not one name in that home.
+    fn shared(&self) -> impl Iterator<Item = (String, &str, Option<PathBuf>)> {
+        let kind = self.kind;
+        let agent_home = kind.and_then(|kind| self.home.as_ref().map(|home| home.join(kind.home)));
+        self.share.iter().enumerate().map(move |(i, entry)| {
+            let from = format!(
+                "profile:{}.agent_state.{}.share[{i}]",
+                self.profile,
+                kind.map_or("", |kind| kind.name)
+            );
+            // A share entry is one name in the kind's agent home. Anything else — a nested path,
+            // `..`, an absolute path — names nothing playpen can share, and so has no source.
+            let source = agent_home
+                .as_ref()
+                .filter(|_| one_name(entry))
+                .map(|agent_home| agent_home.join(entry));
+            (from, entry.as_str(), source)
+        })
+    }
+
+    /// The grants the share list adds ([spec §5.6]): each named entry at its real path, read-only,
+    /// so it is readable inside and never writable. A source that is missing — or a name that
+    /// could never be one — refuses, because a share list that silently shared nothing would read
+    /// as a working policy.
+    ///
+    /// [spec §5.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#56-agent-state-directory
+    pub fn shares(&self) -> Result<Vec<PathGrant>, Refusal> {
+        let mut grants = Vec::new();
+        for (from, entry, source) in self.shared() {
+            let missing = |detail: String| {
+                Refusal::new(
+                    Code::RootMissing,
+                    format!("{from}: share entry {entry:?} {detail}"),
+                )
+            };
+            let source = source.ok_or_else(|| {
+                missing(
+                    "is not one name in the kind's agent home, or the host names no home"
+                        .to_string(),
+                )
+            })?;
+            let path = source
+                .canonicalize()
+                .map_err(|e| missing(format!("is unavailable at {}: {e}", source.display())))?;
+            grants.push(PathGrant {
+                path,
+                access: Access::Read,
+                scope: Scope::Subtree,
+                from,
+                // Policy-declared, and outside the state directory: never exempt.
+                state_derived: false,
+            });
+        }
+        Ok(grants)
     }
 
     /// The run scratch: the run's own, and nobody else's.
@@ -316,6 +405,7 @@ impl Layout {
         // [spec §5.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#56-agent-state-directory
         if let Some(agent_state) = self.agent_state() {
             create(&agent_state, "the agent state directory")?;
+            self.link_shares(&agent_state)?;
         }
         if self
             .areas
@@ -329,6 +419,55 @@ impl Layout {
         }
         Ok(provisioned)
     }
+}
+
+impl Layout {
+    /// Make each share entry visible inside `agent_state`, by reference: a symlink named for the
+    /// entry, pointing at the real path, which [`Layout::shares`] has granted read-only. Rewritten
+    /// on every launch, so a policy edit shows up at the next one.
+    ///
+    /// A share entry whose name is already taken by something the agent itself wrote is
+    /// `refusal.state.collision`: playpen never deletes the agent's own state to make room.
+    fn link_shares(&self, agent_state: &Path) -> Result<(), Refusal> {
+        for (from, entry, source) in self.shared() {
+            // Sourceless entries have already refused in `shares`, which runs at step 6.
+            let Some(source) = source else { continue };
+            let at = agent_state.join(entry);
+            let io = |e: std::io::Error| {
+                Refusal::new(
+                    Code::StateIo,
+                    format!("{from}: cannot share {entry:?} at {}: {e}", at.display()),
+                )
+            };
+            match at.symlink_metadata() {
+                // playpen's own link from a previous launch: repointed, in case the policy moved.
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    std::fs::remove_file(&at).map_err(io)?;
+                }
+                Ok(_) => {
+                    return Err(Refusal::new(
+                        Code::StateCollision,
+                        format!(
+                            "{from}: share entry {entry:?} collides with the agent's own {}, \
+                             which playpen will not replace",
+                            at.display()
+                        ),
+                    ));
+                }
+                Err(_) => {}
+            }
+            std::os::unix::fs::symlink(&source, &at).map_err(io)?;
+        }
+        Ok(())
+    }
+}
+
+/// Whether `name` is exactly one ordinary path component: not empty, not absolute, not `.` or
+/// `..`, and holding no separator.
+fn one_name(name: &str) -> bool {
+    let mut components = Path::new(name).components();
+    matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
 }
 
 /// A run's provisioned state, for as long as the run lasts.
@@ -792,6 +931,73 @@ mod tests {
                 .any(|grant| grant.from.starts_with("kind:")),
             "{:?}",
             layout.grants()
+        );
+    }
+
+    /// A share entry is one ordinary name: nothing that could climb out of the kind's agent home.
+    #[test]
+    fn a_share_entry_is_one_ordinary_name() {
+        for name in ["CLAUDE.md", "skills", ".credentials.json"] {
+            assert!(one_name(name), "{name:?}");
+        }
+        for name in ["", ".", "..", "a/b", "../x", "/etc/passwd"] {
+            assert!(!one_name(name), "{name:?}");
+        }
+        // A trailing separator names the same one component, which `Path` already normalises.
+        assert!(one_name("skills/"));
+    }
+
+    /// A policy sharing `share` into profile `p`'s `claude` state directory.
+    fn sharing(share: &[&str]) -> Policy {
+        let text = serde_json::json!({
+            "version": 1,
+            "workspaces": {"w": {"roots": []}},
+            "profiles": {"p": {
+                "workspaces": ["w"],
+                "toolchain": [],
+                "agent_state": {"claude": {"share": share}},
+            }},
+        });
+        Policy::parse(&text.to_string(), Path::new("/p.json")).expect("parses")
+    }
+
+    /// playpen never deletes the agent's own state to make room for a share entry: a name the
+    /// agent has taken with a file of its own is a collision.
+    #[test]
+    fn a_share_entry_colliding_with_the_agents_own_file_refuses() {
+        let state = tempfile::TempDir::new().expect("state");
+        let home = tempfile::TempDir::new().expect("home");
+        std::fs::create_dir(home.path().join(".claude")).expect("mkdir");
+        std::fs::write(home.path().join(".claude/settings.json"), "{}").expect("seed");
+        let policy = sharing(&["settings.json"]);
+        let id = RunId::allocate().expect("id");
+        let layout = Layout::new(
+            state.path(),
+            &id,
+            &policy,
+            "p",
+            &policy.profiles["p"],
+            claude(),
+        )
+        .with_home(Some(home.path()));
+        // The first launch makes the link, and the second one finds its own and repoints it.
+        let first = layout.provision().expect("provisioned");
+        drop(first);
+        let _again = layout.provision().expect("the link is playpen's own");
+        // The agent's own file in its place is not replaced.
+        let at = layout
+            .agent_state()
+            .expect("a kind was stated")
+            .join("settings.json");
+        std::fs::remove_file(&at).expect("unlink");
+        std::fs::write(&at, "the agent's own").expect("plant");
+        let refusal = layout.provision().expect_err("refused");
+        assert_eq!(refusal.code, Code::StateCollision);
+        assert!(
+            refusal
+                .message()
+                .contains("profile:p.agent_state.claude.share[0]"),
+            "{refusal}"
         );
     }
 

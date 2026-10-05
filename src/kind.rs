@@ -15,6 +15,12 @@ pub struct Kind {
     pub redirect: &'static str,
     /// Entries set so a guest's own sandbox stands down; set only, never stripped.
     pub suppression: &'static [(&'static str, &'static str)],
+    /// The agent's own home on the host, relative to `$HOME`. It is never granted ([spec §5.6]);
+    /// it is where a **share** entry is resolved, which is the only way anything in it is reached
+    /// from inside.
+    ///
+    /// [spec §5.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#56-agent-state-directory
+    pub home: &'static str,
 }
 
 /// Every kind this playpen knows.
@@ -23,11 +29,13 @@ pub const KINDS: &[Kind] = &[
         name: "claude",
         redirect: "CLAUDE_CONFIG_DIR",
         suppression: &[("CLAUDE_CODE_SANDBOXED", "1")],
+        home: ".claude",
     },
     Kind {
         name: "omp",
         redirect: "PI_CODING_AGENT_DIR",
         suppression: &[],
+        home: ".omp",
     },
 ];
 

@@ -17,6 +17,7 @@ use crate::capability::PathGrant;
 use crate::check;
 use crate::child;
 use crate::code::Code;
+use crate::environment;
 use crate::explain;
 use crate::integrity;
 use crate::kind::{self, Kind};
@@ -270,7 +271,10 @@ fn run(
                 )
             })
         })
-        .map(|state| Layout::new(&state, record.id(), &loaded.policy, profile, selected, kind))?;
+        .map(|state| {
+            Layout::new(&state, record.id(), &loaded.policy, profile, selected, kind)
+                .with_home(environment::home(env).as_deref())
+        })?;
     let caps = resolve::capabilities(&loaded.policy, profile, &layout)?;
     // Nothing that runs unconfined on the next launch is writable from inside this one.
     integrity::check(&caps, &policy_file, &integrity::executable(&executable)?)?;

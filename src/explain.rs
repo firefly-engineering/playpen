@@ -119,7 +119,8 @@ fn resolve(args: &Args, host: &Host) -> Result<Resolved, Refusal> {
     // Resolved as `run` resolves it. Before any run the directory may not exist, and the first run
     // creates it where it is named, so the path as named is the one that run would resolve.
     let state = state.canonicalize().unwrap_or_else(|_| state.to_owned());
-    let layout = Layout::unlaunched(&state, &loaded.policy, &name, selected, None);
+    let layout = Layout::unlaunched(&state, &loaded.policy, &name, selected, None)
+        .with_home(crate::environment::home(&host.env).as_deref());
     let caps = resolve::capabilities(&loaded.policy, &name, &layout)?;
     let executable = crate::integrity::executable(&host.executable)?;
     crate::integrity::check(&caps, &absolute(&path), &executable)?;

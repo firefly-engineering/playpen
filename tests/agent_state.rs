@@ -127,3 +127,127 @@ fn the_real_agent_home_stays_unreadable() {
     );
     assert_denied(&fx.probe_under(&policy, &["read", credentials]));
 }
+
+/// A real `~/.claude` holding `settings.json`, which the policy shares, and `.credentials.json`,
+/// which it does not. Returns the home and the policy.
+fn with_share(fx: &Fixture, share: Value) -> (TempDir, PathBuf) {
+    let home = TempDir::new().expect("home");
+    let agent_home = home.path().join(".claude");
+    std::fs::create_dir(&agent_home).expect("mkdir");
+    std::fs::write(agent_home.join("settings.json"), "{\"theme\":\"dark\"}").expect("seed");
+    std::fs::write(
+        agent_home.join(".credentials.json"),
+        "{\"token\":\"decoy\"}",
+    )
+    .expect("seed");
+    let policy = fx.policy_named(
+        "share.json",
+        &json!({
+            "version": 1,
+            "workspaces": {"w": {"roots": [{"path": fx.root(), "mode": "readwrite"}]}},
+            "profiles": {"p": {
+                "workspaces": ["w"],
+                "toolchain": [],
+                "agent_state": {"claude": {"share": share}},
+            }},
+        }),
+    );
+    (home, policy)
+}
+
+/// A run of profile `p` as `claude` under `policy`, with `home` as the caller's home.
+fn run_at_home(fx: &Fixture, policy: &Path, home: &Path, argv: &[&str]) -> Command {
+    let mut command = run(fx, policy, "p", "claude", argv);
+    command.env("HOME", home);
+    command
+}
+
+/// The agent state directory of profile `p` as `claude`, with `home` as the caller's home.
+fn redirect_at_home(fx: &Fixture, policy: &Path, home: &Path) -> PathBuf {
+    let name = playpen::kind::require("claude")
+        .expect("a known kind")
+        .redirect;
+    let output = run_at_home(fx, policy, home, &[&os_bin("env")])
+        .output()
+        .expect("playpen");
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8(output.stdout)
+        .expect("utf-8")
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .find(|(var, _)| *var == name)
+        .map(|(_, value)| PathBuf::from(value))
+        .unwrap_or_else(|| panic!("{name} is not in the child's environment"))
+}
+
+/// A named entry is readable inside the state directory and not writable; the list is
+/// default-deny, so an unnamed one from the same agent home is not visible at all ([spec §5.6]).
+///
+/// [spec §5.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#56-agent-state-directory
+#[test]
+fn a_named_share_entry_is_readable_inside_and_an_unnamed_one_is_not() {
+    let fx = Fixture::new();
+    let (home, policy) = with_share(&fx, json!(["settings.json"]));
+    let dir = redirect_at_home(&fx, &policy, home.path());
+    let shared = dir.join("settings.json");
+    let unnamed = dir.join(".credentials.json");
+    // Outside first: the entry is there, and it is where playpen says it is.
+    assert!(shared.symlink_metadata().expect("the link").is_symlink());
+    assert_eq!(
+        std::fs::read_link(&shared).expect("the link"),
+        home.path()
+            .canonicalize()
+            .expect("canonical")
+            .join(".claude/settings.json")
+    );
+    let probe = fx.probe();
+    let inside = |argv: &[&str]| {
+        let mut full = vec![probe.to_str().expect("a UTF-8 path")];
+        full.extend(argv);
+        let output = run_at_home(&fx, &policy, home.path(), &full)
+            .output()
+            .expect("playpen");
+        common::verdict(output)
+    };
+    assert_eq!(inside(&["read", shared.to_str().unwrap()])["ok"], true);
+    assert_denied(&inside(&["write", shared.to_str().unwrap()]));
+    // Not visible: no link was made, and the real file is outside every grant.
+    assert!(!unnamed.exists(), "{unnamed:?} is visible");
+    let real = home.path().join(".claude/.credentials.json");
+    assert_denied(&inside(&["read", real.to_str().unwrap()]));
+}
+
+/// A share list that silently shared nothing would read as a working policy, so a missing source
+/// refuses.
+#[test]
+fn a_missing_share_source_refuses() {
+    let fx = Fixture::new();
+    let (home, policy) = with_share(&fx, json!(["settings.json", "gone.json"]));
+    let output = run_at_home(&fx, &policy, home.path(), &[&os_bin("true")])
+        .output()
+        .expect("playpen");
+    let run = common::assert_refused(&output, "refusal.root.missing");
+    let message = fx.record(&run)["refusal"]["message"]
+        .as_str()
+        .expect("a message")
+        .to_owned();
+    assert!(
+        message.contains("profile:p.agent_state.claude.share[1]"),
+        "{message}"
+    );
+    assert!(message.contains("gone.json"), "{message}");
+}
+
+/// A share entry is one name in the kind's agent home: a nested path or `..` names nothing
+/// playpen can share, and refuses rather than reaching out of the agent home.
+#[test]
+fn a_share_entry_that_is_not_one_name_refuses() {
+    let fx = Fixture::new();
+    for entry in ["../.ssh", "a/b", "/etc/passwd", "."] {
+        let (home, policy) = with_share(&fx, json!([entry]));
+        let output = run_at_home(&fx, &policy, home.path(), &[&os_bin("true")])
+            .output()
+            .expect("playpen");
+        common::assert_refused(&output, "refusal.root.missing");
+    }
+}

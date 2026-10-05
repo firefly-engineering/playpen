@@ -165,6 +165,18 @@ pub fn authored(policy: &Policy) -> impl Iterator<Item = (&str, String)> + '_ {
 /// The provenance of a floor name.
 pub const FROM_FLOOR: &str = "floor";
 
+/// The caller's home directory, as `host` names it. playpen never grants it; it is where a kind's
+/// real agent home — and so every **share** entry — is resolved ([spec §5.6]).
+///
+/// [spec §5.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#56-agent-state-directory
+pub fn home(host: &[(OsString, OsString)]) -> Option<PathBuf> {
+    host.iter()
+        .rev()
+        .find(|(name, _)| name == "HOME")
+        .map(|(_, value)| PathBuf::from(value))
+        .filter(|home| home.is_absolute())
+}
+
 /// One variable of the constructed environment, with the authored source that put it there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Var {

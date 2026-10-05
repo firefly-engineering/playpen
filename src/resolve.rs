@@ -156,6 +156,7 @@ pub fn capabilities(
     caps.paths.extend(toolchain(name, selected)?);
     caps.paths.extend(roots(policy, selected)?);
     caps.paths.extend(layout.grants());
+    caps.paths.extend(layout.shares()?);
     caps.exclusions = exclusions(policy, name, selected)?;
     Ok(caps)
 }
