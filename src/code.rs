@@ -64,6 +64,7 @@ registry! {
     RootMissing => "refusal.root.missing",
     ExclusionMissing => "refusal.exclusion.missing",
     IntegrityWritable => "refusal.integrity.writable",
+    IntegrityUnresolvable => "refusal.integrity.unresolvable",
     StateReachable => "refusal.state.reachable",
     CwdUngranted => "refusal.cwd.ungranted",
     AreaBusy => "refusal.area.busy",

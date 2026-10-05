@@ -1129,6 +1129,10 @@ the selected profile:
 Each of these runs unconfined on the next launch. The agent binary is deliberately not on the
 list: tampering with it lands inside the boundary on the next run.
 
+A path on that list that cannot be resolved, such as an executable the OS cannot name, is
+`refusal.integrity.unresolvable`: integrity that cannot be shown is refused, never assumed, and
+nothing was found writable, so it is not reported as if it had been.
+
 ---
 
 ## 12. The kind table
@@ -1829,6 +1833,7 @@ rather than a `refusal.*` code needing an exemption from the gate.
 | `refusal.root.missing` | existence | a brought root, toolchain root, symlink target or shim target is absent |
 | `refusal.exclusion.missing` | existence | an exclusion's path is absent |
 | `refusal.integrity.writable` | existence | the policy, the playpen executable, the shim link or its directory is profile-writable |
+| `refusal.integrity.unresolvable` † | existence | the policy, the playpen executable or the shim link cannot be resolved, so it cannot be shown unwritable |
 | `refusal.state.reachable` † | existence | a granted path reaches playpen's state directory, in either containment direction, naming both paths and the mode. Checked per grant rather than per declaring construct, so it covers the floor and brought roots today and toolchain roots and exclusions as those arrive; exempt are only subtrees playpen *derived from* that directory ([ADR 0027](adr/0027-the-state-directory-is-unreachable-by-refusal-because-a-carve-out-is-not-portable.md)) |
 | `refusal.cwd.ungranted` | existence | the CWD is not inside a granted root |
 | `refusal.area.busy` † | launch | an `exclusive` area is held; names the holding run id |

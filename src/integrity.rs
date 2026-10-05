@@ -42,7 +42,7 @@ pub fn check(caps: &CapabilitySet, policy: &Path, executable: &Path) -> Result<(
 pub fn executable(executable: &std::io::Result<PathBuf>) -> Result<PathBuf, Refusal> {
     executable.as_ref().cloned().map_err(|e| {
         Refusal::new(
-            Code::IntegrityWritable,
+            Code::IntegrityUnresolvable,
             format!(
                 "the playpen executable cannot be found, so it cannot be shown unwritable: {e}"
             ),
@@ -65,7 +65,7 @@ fn entries(what: &str, path: &Path) -> Result<Vec<Entry>, Refusal> {
     // Integrity that cannot be shown is refused, never assumed.
     let unresolvable = |e: std::io::Error| {
         Refusal::new(
-            Code::IntegrityWritable,
+            Code::IntegrityUnresolvable,
             format!(
                 "{what} {} cannot be resolved, so it cannot be shown unwritable: {e}",
                 path.display()
@@ -293,5 +293,25 @@ mod tests {
         let refusal =
             check(&caps, &link.join("policy.yaml"), &files.executable()).expect_err("refused");
         assert_eq!(refusal.code, Code::IntegrityWritable);
+    }
+
+    /// Integrity that cannot be shown is refused, never assumed, under a code of its own: nothing
+    /// was found writable.
+    #[test]
+    fn an_unresolvable_executable_is_its_own_refusal() {
+        let refusal = executable(&Err(std::io::Error::other("no /proc"))).expect_err("refused");
+        assert_eq!(refusal.code, Code::IntegrityUnresolvable);
+        let files = Files::new();
+        let refusal = check(
+            &caps(vec![]),
+            &files.policy(),
+            Path::new("/nonexistent/playpen"),
+        )
+        .expect_err("refused");
+        assert_eq!(refusal.code, Code::IntegrityUnresolvable);
+        assert!(
+            refusal.message().contains("/nonexistent/playpen"),
+            "{refusal}"
+        );
     }
 }
