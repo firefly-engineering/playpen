@@ -203,6 +203,17 @@ pub fn environment(
             value: Value::Written(value.into()),
             from: kind.from(),
         }));
+        // The private redirect is what points the agent at the profile's own state directory, in
+        // place of the real `~/.claude` or `~/.omp`, which nothing grants ([spec §5.6]).
+        //
+        // [spec §5.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#56-agent-state-directory
+        if let Some(agent_state) = layout.agent_state() {
+            written.push(Var {
+                name: kind.redirect.into(),
+                value: Value::Written(agent_state.into_os_string()),
+                from: kind.from(),
+            });
+        }
     }
     environment::construct(policy, name, selected, host, written, |reference| {
         layout.area(reference)
@@ -545,7 +556,13 @@ mod tests {
         let caps = capabilities(
             &policy,
             "p",
-            &Layout::unlaunched(Path::new("/state"), &policy, &policy.profiles["p"]),
+            &Layout::unlaunched(
+                Path::new("/state"),
+                &policy,
+                "p",
+                &policy.profiles["p"],
+                None,
+            ),
         )
         .expect("resolves");
         assert!(caps.paths.iter().any(|g| g.from == "floor"));
@@ -585,7 +602,13 @@ mod tests {
         let caps = capabilities(
             &policy,
             "p",
-            &Layout::unlaunched(Path::new("/state"), &policy, &policy.profiles["p"]),
+            &Layout::unlaunched(
+                Path::new("/state"),
+                &policy,
+                "p",
+                &policy.profiles["p"],
+                None,
+            ),
         )
         .expect("resolves");
         let resolved = root.path().canonicalize().expect("canonical");
@@ -616,7 +639,13 @@ mod tests {
         let refusal = capabilities(
             &policy,
             "p",
-            &Layout::unlaunched(Path::new("/state"), &policy, &policy.profiles["p"]),
+            &Layout::unlaunched(
+                Path::new("/state"),
+                &policy,
+                "p",
+                &policy.profiles["p"],
+                None,
+            ),
         )
         .expect_err("refused");
         assert_eq!(refusal.code, Code::ExclusionMissing);
@@ -642,7 +671,13 @@ mod tests {
         let caps = capabilities(
             &policy,
             "p",
-            &Layout::unlaunched(Path::new("/state"), &policy, &policy.profiles["p"]),
+            &Layout::unlaunched(
+                Path::new("/state"),
+                &policy,
+                "p",
+                &policy.profiles["p"],
+                None,
+            ),
         )
         .expect("resolves");
         assert_eq!(caps.exclusions.len(), 1, "{:?}", caps.exclusions);

@@ -11,10 +11,16 @@
 //! there is nothing to arbitrate; a `persistent` one is keyed by workspace, and is either `shared`,
 //! or `exclusive` under an advisory lock the supervisor holds for the run.
 //!
+//! The **agent state directory** ([spec §5.6]) lives here too, though it is neither the run's nor a
+//! workspace's: it is the *profile*'s, one per kind, shared by every run of that profile at once
+//! and never removed ([ADR 0021]).
+//!
 //! [spec §5.7]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#57-run-scratch
 //! [spec §5.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#54-provisioned-areas
 //! [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
+//! [spec §5.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#56-agent-state-directory
 //! [ADR 0010]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0010-concurrency-is-a-property-of-a-provisioned-area.md
+//! [ADR 0021]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0021-agent-state-belongs-to-the-profile.md
 //! [ADR 0027]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0027-the-state-directory-is-unreachable-by-refusal-because-a-carve-out-is-not-portable.md
 
 use std::fmt::Write as _;
@@ -25,6 +31,7 @@ use std::path::{Path, PathBuf};
 
 use crate::capability::{Access, PathGrant, Scope};
 use crate::code::Code;
+use crate::kind::Kind;
 use crate::policy::{Area, AreaRef, Concurrency, Policy, Profile};
 use crate::record::RunId;
 use crate::refusal::Refusal;
@@ -49,12 +56,22 @@ const PERSISTENT: &str = "persistent";
 ///
 /// [ADR 0010]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0010-concurrency-is-a-property-of-a-provisioned-area.md
 const LOCKS: &str = "locks";
+/// The directory under the state directory holding one agent state directory per profile × kind.
+const AGENTS: &str = "agents";
 
 /// Where a run's provisioned state lives.
 #[derive(Debug, Clone)]
 pub struct Layout {
     state: PathBuf,
     run: String,
+    /// The selected profile's name, which keys the agent state directory.
+    profile: String,
+    /// The stated kind, which keys the agent state directory beside the profile. `None` where no
+    /// kind is stated, as in `explain` of a profile, and then there is no agent state directory:
+    /// a kind is never inferred ([spec §11.2]).
+    ///
+    /// [spec §11.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#112-kind
+    kind: Option<&'static Kind>,
     areas: Vec<Planned>,
 }
 
@@ -73,18 +90,47 @@ impl Planned {
 }
 
 impl Layout {
-    /// The layout of run `run` of profile `selected` from `policy`, under the state directory
-    /// `state`, which should be resolved: the mechanism enforces on real paths.
-    pub fn new(state: &Path, run: &RunId, policy: &Policy, selected: &Profile) -> Self {
-        Self::of(state, run.to_string(), policy, selected)
+    /// The layout of run `run` of profile `profile`, `selected` from `policy`, launched as `kind`,
+    /// under the state directory `state`, which should be resolved: the mechanism enforces on real
+    /// paths.
+    pub fn new(
+        state: &Path,
+        run: &RunId,
+        policy: &Policy,
+        profile: &str,
+        selected: &Profile,
+        kind: &'static Kind,
+    ) -> Self {
+        Self::of(
+            state,
+            run.to_string(),
+            policy,
+            profile,
+            selected,
+            Some(kind),
+        )
     }
 
-    /// The layout `explain` states: any run's, under `state`.
-    pub fn unlaunched(state: &Path, policy: &Policy, selected: &Profile) -> Self {
-        Self::of(state, UNLAUNCHED.into(), policy, selected)
+    /// The layout `explain` states: any run's, under `state`. `kind` is the kind the invocation
+    /// named, which is `None` for `explain` of a profile.
+    pub fn unlaunched(
+        state: &Path,
+        policy: &Policy,
+        profile: &str,
+        selected: &Profile,
+        kind: Option<&'static Kind>,
+    ) -> Self {
+        Self::of(state, UNLAUNCHED.into(), policy, profile, selected, kind)
     }
 
-    fn of(state: &Path, run: String, policy: &Policy, selected: &Profile) -> Self {
+    fn of(
+        state: &Path,
+        run: String,
+        policy: &Policy,
+        profile: &str,
+        selected: &Profile,
+        kind: Option<&'static Kind>,
+    ) -> Self {
         // Areas stay per workspace across a profile's workspaces ([spec §5.5]): each is its own.
         //
         // [spec §5.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#55-profile
@@ -103,6 +149,8 @@ impl Layout {
         Self {
             state: state.to_owned(),
             run,
+            profile: profile.to_owned(),
+            kind,
             areas,
         }
     }
@@ -110,6 +158,21 @@ impl Layout {
     /// The run scratch: the run's own, and nobody else's.
     pub fn scratch(&self) -> PathBuf {
         self.state.join(SCRATCH).join(&self.run)
+    }
+
+    /// The agent state directory of this profile and kind ([spec §5.6]): keyed by profile × kind
+    /// and never by workspace, so two profiles sharing a workspace do not share the agent's
+    /// history, and renaming a profile starts a fresh directory. `None` where the invocation
+    /// named no kind.
+    ///
+    /// [spec §5.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#56-agent-state-directory
+    pub fn agent_state(&self) -> Option<PathBuf> {
+        self.kind.map(|kind| {
+            self.state
+                .join(AGENTS)
+                .join(component(&self.profile))
+                .join(component(kind.name))
+        })
     }
 
     /// Every ephemeral area of this run lives under this one directory, keyed by run.
@@ -222,6 +285,12 @@ impl Layout {
         };
         std::iter::once(grant(self.scratch(), FROM_SCRATCH.into()))
             .chain(
+                self.agent_state()
+                    .into_iter()
+                    .zip(self.kind)
+                    .map(|(path, kind)| grant(path, kind.from())),
+            )
+            .chain(
                 self.areas
                     .iter()
                     .map(|planned| grant(self.path(planned), planned.from())),
@@ -241,6 +310,13 @@ impl Layout {
         let scratch = self.scratch();
         create(&scratch, "the run scratch")?;
         provisioned.removed.push(scratch);
+        // Created on first use and never removed: it holds the agent's transcripts, history and
+        // memory, which outlive the run that wrote them ([spec §5.6]).
+        //
+        // [spec §5.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#56-agent-state-directory
+        if let Some(agent_state) = self.agent_state() {
+            create(&agent_state, "the agent state directory")?;
+        }
         if self
             .areas
             .iter()
@@ -343,14 +419,34 @@ mod tests {
                 "w": {"roots": [], "areas": areas},
                 "unselected": {"roots": [], "areas": {"x": {"lifetime": "ephemeral"}}},
             },
-            "profiles": {"p": {"workspaces": ["w"], "toolchain": []}},
+            "profiles": {
+                "p": {"workspaces": ["w"], "toolchain": []},
+                // A second profile over the same workspace: it shares the work and not the
+                // agent's history ([ADR 0021]).
+                "q": {"workspaces": ["w"], "toolchain": []},
+            },
         });
         Policy::parse(&text.to_string(), Path::new("/p.json")).expect("parses")
     }
 
+    fn claude() -> &'static Kind {
+        crate::kind::require("claude").expect("a known kind")
+    }
+
     fn layout_of(state: &Path, policy: &Policy) -> Layout {
+        layout_named(state, policy, "p")
+    }
+
+    fn layout_named(state: &Path, policy: &Policy, profile: &str) -> Layout {
         let id = RunId::allocate().expect("id");
-        Layout::new(state, &id, policy, &policy.profiles["p"])
+        Layout::new(
+            state,
+            &id,
+            policy,
+            profile,
+            &policy.profiles[profile],
+            claude(),
+        )
     }
 
     fn layout(state: &Path) -> Layout {
@@ -390,14 +486,14 @@ mod tests {
         let layout = layout(Path::new("/state"));
         let grants = layout.grants();
         assert_eq!(
-            grants,
-            [PathGrant {
+            area(&grants, FROM_SCRATCH),
+            &PathGrant {
                 path: layout.scratch(),
                 access: Access::ReadWrite,
                 scope: Scope::Subtree,
-                from: "run-scratch".into(),
+                from: FROM_SCRATCH.into(),
                 state_derived: true,
-            }]
+            }
         );
         assert!(crate::record::refuse_if_reachable(Some(Path::new("/state")), &grants).is_ok());
     }
@@ -415,7 +511,13 @@ mod tests {
     #[test]
     fn explain_names_no_run() {
         let policy = policy(serde_json::json!({}));
-        let layout = Layout::unlaunched(Path::new("/state"), &policy, &policy.profiles["p"]);
+        let layout = Layout::unlaunched(
+            Path::new("/state"),
+            &policy,
+            "p",
+            &policy.profiles["p"],
+            None,
+        );
         assert_eq!(layout.scratch(), Path::new("/state/scratch/<run>"));
     }
 
@@ -601,6 +703,96 @@ mod tests {
         let granted = area(&layout.grants(), "workspace:w.areas.t").path.clone();
         assert_eq!(layout.area(&AreaRef::Area("w/t".into())), Some(granted));
         assert_eq!(layout.area(&AreaRef::Area("unselected/x".into())), None);
+    }
+
+    /// Keyed by profile × kind, never by workspace: two profiles sharing a workspace do not share
+    /// the agent's history, and one profile's two kinds keep their own ([spec §5.6]).
+    ///
+    /// [spec §5.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#56-agent-state-directory
+    #[test]
+    fn the_agent_state_directory_is_keyed_by_profile_and_kind() {
+        let policy = policy(serde_json::json!({}));
+        let state = Path::new("/state");
+        let id = RunId::allocate().expect("id");
+        let dir = |profile: &str, kind: &str| {
+            Layout::new(
+                state,
+                &id,
+                &policy,
+                profile,
+                &policy.profiles[profile],
+                crate::kind::require(kind).expect("a known kind"),
+            )
+            .agent_state()
+            .expect("a kind was stated")
+        };
+        assert_ne!(dir("p", "claude"), dir("q", "claude"));
+        assert_ne!(dir("p", "claude"), dir("p", "omp"));
+        assert!(dir("p", "claude").starts_with(state.join(AGENTS)));
+    }
+
+    /// Shared by every run of the profile, concurrently: the directory is the agent's, and the
+    /// agent handles its own concurrency, so there is no lock and no `concurrency` field.
+    #[test]
+    fn concurrent_runs_of_one_profile_share_the_agent_state_directory() {
+        let state = tempfile::TempDir::new().expect("state");
+        let policy = policy(serde_json::json!({}));
+        let (first, second) = (
+            layout_of(state.path(), &policy),
+            layout_of(state.path(), &policy),
+        );
+        assert_eq!(first.agent_state(), second.agent_state());
+        let _a = first.provision().expect("first");
+        let _b = second.provision().expect("second, concurrently");
+    }
+
+    /// Created on first use and never removed: it holds the transcripts, history and memory that
+    /// outlive the run that wrote them. Granted read-write as derived state, so the reachability
+    /// check leaves it be (ADR 0027).
+    #[test]
+    fn the_agent_state_directory_outlives_its_run_and_is_granted_read_write() {
+        let state = tempfile::TempDir::new().expect("state");
+        let policy = policy(serde_json::json!({}));
+        let layout = layout_of(state.path(), &policy);
+        let dir = layout.agent_state().expect("a kind was stated");
+        let grants = layout.grants();
+        let grant = area(&grants, &claude().from());
+        assert_eq!(grant.path, dir);
+        assert_eq!(grant.access, Access::ReadWrite);
+        assert!(grant.state_derived);
+        assert!(crate::record::refuse_if_reachable(Some(state.path()), &grants).is_ok());
+        let provisioned = layout.provision().expect("provisioned");
+        std::fs::write(dir.join("history.jsonl"), "x").expect("writable");
+        drop(provisioned);
+        assert!(
+            dir.join("history.jsonl").exists(),
+            "playpen removed the agent state directory"
+        );
+        // The next run of the same profile finds it.
+        assert_eq!(layout_of(state.path(), &policy).agent_state(), Some(dir));
+    }
+
+    /// `explain` of a profile names no kind, and a kind is never inferred, so there is no agent
+    /// state directory to state and none is granted.
+    #[test]
+    fn a_layout_with_no_kind_has_no_agent_state_directory() {
+        let policy = policy(serde_json::json!({}));
+        let layout = Layout::unlaunched(
+            Path::new("/state"),
+            &policy,
+            "p",
+            &policy.profiles["p"],
+            None,
+        );
+        assert_eq!(layout.agent_state(), None);
+        assert!(
+            !layout
+                .grants()
+                .iter()
+                .any(|grant| grant.from.starts_with("kind:")),
+            "{:?}",
+            layout.grants()
+        );
     }
 
     /// A name is one component, whatever it holds: nothing climbs out of where playpen put it.

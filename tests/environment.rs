@@ -53,14 +53,14 @@ fn nothing_reaches_the_child_that_playpen_did_not_put_there() {
     assert!(!env.contains_key("CARGO_PKG_NAME"), "{env:?}");
     assert!(!env.contains_key("PLAYPEN_TEST_SECRET"), "{env:?}");
     assert_eq!(env.get("TERM").map(String::as_str), Some("xterm"));
-    let suppression = playpen::kind::require("claude")
-        .expect("a known kind")
-        .suppression;
+    let kind = playpen::kind::require("claude").expect("a known kind");
+    let authored_by_kind =
+        |name: &str| name == kind.redirect || kind.suppression.iter().any(|(set, _)| *set == name);
     let allowed: Vec<_> = env
         .keys()
         .filter(|name| !playpen::environment::FLOOR.contains(&name.as_str()))
         .filter(|name| !name.starts_with("PLAYPEN_") && *name != "TMPDIR")
-        .filter(|name| !suppression.iter().any(|(set, _)| set == name))
+        .filter(|name| !authored_by_kind(name))
         .collect();
     assert!(allowed.is_empty(), "beyond the floor: {allowed:?}");
 }
