@@ -11,6 +11,7 @@
 use super::Loaded;
 use super::syntax::written_at;
 use crate::code::Code;
+use crate::environment;
 use crate::refusal::Refusal;
 
 /// One coherence check of the document read from the policy file.
@@ -21,6 +22,8 @@ const CHECKS: &[Check] = &[
     workspaces_are_declared,
     roots_are_absolute,
     fragments_are_declared,
+    env_is_not_forbidden,
+    env_is_not_reserved,
 ];
 
 /// Run the coherence tier over `loaded`.
@@ -100,6 +103,55 @@ fn fragments_are_declared(loaded: &Loaded) -> Result<(), Refusal> {
                     ),
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+/// No policy entry passes through or sets a forbidden name (`refusal.env.forbidden`).
+fn env_is_not_forbidden(loaded: &Loaded) -> Result<(), Refusal> {
+    let Loaded { path, policy } = loaded;
+    match environment::authored(policy).find(|(var, _)| environment::FORBIDDEN.contains(var)) {
+        Some((var, from)) => Err(Refusal::new(
+            Code::EnvForbidden,
+            format!(
+                "{}: {from} names {var:?}, which no policy may pass through or set: it names a \
+                 credential oracle the proxy cannot see",
+                path.display()
+            ),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// No policy entry writes a name playpen writes (`refusal.env.reserved`): two authors of one
+/// variable is "which rule won" in miniature. The reserved names are playpen's own and every
+/// route's delivery name. A delivery name is itself a policy entry, so it is held against
+/// playpen's own names, and two routes delivering one name are one author.
+fn env_is_not_reserved(loaded: &Loaded) -> Result<(), Refusal> {
+    let Loaded { path, policy } = loaded;
+    let playpens: Vec<(String, String)> = environment::written_by_playpen()
+        .into_iter()
+        .map(|(var, author)| (var.to_owned(), author))
+        .collect();
+    let reserved: Vec<(String, String)> = playpens
+        .iter()
+        .cloned()
+        .chain(environment::deliveries(policy))
+        .collect();
+    let authored =
+        environment::authored(policy).map(|(var, from)| (var.to_owned(), from, &reserved));
+    let deliveries = environment::deliveries(policy).map(|(var, from)| (var, from, &playpens));
+    for (var, from, against) in authored.chain(deliveries) {
+        if let Some((_, author)) = against.iter().find(|(name, _)| *name == var) {
+            return Err(Refusal::new(
+                Code::EnvReserved,
+                format!(
+                    "{}: {from} names {var:?}, which is reserved for {author}: one name has one \
+                     author",
+                    path.display()
+                ),
+            ));
         }
     }
     Ok(())
@@ -237,6 +289,109 @@ profiles:
         );
         assert!(
             refusal.message().ends_with("declared env fragments: rust"),
+            "{refusal}"
+        );
+    }
+
+    /// `SSH_AUTH_SOCK` names a credential oracle the proxy cannot see, wherever it is allowed.
+    #[test]
+    fn ssh_auth_sock_is_forbidden_in_every_place_a_name_is_allowed() {
+        for (env, fragments, from) in [
+            ("{ allow: [SSH_AUTH_SOCK] }", "{}", "profile:p.env.allow[0]"),
+            (
+                "{ set: { SSH_AUTH_SOCK: /tmp/s } }",
+                "{}",
+                "profile:p.env.set.SSH_AUTH_SOCK",
+            ),
+            ("{}", "{ ssh: [SSH_AUTH_SOCK] }", "fragment:ssh"),
+        ] {
+            let text = format!(
+                "version: 1\nfragments: {{ env: {fragments} }}\nprofiles:\n  p: {{ workspaces: [], \
+                 toolchain: [], env: {env} }}\n"
+            );
+            let refusal = checked(&text).expect_err("refused");
+            assert_eq!(refusal.code, Code::EnvForbidden, "{text}");
+            assert!(refusal.message().contains(from), "{refusal}");
+        }
+    }
+
+    /// Path-shaped names can only name a path, which the mechanism enforces, so they are not banned.
+    #[test]
+    fn path_shaped_names_are_not_banned() {
+        let text = "\
+version: 1
+profiles:
+  p:
+    workspaces: []
+    toolchain: []
+    env: { allow: [LD_PRELOAD, DYLD_INSERT_LIBRARIES], set: { NODE_OPTIONS: --require /x } }
+";
+        assert_eq!(checked(text), Ok(()));
+    }
+
+    /// Every name playpen writes in some run has one author: playpen.
+    #[test]
+    fn a_policy_entry_colliding_with_a_reserved_name_is_refused() {
+        for (env, fragments, reserved) in [
+            ("{ set: { TMPDIR: /tmp } }", "{}", "TMPDIR"),
+            ("{ allow: [PLAYPEN_ACTIVE] }", "{}", "PLAYPEN_ACTIVE"),
+            ("{ allow: [no_proxy] }", "{}", "no_proxy"),
+            (
+                "{ set: { NODE_USE_ENV_PROXY: \"0\" } }",
+                "{}",
+                "NODE_USE_ENV_PROXY",
+            ),
+            (
+                "{ set: { CLAUDE_CONFIG_DIR: /c } }",
+                "{}",
+                "CLAUDE_CONFIG_DIR",
+            ),
+            (
+                "{ allow: [PI_CODING_AGENT_DIR] }",
+                "{}",
+                "PI_CODING_AGENT_DIR",
+            ),
+            (
+                "{ set: { CLAUDE_CODE_SANDBOXED: \"0\" } }",
+                "{}",
+                "CLAUDE_CODE_SANDBOXED",
+            ),
+            ("{}", "{ certs: [SSL_CERT_FILE] }", "SSL_CERT_FILE"),
+            ("{ set: { GH_TOKEN: x } }", "{}", "GH_TOKEN"),
+        ] {
+            let text = format!(
+                "version: 1\nfragments: {{ env: {fragments} }}\nminters: {{ m: {{ command: [/m] }} }}\n\
+                 workspaces:\n  w:\n    roots: []\n    credentials:\n      - {{ host: github.com, \
+                 path_prefix: /, minter: m, delivery: {{ env: GH_TOKEN }} }}\n\
+                 profiles:\n  p: {{ workspaces: [w], toolchain: [], env: {env} }}\n"
+            );
+            let refusal = checked(&text).expect_err("refused");
+            assert_eq!(refusal.code, Code::EnvReserved, "{text}");
+            assert!(
+                refusal.message().contains(&format!("{reserved:?}")),
+                "{refusal}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_delivery_name_colliding_with_a_set_entry_is_refused() {
+        let text = "\
+version: 1
+minters: { m: { command: [/m] } }
+profiles:
+  p:
+    workspaces: []
+    toolchain: []
+    credentials:
+      - { host: h, path_prefix: /, minter: m, delivery: { env: HTTPS_PROXY } }
+";
+        let refusal = checked(text).expect_err("refused");
+        assert_eq!(refusal.code, Code::EnvReserved);
+        assert!(
+            refusal
+                .message()
+                .contains("profile:p.credentials[0].delivery.env"),
             "{refusal}"
         );
     }

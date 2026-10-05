@@ -19,6 +19,7 @@ use crate::child;
 use crate::code::Code;
 use crate::explain;
 use crate::integrity;
+use crate::kind;
 use crate::mechanism::{self, Mechanism};
 use crate::policy::{Policy, SearchPath, coherence};
 use crate::record::{self, RunId, RunRecord};
@@ -57,11 +58,6 @@ struct RunArgs {
     #[arg(last = true, required = true, value_parser = clap::value_parser!(OsString))]
     argv: Vec<OsString>,
 }
-
-/// The agent kinds this playpen knows. A kind is always stated, never inferred ([spec §11.2]).
-///
-/// [spec §11.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#112-kind
-const KINDS: &[&str] = &["claude", "omp"];
 
 /// What playpen takes from the process it runs in, read once by `main` and handed in, so nothing
 /// below reads the environment or the working directory for itself.
@@ -171,12 +167,19 @@ fn invoke(
         argv,
     } = parsed.map_err(|err| usage_refusal(&err))?;
     // Step 2 ends with the kind, which is part of the invocation; step 3 locates the policy.
-    if !KINDS.contains(&agent.as_str()) {
+    // A kind is always stated, never inferred ([spec §11.2]).
+    //
+    // [spec §11.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#112-kind
+    if kind::get(&agent).is_none() {
         return Err(Refusal::new(
             Code::KindUnknown,
             format!(
                 "unknown agent kind {agent:?}; known kinds: {}",
-                KINDS.join(", ")
+                kind::KINDS
+                    .iter()
+                    .map(|kind| kind.name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         ));
     }

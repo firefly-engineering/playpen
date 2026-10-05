@@ -50,6 +50,106 @@ pub const FLOOR: &[&str] = &[
     "TZ",
 ];
 
+/// playpen's own set entries ([spec §9.2]), reserved in every run whether or not this one writes
+/// them. The kind table's entries ([`written_by_playpen`]) and every route's delivery name
+/// ([`deliveries`]) are reserved beside these.
+///
+/// [spec §9.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#92-set-entries
+pub const SET_ENTRIES: &[&str] = &[
+    "TMPDIR",
+    "PLAYPEN_MANIFEST",
+    "PLAYPEN_ACTIVE",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "no_proxy",
+    "NODE_USE_ENV_PROXY",
+    "SSL_CERT_FILE",
+    "NODE_EXTRA_CA_CERTS",
+];
+
+/// Names no policy may pass through or set ([spec §9.1]). `SSH_AUTH_SOCK` names a credential
+/// oracle the proxy cannot see. Path-shaped names are deliberately absent: they can only name a
+/// path, and the mechanism enforces every path.
+///
+/// [spec §9.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#91-layers
+pub const FORBIDDEN: &[&str] = &["SSH_AUTH_SOCK"];
+
+/// Every name playpen itself writes in some run, with which entry writes it: the set entries, and
+/// every kind's state-dir redirect and suppression entries ([spec Appendix B], B7). A route's
+/// delivery name is reserved too ([`deliveries`]), but the policy authors that one.
+///
+/// [spec Appendix B]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#appendix-b--reconciliations-made-in-assembly
+pub fn written_by_playpen() -> Vec<(&'static str, String)> {
+    let mut names: Vec<_> = SET_ENTRIES
+        .iter()
+        .map(|&name| (name, "playpen's set entry".to_string()))
+        .collect();
+    for kind in crate::kind::KINDS {
+        names.push((
+            kind.redirect,
+            format!("kind:{}'s state-dir redirect", kind.name),
+        ));
+        for &(name, _) in kind.suppression {
+            names.push((name, format!("kind:{}'s suppression entry", kind.name)));
+        }
+    }
+    names
+}
+
+/// Every route's delivery name, with where the route was written.
+pub fn deliveries(policy: &Policy) -> impl Iterator<Item = (String, String)> + '_ {
+    let workspaces = policy.workspaces.iter().flat_map(|(name, workspace)| {
+        workspace
+            .credentials
+            .iter()
+            .enumerate()
+            .map(move |(i, route)| {
+                (
+                    route.delivery.env.clone(),
+                    format!("workspace:{name}.credentials[{i}].delivery.env"),
+                )
+            })
+    });
+    let profiles = policy.profiles.iter().flat_map(|(name, profile)| {
+        profile
+            .credentials
+            .iter()
+            .enumerate()
+            .map(move |(i, route)| {
+                (
+                    route.delivery.env.clone(),
+                    format!("profile:{name}.credentials[{i}].delivery.env"),
+                )
+            })
+    });
+    workspaces.chain(profiles)
+}
+
+/// Every name the policy itself asks to pass through or set, with where it asked: each profile's
+/// `env.allow` and `set:`, and every env fragment.
+pub fn authored(policy: &Policy) -> impl Iterator<Item = (&str, String)> + '_ {
+    let profiles = policy.profiles.iter().flat_map(|(name, profile)| {
+        let allow = profile
+            .env
+            .allow
+            .iter()
+            .enumerate()
+            .map(move |(i, var)| (var.as_str(), format!("profile:{name}.env.allow[{i}]")));
+        let set = profile
+            .env
+            .set
+            .keys()
+            .map(move |var| (var.as_str(), format!("profile:{name}.env.set.{var}")));
+        allow.chain(set)
+    });
+    let fragments = policy.fragments.env.iter().flat_map(|(fragment, names)| {
+        names
+            .iter()
+            .map(move |var| (var.as_str(), format!("fragment:{fragment}")))
+    });
+    profiles.chain(fragments)
+}
+
 /// The provenance of a floor name.
 pub const FROM_FLOOR: &str = "floor";
 

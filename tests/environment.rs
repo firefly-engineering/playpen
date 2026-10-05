@@ -162,3 +162,30 @@ fn explain_shows_the_constructed_environment_with_its_provenance() {
         json!({"name": "GIT_AUTHOR_NAME", "value": "agent", "from": "profile:p.env.set.GIT_AUTHOR_NAME"})
     );
 }
+
+/// Both are coherence-tier refusals, so `check` makes them without looking at this host.
+#[test]
+fn check_refuses_a_reserved_or_forbidden_name() {
+    let fx = Fixture::new();
+    for (env, code) in [
+        (json!({"set": {"TMPDIR": "/tmp"}}), "refusal.env.reserved"),
+        (json!({"allow": ["SSH_AUTH_SOCK"]}), "refusal.env.forbidden"),
+    ] {
+        let policy = with_env(&fx, env);
+        let output = fx
+            .playpen(&[
+                "check",
+                "--no-filesystem",
+                "--policy",
+                policy.to_str().unwrap(),
+            ])
+            .output()
+            .expect("playpen check");
+        assert_eq!(output.status.code(), Some(125), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.starts_with(&format!("playpen: {code}: ")),
+            "{stderr}"
+        );
+    }
+}

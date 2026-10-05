@@ -10,6 +10,7 @@ pub mod explain;
 pub mod fault;
 pub mod floor;
 pub mod integrity;
+pub mod kind;
 pub mod launch;
 pub mod mechanism;
 pub mod policy;
