@@ -8,8 +8,8 @@
 //!
 //! [spec §10.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#105-validation-tiers
 
-use super::Loaded;
 use super::syntax::written_at;
+use super::{AreaRef, Loaded, SetValue};
 use crate::code::Code;
 use crate::environment;
 use crate::refusal::Refusal;
@@ -24,6 +24,7 @@ const CHECKS: &[Check] = &[
     fragments_are_declared,
     env_is_not_forbidden,
     env_is_not_reserved,
+    areas_are_declared,
 ];
 
 /// Run the coherence tier over `loaded`.
@@ -152,6 +153,39 @@ fn env_is_not_reserved(loaded: &Loaded) -> Result<(), Refusal> {
                     path.display()
                 ),
             ));
+        }
+    }
+    Ok(())
+}
+
+/// An `!area` reference names an area of one of its profile's own workspaces
+/// (`refusal.area.unknown`): any other has no path in that profile's runs.
+fn areas_are_declared(loaded: &Loaded) -> Result<(), Refusal> {
+    let Loaded { path, policy } = loaded;
+    for (profile, selected) in &policy.profiles {
+        for (var, value) in &selected.env.set {
+            let SetValue::Area(reference) = value else {
+                continue;
+            };
+            let declared = reference.target().is_some_and(|(workspace, area)| {
+                selected.workspaces.iter().any(|w| w.value == workspace)
+                    && policy
+                        .workspaces
+                        .get(workspace)
+                        .is_some_and(|w| w.areas.contains_key(area))
+            });
+            if !declared {
+                let AreaRef::Area(reference) = reference;
+                return Err(Refusal::new(
+                    Code::AreaUnknown,
+                    format!(
+                        "{}: profile:{profile}.env.set.{var} is !area {reference}, which names no \
+                         area of profile {profile:?}'s workspaces: an area is named \
+                         <workspace>/<area>",
+                        path.display(),
+                    ),
+                ));
+            }
         }
     }
     Ok(())
@@ -394,6 +428,34 @@ profiles:
                 .contains("profile:p.credentials[0].delivery.env"),
             "{refusal}"
         );
+    }
+
+    /// An `!area` reference names an area of one of the profile's own workspaces: any other has
+    /// no path in that profile's runs.
+    #[test]
+    fn a_dangling_area_reference_is_refused() {
+        for reference in ["w/nope", "other/a", "nope/a", "w", "w/a/b"] {
+            let text = format!(
+                "version: 1\nworkspaces:\n  w: {{ roots: [], areas: {{ a: {{ lifetime: ephemeral }} }} }}\n  \
+                 other: {{ roots: [], areas: {{ a: {{ lifetime: ephemeral }} }} }}\n\
+                 profiles:\n  p: {{ workspaces: [w], toolchain: [], env: {{ set: {{ X: !area {reference} }} }} }}\n"
+            );
+            let refusal = checked(&text).expect_err(reference);
+            assert_eq!(refusal.code, Code::AreaUnknown, "{reference}");
+            assert!(
+                refusal.message().contains("profile:p.env.set.X"),
+                "{refusal}"
+            );
+            assert!(refusal.message().contains(reference), "{refusal}");
+        }
+        let text = "\
+version: 1
+workspaces:
+  w: { roots: [], areas: { a: { lifetime: ephemeral } } }
+profiles:
+  p: { workspaces: [w], toolchain: [], env: { set: { X: !area w/a } } }
+";
+        assert_eq!(checked(text), Ok(()));
     }
 
     #[test]

@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use crate::capability::{Access, PathGrant, Scope};
 use crate::code::Code;
-use crate::policy::{Area, Concurrency, Policy, Profile};
+use crate::policy::{Area, AreaRef, Concurrency, Policy, Profile};
 use crate::record::RunId;
 use crate::refusal::Refusal;
 
@@ -126,6 +126,15 @@ impl Layout {
         };
         base.join(component(&planned.workspace))
             .join(component(&planned.name))
+    }
+
+    /// The path of the area an `!area` reference names, if it names one of this layout's.
+    pub fn area(&self, reference: &AreaRef) -> Option<PathBuf> {
+        let (workspace, name) = reference.target()?;
+        self.areas
+            .iter()
+            .find(|planned| planned.workspace == workspace && planned.name == name)
+            .map(|planned| self.path(planned))
     }
 
     /// The lock file of an `exclusive` area.
@@ -570,6 +579,15 @@ mod tests {
                 .any(|grant| lock.starts_with(&grant.path)),
             "{lock:?}"
         );
+    }
+
+    #[test]
+    fn an_area_reference_resolves_to_the_granted_path() {
+        let policy = policy(serde_json::json!({"t": {"lifetime": "ephemeral"}}));
+        let layout = layout_of(Path::new("/state"), &policy);
+        let granted = area(&layout.grants(), "workspace:w.areas.t").path.clone();
+        assert_eq!(layout.area(&AreaRef::Area("w/t".into())), Some(granted));
+        assert_eq!(layout.area(&AreaRef::Area("unselected/x".into())), None);
     }
 
     /// A name is one component, whatever it holds: nothing climbs out of where playpen put it.

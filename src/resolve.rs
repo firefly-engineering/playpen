@@ -188,7 +188,9 @@ pub fn environment(
             from: BUILT_IN.into(),
         },
     ];
-    environment::construct(policy, name, selected, host, written, |_| None)
+    environment::construct(policy, name, selected, host, written, |reference| {
+        layout.area(reference)
+    })
 }
 
 /// Every exclusion on the selected profile's roots, brought and toolchain alike, at its resolved

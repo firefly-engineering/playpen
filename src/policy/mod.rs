@@ -281,6 +281,14 @@ pub enum AreaRef {
     Area(String),
 }
 
+impl AreaRef {
+    /// The workspace and area this names, split at the first `/`, or `None` where it has none.
+    pub fn target(&self) -> Option<(&str, &str)> {
+        let AreaRef::Area(reference) = self;
+        reference.split_once('/')
+    }
+}
+
 /// One kind's share list ([spec §5.6]). Default-deny: empty unless entries are named.
 ///
 /// [spec §5.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#56-agent-state-directory

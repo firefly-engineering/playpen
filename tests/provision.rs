@@ -231,3 +231,60 @@ fn two_runs_share_a_shared_area_concurrently() {
     drop(first.stdin.take());
     assert!(first.wait().expect("first run").success());
 }
+
+/// A policy whose profile `p` has workspace `w` with areas `areas`, and the `set:` table `set`.
+fn with_areas_and_set(fx: &Fixture, areas: Value, set: Value) -> PathBuf {
+    fx.policy_named(
+        "set.json",
+        &json!({
+            "version": 1,
+            "workspaces": {"w": {"roots": [{"path": fx.root(), "mode": "readwrite"}], "areas": areas}},
+            "profiles": {"p": {"workspaces": ["w"], "toolchain": [], "env": {"set": set}}},
+        }),
+    )
+}
+
+#[test]
+fn an_area_reference_gives_the_child_the_areas_path() {
+    let fx = Fixture::new();
+    // JSON has no tags, so the reference is the one-key mapping `!area` stands for.
+    let policy = with_areas_and_set(
+        &fx,
+        json!({"target": {"lifetime": "ephemeral"}}),
+        json!({"CARGO_TARGET_DIR": {"area": "w/target"}}),
+    );
+    let before = fx.run_ids();
+    let output = fx
+        .run_under(
+            &policy,
+            &[
+                &os_bin("sh"),
+                "-c",
+                r#"echo "$CARGO_TARGET_DIR"; echo x > "$CARGO_TARGET_DIR/f" && echo written"#,
+            ],
+        )
+        .output()
+        .expect("playpen");
+    assert!(output.status.success(), "{output:?}");
+    let record = launched(&fx, &before);
+    let area = granted(&record, "workspace:w.areas.target");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{}\nwritten\n", area.display())
+    );
+}
+
+#[test]
+fn a_dangling_area_reference_is_refused() {
+    let fx = Fixture::new();
+    let policy = with_areas_and_set(
+        &fx,
+        json!({"target": {"lifetime": "ephemeral"}}),
+        json!({"X": {"area": "w/nope"}}),
+    );
+    let output = fx
+        .run_under(&policy, &[&os_bin("true")])
+        .output()
+        .expect("playpen");
+    common::assert_refused(&output, "refusal.area.unknown");
+}

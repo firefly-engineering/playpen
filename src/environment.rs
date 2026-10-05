@@ -18,8 +18,9 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
+use std::path::PathBuf;
 
-use crate::policy::{Policy, Profile, SetValue};
+use crate::policy::{AreaRef, Policy, Profile, SetValue};
 
 /// The floor ([spec §9.1]): facts about a *process*, never about what it may reach, so a built-in
 /// default rather than policy. `LC_*` is the closed family the C library defines, enumerated,
@@ -180,15 +181,16 @@ impl Value {
 /// The environment of a launch of profile `name`, `selected` from `policy`, on a host whose own
 /// environment is `host`, with playpen's own set entries `written`. Ordered by name.
 ///
-/// `area` renders an `!area` reference to the area's real path; the coherence tier has already
-/// refused one that dangles, so a reference it cannot render is left out.
+/// `area` resolves an `!area` reference to the area's real path, which is the value: rendered from
+/// the path, never formatted. The coherence tier has already refused a reference that dangles, so
+/// one it cannot resolve is left out.
 pub fn construct(
     policy: &Policy,
     name: &str,
     selected: &Profile,
     host: &[(OsString, OsString)],
     written: Vec<Var>,
-    area: impl Fn(&str) -> Option<OsString>,
+    area: impl Fn(&AreaRef) -> Option<PathBuf>,
 ) -> Vec<Var> {
     let inherited = |var: &str| {
         host.iter()
@@ -226,7 +228,7 @@ pub fn construct(
     for (var, value) in &selected.env.set {
         let value = match value {
             SetValue::Literal(literal) => Some(OsString::from(literal)),
-            SetValue::Area(crate::policy::AreaRef::Area(reference)) => area(reference),
+            SetValue::Area(reference) => area(reference).map(PathBuf::into_os_string),
         };
         if let Some(value) = value {
             env.insert(
@@ -371,6 +373,22 @@ mod tests {
         assert_eq!(
             get(&env, "GIT_AUTHOR_NAME").value,
             Value::Written("agent".into())
+        );
+    }
+
+    #[test]
+    fn an_area_reference_is_the_areas_path() {
+        let policy = policy(serde_json::json!({
+            "workspaces": [], "toolchain": [],
+            "env": {"set": {"CARGO_HOME": {"area": "w/cache"}}},
+        }));
+        let path = PathBuf::from("/state/areas/persistent/w/cache");
+        let env = construct(&policy, "p", &policy.profiles["p"], &[], Vec::new(), |r| {
+            (r.target() == Some(("w", "cache"))).then(|| path.clone())
+        });
+        assert_eq!(
+            get(&env, "CARGO_HOME").value,
+            Value::Written(path.into_os_string())
         );
     }
 
