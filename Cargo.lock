@@ -1396,6 +1396,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "toml",
+ "zeroize",
 ]
 
 [[package]]

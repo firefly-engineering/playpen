@@ -24,6 +24,7 @@ use crate::integrity;
 use crate::kind::{self, Kind};
 use crate::manifest::Manifest;
 use crate::mechanism::{self, Mechanism};
+use crate::minter;
 use crate::policy::{Policy, SearchPath, coherence};
 use crate::present;
 use crate::provision::Layout;
@@ -616,6 +617,15 @@ fn run(
     {
         rendered.write()?;
     }
+    // Step 10: every credential this profile's routes resolve, minted unconfined on the host
+    // before anything is confined ([spec §7.2]). A failure refuses the whole run: launching
+    // without the credential would produce a run that works for ten minutes and then fails at the
+    // first push. Held here, in the supervisor, for as long as the run lasts — the proxy is what
+    // uses it (#86), and nothing of it crosses the boundary.
+    //
+    // [spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters
+    let credentials = minter::resolve(&loaded.policy, profile, selected)?;
+    record.credentials(credentials.iter().map(minter::Resolved::recorded).collect());
     // Step 12: the capability set compiles on this mechanism.
     backend::check(&caps)?;
     // Step 14.

@@ -25,6 +25,7 @@ const CHECKS: &[Check] = &[
     env_is_not_forbidden,
     env_is_not_reserved,
     areas_are_declared,
+    minters_are_declared,
 ];
 
 /// Run the coherence tier over `loaded`.
@@ -198,6 +199,41 @@ fn areas_are_declared(loaded: &Loaded) -> Result<(), Refusal> {
         }
     }
     Ok(())
+}
+
+/// Every credential route names a declared minter (`refusal.minter.unknown`): a route whose minter
+/// does not exist would authenticate nothing, and would do it silently.
+fn minters_are_declared(loaded: &Loaded) -> Result<(), Refusal> {
+    let Loaded { path, policy } = loaded;
+    let workspaces = policy.workspaces.iter().flat_map(|(name, workspace)| {
+        workspace
+            .credentials
+            .iter()
+            .enumerate()
+            .map(move |(i, route)| (format!("workspace:{name}.credentials[{i}]"), route))
+    });
+    let profiles = policy.profiles.iter().flat_map(|(name, profile)| {
+        profile
+            .credentials
+            .iter()
+            .enumerate()
+            .map(move |(i, route)| (format!("profile:{name}.credentials[{i}]"), route))
+    });
+    match workspaces
+        .chain(profiles)
+        .find(|(_, route)| !policy.minters.contains_key(&route.minter))
+    {
+        Some((from, route)) => Err(Refusal::new(
+            Code::MinterUnknown,
+            format!(
+                "{}: {from}.minter is {:?}, which is not declared; declared minters: {}",
+                path.display(),
+                route.minter,
+                known(policy.minters.keys()),
+            ),
+        )),
+        None => Ok(()),
+    }
 }
 
 /// `names`, comma-separated, or `none`.

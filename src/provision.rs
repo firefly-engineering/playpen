@@ -825,9 +825,33 @@ mod tests {
                 "{refusal}"
             );
             drop(held);
-            let _again = layout_of(state.path(), &policy)
-                .provision()
-                .expect("released with its run");
+            // Released with its run — but not necessarily in the same instant, in *this* process.
+            // A sibling test that spawns a subprocess inherits every open descriptor between the
+            // fork and the `exec` that closes them again, the lock's among them, so a concurrently
+            // forking test can hold a released lock alive for as long as its fork takes. That is a
+            // property of one process running many tests, and never of a launch, which forks the
+            // agent after claiming and means to hold the lock for the whole run. So the claim is
+            // retried briefly rather than asserted on the first attempt.
+            let _again = reclaimed(state.path(), &policy);
+        }
+    }
+
+    /// Claim the layout's areas, retrying for up to a second while the only thing in the way is a
+    /// lock a sibling test's fork is holding open.
+    fn reclaimed(state: &Path, policy: &Policy) -> Provisioned {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            match layout_of(state, policy).provision() {
+                Ok(provisioned) => return provisioned,
+                Err(refusal) if refusal.code == Code::AreaBusy => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the area was not released with its run: {refusal}"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(refusal) => panic!("released with its run: {refusal}"),
+            }
         }
     }
 

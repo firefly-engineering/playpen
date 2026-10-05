@@ -15,6 +15,7 @@ pub mod kind;
 pub mod launch;
 pub mod manifest;
 pub mod mechanism;
+pub mod minter;
 pub mod policy;
 pub mod present;
 pub mod provision;

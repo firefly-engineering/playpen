@@ -234,6 +234,25 @@ pub struct Record {
     /// [ADR 0024]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0024-a-status-playpen-cannot-learn-is-a-fault-and-not-a-refusal.md
     #[serde(default)]
     pub fault: Option<RecordedFault>,
+    /// The credentials this run minted: where each goes, which minter made it, and when it
+    /// expires. **Never the token** ([spec §7.2]). Additive, so a record written before credential
+    /// routes existed still reads.
+    ///
+    /// [spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters
+    #[serde(default)]
+    pub credentials: Vec<RecordedCredential>,
+}
+
+/// One minted credential as recorded: enough to answer "why did the push stop working" — the
+/// destination, the minter, and the expiry — and nothing a reader of the record could use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordedCredential {
+    pub host: String,
+    pub path_prefix: String,
+    pub minter: String,
+    pub expires_at: String,
+    /// Where the route was written, the bridge back to the policy.
+    pub from: String,
 }
 
 /// A refusal as recorded: the stable code and the human sentence beside it.
@@ -355,6 +374,7 @@ impl RunRecord {
             status: None,
             refusal: None,
             fault: None,
+            credentials: Vec::new(),
         };
         // Staged whole, then linked into place: a reader never sees half of one, and a link
         // that exists already is a collision, which refuses rather than overwrites another run.
@@ -397,6 +417,11 @@ impl RunRecord {
     /// The policy path, absolute.
     pub fn policy(&mut self, policy: &Path) {
         self.record.policy = Some(policy.to_path_buf());
+    }
+
+    /// What this run minted, by destination and expiry. The token is never among it.
+    pub fn credentials(&mut self, credentials: Vec<RecordedCredential>) {
+        self.record.credentials = credentials;
     }
 
     /// The selection trace, and the profile it selected if it did.
