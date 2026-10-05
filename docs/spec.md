@@ -1084,8 +1084,10 @@ playpen owes this contract to its callers regardless of backend
   signals reach the child directly. A signal sent to playpen therefore **reaches the agent
   exactly once, where the platform can tell** — which syscall discriminates is a backend matter
   ([§15.4](#154-named-asymmetries)), and the one case no platform can tell is the twelfth named
-  residual ([§18](#18-named-residuals)). A job stop stops playpen with the child. A signal the
-  caller ignores stays ignored.
+  residual ([§18](#18-named-residuals)). A job stop stops playpen with the child, by the
+  kernel's own rule: in an orphaned process group, where no shell is left to resume a stopped
+  job, the kernel discards the stop for playpen as it does for the child, so playpen never
+  outlives its shell stopped. A signal the caller ignores stays ignored.
   `SIGKILL`, `SIGSTOP`, `SIGCHLD`, `SIGPIPE` and the synchronous fault signals are not
   forwarded. Blocking a fault signal would make a real fault undefined behaviour, so one sent to
   playpen kills the supervisor; **the agent then dies with it on Linux and survives on macOS**

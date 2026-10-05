@@ -241,10 +241,35 @@ impl HeldSignals {
             if is_job_stop(sig) {
                 // The handler replaced the default stop, so stop as the rest of the job does: the
                 // caller's shell waits for every process in it. Its `SIGCONT` resumes us.
-                // SAFETY: stopping ourselves; SIGSTOP cannot be blocked or caught.
-                unsafe { libc::kill(libc::getpid(), libc::SIGSTOP) };
+                stop_as_the_job(sig);
             }
         }
+    }
+}
+
+/// Take the job stop `sig` at its default action, once, as playpen would have without holding it.
+///
+/// The kernel then decides, by the rule it applies to the rest of the job: it stops playpen, or,
+/// in an **orphaned** process group — where no shell is left to resume a stopped job — it discards
+/// the stop, as it does for the child. Stopping with `SIGSTOP` instead, which nothing discards,
+/// would leave playpen stopped for good once its shell is gone
+/// ([#113](https://github.com/firefly-engineering/playpen/issues/113)).
+fn stop_as_the_job(sig: c_int) {
+    let mut only = empty_set();
+    // SAFETY: `only` was initialised by sigemptyset; a zeroed sigaction with `SIG_DFL` is valid,
+    // and `held` is a valid out-pointer, restored below. `sig` is blocked until the unblock, so
+    // raising it leaves it pending; unblocking delivers it, at its default action, before
+    // pthread_sigmask returns — after a `SIGCONT` if the kernel stopped this process.
+    unsafe {
+        libc::sigaddset(&mut only, sig);
+        let mut default: libc::sigaction = std::mem::zeroed();
+        default.sa_sigaction = libc::SIG_DFL;
+        let mut held: libc::sigaction = std::mem::zeroed();
+        libc::sigaction(sig, &default, &mut held);
+        libc::raise(sig);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &only, std::ptr::null_mut());
+        libc::pthread_sigmask(libc::SIG_BLOCK, &only, std::ptr::null_mut());
+        libc::sigaction(sig, &held, std::ptr::null_mut());
     }
 }
 

@@ -257,8 +257,7 @@ fn catchable_signals_sent_to_playpen_reach_the_child_once() {
 
 /// Whether `pid` still exists. The agent is playpen's child and not this process's, so once
 /// playpen is gone there is no zombie of it to confuse the answer: the kernel reaps the orphan,
-/// and signal 0 then fails with `ESRCH`.
-#[cfg(target_os = "linux")]
+/// and signal 0 then fails with `ESRCH`. The same holds for a playpen whose parent was a shell.
 fn alive(pid: libc::pid_t) -> bool {
     // SAFETY: signal 0 performs the permission and existence check and delivers nothing.
     unsafe { libc::kill(pid, 0) == 0 }
@@ -438,6 +437,119 @@ fn a_signal_addressed_to_the_whole_job_reaches_the_agent_twice() {
          signal's target; the kernel does not report one (ADR 0026)"
     );
     assert_eq!(status, Some(0));
+}
+
+/// Whether `pid`, a child of this process, stops within `within`. A stop is reported without
+/// reaping, so the caller still owns the process either way.
+fn stops_within(pid: libc::pid_t, within: Duration) -> bool {
+    let deadline = std::time::Instant::now() + within;
+    while std::time::Instant::now() < deadline {
+        let mut status = 0;
+        // SAFETY: `status` is a valid out-pointer for the duration of the call.
+        let seen = unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED | libc::WNOHANG) };
+        if seen == pid && libc::WIFSTOPPED(status) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
+/// In an orphaned process group no shell is left to resume a stopped job, so the kernel discards
+/// a terminal stop rather than leave the process stopped for good. playpen stops as its job does,
+/// and so must be discarded with it: a stopped playpen there would outlive the shell that started
+/// it ([#113](https://github.com/firefly-engineering/playpen/issues/113)).
+#[test]
+fn a_terminal_stop_in_an_orphaned_group_is_discarded_as_it_would_be_without_playpen() {
+    let fx = Fixture::new();
+    let probe = fx.probe();
+    // A session of its own: no process in the group has a parent outside it in the same session,
+    // which is what orphaned means.
+    let orphaned = |mut command: Command| {
+        // SAFETY: setsid is async-signal-safe.
+        unsafe {
+            command.pre_exec(|| match libc::setsid() {
+                -1 => Err(std::io::Error::last_os_error()),
+                _ => Ok(()),
+            });
+        }
+        Waiting::spawn(command)
+    };
+
+    let mut outside = Command::new(&probe);
+    outside.arg("wait-signal");
+    let run = orphaned(outside);
+    run.signal(libc::SIGTSTP);
+    assert!(
+        !stops_within(run.pid(), Duration::from_millis(300)),
+        "this host's kernel stops an orphaned group, so the inside proves nothing"
+    );
+    run.signal(libc::SIGTERM);
+    let (lines, _) = run.finish();
+    assert_eq!(lines, [json!({"signal": libc::SIGTERM, "count": 1})]);
+
+    let run = orphaned(fx.run(&[probe.to_str().unwrap(), "wait-signal"]));
+    run.signal(libc::SIGTSTP);
+    let stopped = stops_within(run.pid(), Duration::from_millis(300));
+    // Resumed either way, so a failure reports instead of hanging on the stopped playpen.
+    run.signal(libc::SIGCONT);
+    assert!(!stopped, "playpen stopped in an orphaned group");
+    run.signal(libc::SIGTERM);
+    let (lines, status) = run.finish();
+    assert_eq!(lines, [json!({"signal": libc::SIGTERM, "count": 1})]);
+    assert_eq!(status, Some(0));
+}
+
+/// The other way into an orphaned group: the job is already stopped when its shell dies. The kernel
+/// then hangs up and continues every stopped process in the group, so playpen resumes, forwards
+/// the hangup, and exits with its child rather than staying stopped under init
+/// ([#113](https://github.com/firefly-engineering/playpen/issues/113)).
+#[test]
+fn a_job_stopped_when_its_shell_dies_does_not_leave_playpen_stopped() {
+    let fx = Fixture::new();
+    let probe = fx.probe();
+    let (master, slave) = pty();
+    // As at an interactive shell, except that the shell never resumes the job: it is killed.
+    let mut command = Command::new("dash");
+    command
+        .args([
+            "-c",
+            r#"set -m; "$@"; echo '{"stopped":true}'; sleep 30"#,
+            "sh",
+        ])
+        .arg(fx.run(&[]).get_program())
+        .args(fx.run(&[probe.to_str().unwrap(), "wait-signal"]).get_args())
+        .env("XDG_STATE_HOME", fx.state_home())
+        .current_dir(fx.root())
+        .stderr(slave.try_clone().expect("dup"));
+    with_controlling_terminal(&mut command, &slave);
+    let mut screen = File::from(master.try_clone().expect("dup"));
+    std::thread::spawn(move || std::io::copy(&mut screen, &mut std::io::sink()));
+    let mut run = Waiting::spawn(command);
+    drop(slave);
+    // `set -m` makes playpen the leader of the job's group.
+    let playpen = run.child_group();
+
+    type_keys(&master, b"\x1a");
+    assert_eq!(run.line(), json!({"stopped": true}));
+    run.signal(libc::SIGKILL);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while alive(playpen) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let outlived = alive(playpen);
+    if outlived {
+        // Otherwise it holds the test's stdout open, and the read below never ends.
+        // SAFETY: kill has no memory preconditions; the pid is a live process, checked above.
+        unsafe { libc::kill(playpen, libc::SIGKILL) };
+    }
+    let (lines, _) = run.finish();
+    assert!(!outlived, "playpen outlived the shell that stopped it");
+    assert!(
+        matches!(lines.as_slice(), [line] if line["signal"] == libc::SIGHUP),
+        "the child was hung up as its group was orphaned: {lines:?}"
+    );
 }
 
 #[test]
