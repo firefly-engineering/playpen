@@ -14,6 +14,7 @@ pub mod kind;
 pub mod launch;
 pub mod mechanism;
 pub mod policy;
+pub mod provision;
 pub mod record;
 pub mod refusal;
 pub mod resolve;

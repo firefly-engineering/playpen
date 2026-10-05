@@ -23,6 +23,7 @@ use crate::code::Code;
 use crate::environment::{self, Value, Var};
 use crate::floor::floor;
 use crate::policy::{Policy, Profile};
+use crate::provision::{self, Layout};
 use crate::refusal::Refusal;
 use crate::select::Trace;
 
@@ -135,10 +136,15 @@ pub fn toolchain(name: &str, selected: &Profile) -> Result<Vec<PathGrant>, Refus
 }
 
 /// The whole capability set a launch of profile `name` applies ([spec §8.1]): the floor, the
-/// toolchain, then the brought roots. `run` applies it and `explain` shows it.
+/// toolchain, the brought roots, then what playpen provisions for the run under `layout`. `run`
+/// applies it and `explain` shows it.
 ///
 /// [spec §8.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#81-shape
-pub fn capabilities(policy: &Policy, name: &str) -> Result<CapabilitySet, Refusal> {
+pub fn capabilities(
+    policy: &Policy,
+    name: &str,
+    layout: &Layout,
+) -> Result<CapabilitySet, Refusal> {
     let Some(selected) = policy.profiles.get(name) else {
         return Err(Refusal::new(
             Code::SelectionUnknownProfile,
@@ -148,19 +154,41 @@ pub fn capabilities(policy: &Policy, name: &str) -> Result<CapabilitySet, Refusa
     let mut caps = floor()?;
     caps.paths.extend(toolchain(name, selected)?);
     caps.paths.extend(roots(policy, selected)?);
+    caps.paths.extend(layout.grants());
     caps.exclusions = exclusions(policy, name, selected)?;
     Ok(caps)
 }
 
-/// The environment a launch of profile `name` constructs on a host whose own is `host`
-/// ([spec §9]). `run` hands it to the child and `explain` shows it.
+/// The environment a launch of profile `name` under `layout` constructs on a host whose own is
+/// `host` ([spec §9]). `run` hands it to the child and `explain` shows it.
+///
+/// playpen's own entries are rendered from typed values — a path playpen provisions, the profile's
+/// name — and never by string formatting ([spec §9.2]).
 ///
 /// [spec §9]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#9-the-environment
-pub fn environment(policy: &Policy, name: &str, host: &[(OsString, OsString)]) -> Vec<Var> {
+/// [spec §9.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#92-set-entries
+pub fn environment(
+    policy: &Policy,
+    name: &str,
+    host: &[(OsString, OsString)],
+    layout: &Layout,
+) -> Vec<Var> {
     let Some(selected) = policy.profiles.get(name) else {
         return Vec::new();
     };
-    environment::construct(policy, name, selected, host, Vec::new(), |_| None)
+    let written = vec![
+        Var {
+            name: "TMPDIR".into(),
+            value: Value::Written(layout.scratch().into_os_string()),
+            from: provision::FROM_SCRATCH.into(),
+        },
+        Var {
+            name: "PLAYPEN_ACTIVE".into(),
+            value: Value::Written(name.into()),
+            from: BUILT_IN.into(),
+        },
+    ];
+    environment::construct(policy, name, selected, host, written, |_| None)
 }
 
 /// Every exclusion on the selected profile's roots, brought and toolchain alike, at its resolved
@@ -285,8 +313,8 @@ pub enum NetworkMode {
     AllowAll,
 }
 
-/// The provenance of what no policy authors: the network mode, which is the same for every
-/// boundary.
+/// The provenance of what no policy authors and no host decides: the network mode, which is the
+/// same for every boundary, and `PLAYPEN_ACTIVE`.
 pub const BUILT_IN: &str = "built-in";
 
 impl Resolved {
@@ -496,7 +524,8 @@ mod tests {
     fn the_capability_set_holds_the_toolchain() {
         let tool = tempfile::TempDir::new().expect("tool");
         let policy = with_toolchain(&[tool.path()]);
-        let caps = capabilities(&policy, "p").expect("resolves");
+        let caps =
+            capabilities(&policy, "p", &Layout::unlaunched(Path::new("/state"))).expect("resolves");
         assert!(caps.paths.iter().any(|g| g.from == "floor"));
         assert!(
             caps.paths
@@ -531,7 +560,8 @@ mod tests {
                 {"path": root.path().join("hooks"), "classes": ["write"]},
             ]),
         );
-        let caps = capabilities(&policy, "p").expect("resolves");
+        let caps =
+            capabilities(&policy, "p", &Layout::unlaunched(Path::new("/state"))).expect("resolves");
         let resolved = root.path().canonicalize().expect("canonical");
         assert_eq!(
             caps.exclusions,
@@ -557,7 +587,8 @@ mod tests {
             root.path(),
             serde_json::json!([{"path": root.path().join("gone")}]),
         );
-        let refusal = capabilities(&policy, "p").expect_err("refused");
+        let refusal = capabilities(&policy, "p", &Layout::unlaunched(Path::new("/state")))
+            .expect_err("refused");
         assert_eq!(refusal.code, Code::ExclusionMissing);
         assert!(
             refusal
@@ -578,7 +609,8 @@ mod tests {
             ]}},
         });
         let policy = Policy::parse(&text.to_string(), Path::new("/p.json")).expect("parses");
-        let caps = capabilities(&policy, "p").expect("resolves");
+        let caps =
+            capabilities(&policy, "p", &Layout::unlaunched(Path::new("/state"))).expect("resolves");
         assert_eq!(caps.exclusions.len(), 1, "{:?}", caps.exclusions);
         assert_eq!(caps.exclusions[0].from, "profile:p.toolchain[0].exclude[0]");
     }

@@ -22,6 +22,7 @@ use crate::integrity;
 use crate::kind;
 use crate::mechanism::{self, Mechanism};
 use crate::policy::{Policy, SearchPath, coherence};
+use crate::provision::Layout;
 use crate::record::{self, RunId, RunRecord};
 use crate::refusal::{EXIT_REFUSED, Refusal};
 use crate::resolve;
@@ -264,7 +265,23 @@ fn run(
     // root, link and exclusion, refusing any that is missing.
     let roots = resolve::roots(&loaded.policy, selected)?;
     check_cwd(cwd, &roots)?;
-    let caps = resolve::capabilities(&loaded.policy, profile)?;
+    // The record is open, so the state directory exists; resolved, because the mechanism enforces
+    // on real paths.
+    let layout = state
+        .ok_or_else(|| Refusal::new(Code::StateIo, "no state directory"))
+        .and_then(|state| {
+            state.canonicalize().map_err(|e| {
+                Refusal::new(
+                    Code::StateIo,
+                    format!(
+                        "cannot resolve the state directory {}: {e}",
+                        state.display()
+                    ),
+                )
+            })
+        })
+        .map(|state| Layout::new(&state, record.id()))?;
+    let caps = resolve::capabilities(&loaded.policy, profile, &layout)?;
     // Nothing that runs unconfined on the next launch is writable from inside this one.
     integrity::check(&caps, &policy_file, &integrity::executable(&executable)?)?;
     // The existence-tier containment check, run once the capability set is complete because the
@@ -278,10 +295,12 @@ fn run(
     // capability is named as such rather than surfacing as a canary that could not be confined.
     probe().require(mechanism::REQUIRED)?;
     floor_self_test()?;
+    // Step 9. Removed again when this returns: at teardown, or on any refusal from here on.
+    let _provisioned = layout.provision()?;
     // Step 12: the capability set compiles on this mechanism.
     backend::check(&caps)?;
     // Step 14.
-    let env = resolve::environment(&loaded.policy, profile, env);
+    let env = resolve::environment(&loaded.policy, profile, env, &layout);
     record.launch(&caps, backend::denial_tag(record.id()))?;
     let run = record.id().clone();
     // Both callbacks write the record, and only one of them ever fires, but the borrow checker

@@ -24,6 +24,7 @@ use crate::capability::{Access, Class, Scope};
 use crate::code::Code;
 use crate::launch::Host;
 use crate::policy::{Policy, coherence};
+use crate::provision::Layout;
 use crate::record::{self, Record, RunId};
 use crate::refusal::{OneLine, Refusal};
 use crate::resolve::{self, NetworkMode, Resolved};
@@ -112,12 +113,27 @@ fn resolve(args: &Args, host: &Host) -> Result<Resolved, Refusal> {
     let (trace, selected) = select::select(&loaded.policy, inputs);
     let name = selected?;
     coherence::check(&loaded)?;
-    let caps = resolve::capabilities(&loaded.policy, &name)?;
+    // `explain` launches nothing, so it states the paths any run would be provisioned.
+    let state = host.state.as_deref().ok_or_else(|| {
+        Refusal::new(
+            Code::StateIo,
+            "no state directory: neither XDG_STATE_HOME nor HOME is an absolute path",
+        )
+    })?;
+    let layout = Layout::unlaunched(&state.canonicalize().unwrap_or_else(|_| state.to_owned()));
+    let caps = resolve::capabilities(&loaded.policy, &name, &layout)?;
     let executable = crate::integrity::executable(&host.executable)?;
     crate::integrity::check(&caps, &absolute(&path), &executable)?;
     record::refuse_if_reachable(host.state.as_deref(), &caps.paths)?;
-    crate::backend::check(&caps)?;
-    let env = resolve::environment(&loaded.policy, &name, &host.env);
+    // What a run would provision does not exist until a run creates it, and the backend compiles
+    // only paths that do, so the budget is checked without it: a handful of entries against a
+    // ceiling of thousands, and `run` checks it whole.
+    let mut provisioned = caps.clone();
+    provisioned
+        .paths
+        .retain(|grant| !grant.state_derived || grant.path.exists());
+    crate::backend::check(&provisioned)?;
+    let env = resolve::environment(&loaded.policy, &name, &host.env, &layout);
     Ok(Resolved::new(absolute(&path), trace, name, &caps, &env))
 }
 
