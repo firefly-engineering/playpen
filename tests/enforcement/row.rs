@@ -387,9 +387,18 @@ pub enum Invocation {
     OverCeiling,
 }
 
-/// Roots enough to put a profile over the compiled-profile ceiling. On macOS 26.6 the ceiling is
-/// reached near 6,300 subtree roots, whatever their paths' length.
-pub const OVER_CEILING: usize = 8000;
+/// Roots enough to put a profile over the compiled-profile ceiling, each named by
+/// [`over_ceiling_name`]. The ceiling is on the bytes of the granted paths that their neighbours do
+/// not share, so long names that differ from their first character cross it with few roots, and
+/// few roots compile fast: on macOS 26.6 these come to about 124,000 bytes, near twice the
+/// ceiling, refused in under a second. Names differing only at their end cost about ten bytes a
+/// root and take the kernel tens of seconds to refuse.
+pub const OVER_CEILING: usize = 600;
+
+/// The name of root `i` of [`OVER_CEILING`]: its index, repeated to 200 characters.
+pub fn over_ceiling_name(i: usize) -> String {
+    format!("{i:05}").repeat(40)
+}
 
 /// The policy [`Invocation::MergedTypo`] runs under, with `{root}` for its one root's path.
 pub const MERGED_TYPO: &str = "\

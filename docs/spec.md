@@ -1451,7 +1451,7 @@ Measured on macOS 26.5 and source-read for Linux
 | Nestable | **no**: a nested `sandbox_init` returns `EPERM` | stacks (Landlock layers intersect) |
 | Denial errno | `EPERM` | `EACCES`, `EXDEV`, `EPERM` (+ `ENOSYS` if a user-notify supervisor dies) |
 | Out-of-band denial log | kernel log, free | Landlock audit: ABI 7 (6.15+), with preconditions ([§14.5](#145---trace-denials)) |
-| Policy size limit | **65,535 bytes** in one compiled data object (about 6,300 subtree roots as nono emits them, whatever their length; measured on macOS 26.6) | none practical |
+| Policy size limit | **65,535 bytes** in one compiled data object, which holds the granted paths less what neighbouring paths share (measured on macOS 26.6: about 10 bytes a root for names differing only at their end, about 210 for 200-character names differing from the first) | none practical |
 | Deprecated | yes, since 2017, with **no supported successor** | no |
 
 macOS has no alternative mechanism. App Sandbox cannot be imposed on a launched binary.
@@ -1465,9 +1465,12 @@ macOS caps the compiled profile at 65,535 bytes. The limit is reported in `error
 naming the ceiling, the resolved size and the largest-contributing root: the source contributing
 the most path grants, such as `profile:<p>.toolchain`.
 
-On macOS 26.6 `errorbuf` reads `data object length <size> exceeds maximum (<ceiling>)`, reached
-near 6,300 subtree roots, and compiling a profile that large takes the kernel tens of seconds
-before it fails. playpen reads that sentence word for word, and any other sentence keeps its
+On macOS 26.6 `errorbuf` reads `data object length <size> exceeds maximum (<ceiling>)`. The size
+counts the granted paths' bytes less what neighbouring paths share, so the ceiling is reached
+near 6,300 roots whose names differ only at their end, but near 310 whose 200-character names
+differ from the first. A Nix closure sits between: store paths differ from their 33rd character,
+their hash. Compile time grows with the number of rules, so the first shape takes the kernel tens
+of seconds to refuse and the second under one. playpen reads that sentence word for word, and any other sentence keeps its
 own code (`refusal.mechanism.unavailable`, with the text). libsandbox also writes its own account
 of the failure to stderr, so the backend points stderr at `/dev/null` around `sandbox_init`, and
 the refusal stays one line. Only `sandbox_init` knows the compiled size, so the ceiling is found in the

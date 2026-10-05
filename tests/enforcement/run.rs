@@ -25,7 +25,7 @@ use crate::common::{self, PROBE};
 use crate::row::{
     Action, Cause, Checked, Declined, Expected, Fixture, Invocation, Listening, MERGED_TYPO,
     OVER_CEILING, Outcome, Row, Seen, Services, Signalled, Target, Verdict, applies, judge,
-    judge_refusal, judge_unexamined,
+    judge_refusal, judge_unexamined, over_ceiling_name,
 };
 use playpen::refusal::EXIT_REFUSED;
 
@@ -508,7 +508,7 @@ fn decline(invocation: Invocation) -> Declined {
             let tools = held.insert(TempDir::new().expect("toolchain roots"));
             let toolchain: Vec<Value> = (0..OVER_CEILING)
                 .map(|i| {
-                    let root = tools.path().join(format!("root-{i:05}"));
+                    let root = tools.path().join(over_ceiling_name(i));
                     fs::create_dir(&root).expect("toolchain root");
                     serde_json::json!({"path": root})
                 })
