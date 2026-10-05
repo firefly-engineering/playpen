@@ -1,32 +1,48 @@
-//! `playpen explain --run` and `--list` ([spec §14.2]): replay the run records the ring holds.
+//! `playpen explain` ([spec §14.2]). Three questions:
+//!
+//! - `explain [<profile>] [--cwd <path>] [--policy <path>]`: which profile the selection chain
+//!   picks, and the boundary it resolves to — the **resolved form** ([`Resolved`]), every entry
+//!   with its provenance. It refuses as `run` would, for the same reasons.
+//! - `explain --run <id>`: replay a stored run record.
+//! - `explain --list`: the runs the ring holds.
 //!
 //! `explain` launches nothing, so it opens no record of its own ([spec §4.2]) and takes no place
 //! in the ring. It is a report, so it writes to stdout; its refusals are lines on stderr, like a
 //! launch's.
 //!
-//! The human form is rendered from the same [`Record`] the `--json` form prints whole, beside the
-//! exact platform command that pulls the run's denials ([`denials`]).
+//! Each human form is rendered from the same value its `--json` form prints whole: the
+//! [`Resolved`] form, or the [`Record`] beside the exact platform command that pulls the run's
+//! denials ([`denials`]).
 //!
 //! [spec §14.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#142-playpen-explain
 //! [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
 
 use std::io::{self, Write};
-use std::path::Path;
-
-use clap::ArgGroup;
+use std::path::{Path, PathBuf};
 
 use crate::capability::{Access, Scope};
 use crate::code::Code;
+use crate::launch::Host;
+use crate::policy::{Policy, coherence};
 use crate::record::{self, Record, RunId};
 use crate::refusal::{OneLine, Refusal};
+use crate::resolve::{self, NetworkMode, Resolved};
+use crate::select::{self, Outcome, Source, Step};
 
-/// What `explain` was asked. Exactly one of `--run` and `--list`, until `explain [<profile>]`
-/// exists.
+/// What `explain` was asked: a profile's boundary by default, or one of `--run` and `--list`.
 #[derive(Debug, clap::Args)]
-#[command(group(ArgGroup::new("query").required(true).args(["run", "list"])))]
 pub struct Args {
+    /// The profile to resolve. Without one, the selection chain decides: `PLAYPEN_PROFILE`, then
+    /// the working directory.
+    #[arg(conflicts_with_all = ["run", "list"])]
+    profile: Option<String>,
+    /// Select as if run from this directory.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["run", "list"])]
+    cwd: Option<PathBuf>,
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["run", "list"])]
+    policy: Option<PathBuf>,
     /// Replay the record of one run.
-    #[arg(long, value_name = "ID")]
+    #[arg(long, value_name = "ID", conflicts_with = "list")]
     run: Option<String>,
     /// List the runs the ring holds, most recent first.
     #[arg(long)]
@@ -36,10 +52,19 @@ pub struct Args {
     json: bool,
 }
 
-/// Answer `args` from the records under the state directory `state`, writing the report to
-/// `out`. A report that cannot be written has nowhere else to go, so a write error is dropped.
-pub fn explain(args: &Args, state: Option<&Path>, out: &mut impl Write) -> Result<(), Refusal> {
+/// Answer `args` on `host`, writing the report to `out`. A report that cannot be written has
+/// nowhere else to go, so a write error is dropped.
+pub fn explain(args: &Args, host: &Host, out: &mut impl Write) -> Result<(), Refusal> {
+    let state = host.state.as_deref();
     let written = match &args.run {
+        None if !args.list => {
+            let resolved = resolve(args, host)?;
+            if args.json {
+                json(&resolved, out)
+            } else {
+                render_resolved(&resolved, out)
+            }
+        }
         Some(id) => {
             let id = RunId::parse(id)
                 .ok_or_else(|| Refusal::new(Code::RunUnknown, format!("{id:?} is not a run id")))?;
@@ -65,6 +90,115 @@ pub fn explain(args: &Args, state: Option<&Path>, out: &mut impl Write) -> Resul
     };
     let _ = written.and_then(|()| out.flush());
     Ok(())
+}
+
+/// The boundary `args` selects on `host`: the launch sequence's steps 3 to 6 that need no
+/// mechanism, run as `run` runs them, so `explain` refuses where `run` would.
+fn resolve(args: &Args, host: &Host) -> Result<Resolved, Refusal> {
+    let path = host.policies.locate(args.policy.as_deref())?;
+    let loaded = Policy::load(&path)?;
+    let here = host.cwd.as_deref().ok();
+    // A relative `--cwd` or policy is relative to where `explain` was run.
+    let absolute = |path: &Path| match here {
+        Some(here) => here.join(path),
+        None => path.to_owned(),
+    };
+    let cwd = args.cwd.as_deref().map(absolute);
+    let inputs = select::Inputs {
+        explicit: args.profile.as_deref(),
+        env: host.profile.as_deref(),
+        cwd: cwd.as_deref().or(here),
+    };
+    let (trace, selected) = select::select(&loaded.policy, inputs);
+    let name = selected?;
+    let Some(profile) = loaded.policy.profiles.get(&name) else {
+        return Err(Refusal::new(
+            Code::SelectionUnknownProfile,
+            format!("profile {name:?} is not in the policy"),
+        ));
+    };
+    coherence::check(&loaded)?;
+    let caps = resolve::capabilities(&loaded.policy, profile)?;
+    record::refuse_if_reachable(host.state.as_deref(), &caps.paths)?;
+    Ok(Resolved::new(absolute(&path), trace, name, &caps))
+}
+
+/// The resolved form, section by section: the selection trace, then the capability set.
+fn render_resolved(resolved: &Resolved, out: &mut impl Write) -> io::Result<()> {
+    writeln!(
+        out,
+        "policy    {}",
+        OneLine(&resolved.policy.display().to_string())
+    )?;
+    writeln!(out, "profile   {}", OneLine(&resolved.profile))?;
+    render_selection(&resolved.selection, out)?;
+    writeln!(out, "paths")?;
+    for path in &resolved.paths {
+        render_grant(&path.path, path.access, path.scope, &path.from, out)?;
+    }
+    for service in &resolved.mach_services {
+        writeln!(
+            out,
+            "  mach-lookup       {}  (from {})",
+            OneLine(&service.name),
+            OneLine(&service.from)
+        )?;
+    }
+    let mode = match resolved.network.mode {
+        NetworkMode::AllowAll => "allow-all",
+    };
+    writeln!(
+        out,
+        "network   {mode}  (from {})",
+        OneLine(&resolved.network.from)
+    )
+}
+
+/// The selection trace, one step a line.
+fn render_selection(trace: &[Step], out: &mut impl Write) -> io::Result<()> {
+    writeln!(out, "selection")?;
+    for step in trace {
+        let source = match step.step {
+            Source::Explicit => "explicit",
+            Source::Environment => "environment",
+            Source::Cwd => "cwd",
+        };
+        let outcome = match &step.outcome {
+            Outcome::Skipped { reason } => format!("skipped   {reason}"),
+            Outcome::Selected {
+                profile,
+                prefix: Some(prefix),
+            } => format!("selected  {profile} (prefix {})", prefix.display()),
+            Outcome::Selected { profile, .. } => format!("selected  {profile}"),
+            Outcome::Refused { code } => format!("refused   {code}"),
+        };
+        writeln!(out, "  {source:<11} {}", OneLine(&outcome))?;
+    }
+    Ok(())
+}
+
+/// One path grant on one line, whatever bytes its path carries.
+fn render_grant(
+    path: &Path,
+    access: Access,
+    scope: Scope,
+    from: &str,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    let access = match access {
+        Access::Read => "read",
+        Access::ReadWrite => "readwrite",
+    };
+    let scope = match scope {
+        Scope::Subtree => "subtree",
+        Scope::Literal => "literal",
+    };
+    writeln!(
+        out,
+        "  {access:<9} {scope:<7} {}  (from {})",
+        OneLine(&path.display().to_string()),
+        OneLine(from)
+    )
 }
 
 /// What `explain --run` reports: the stored record whole, and the command that pulls its denials.
@@ -130,26 +264,16 @@ fn render_run(replay: &Replay, out: &mut impl Write) -> io::Result<()> {
     for (name, value) in fields {
         writeln!(out, "{name:<9} {}", OneLine(&value))?;
     }
+    // A record written before selection was traced holds none.
+    if let Some(trace) = &record.selection {
+        render_selection(trace, out)?;
+    }
     let Some(caps) = &record.capabilities else {
         return writeln!(out, "capabilities -");
     };
     writeln!(out, "capabilities")?;
     for grant in &caps.paths {
-        let access = match grant.access {
-            Access::Read => "read",
-            Access::ReadWrite => "readwrite",
-        };
-        let scope = match grant.scope {
-            Scope::Subtree => "subtree",
-            Scope::Literal => "literal",
-        };
-        let path = grant.path.display().to_string();
-        writeln!(
-            out,
-            "  {access:<9} {scope:<7} {}  (from {})",
-            OneLine(&path),
-            OneLine(&grant.from)
-        )?;
+        render_grant(&grant.path, grant.access, grant.scope, &grant.from, out)?;
     }
     for service in &caps.mach_services {
         writeln!(out, "  mach-lookup       {}", OneLine(service))?;

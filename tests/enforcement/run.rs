@@ -228,6 +228,7 @@ pub fn as_playpen_offering_nothing(
         cwd,
         state,
         policies: playpen::policy::SearchPath::of(Vec::new()),
+        profile: None,
     };
     playpen::launch::main(argv, host, || {
         Mechanism::new("a mechanism offering nothing", &[])

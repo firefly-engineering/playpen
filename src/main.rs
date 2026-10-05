@@ -6,6 +6,7 @@ fn main() {
         cwd: std::env::current_dir(),
         state: playpen::record::state_dir(var("XDG_STATE_HOME"), var("HOME")),
         policies: playpen::policy::SearchPath::new(var("XDG_CONFIG_HOME"), var("HOME")),
+        profile: var(playpen::select::ENV),
     };
     let status = playpen::launch::main(
         std::env::args_os(),

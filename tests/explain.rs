@@ -184,10 +184,16 @@ fn explain_with_no_state_directory_is_state_io() {
     assert_explain_refused(&output, "refusal.state.io");
 }
 
+/// A profile's boundary, one run's record, or the ring: never two at once. A bare `explain` is the
+/// first, with the selection chain naming the profile.
 #[test]
 fn explain_asks_one_question() {
     let fx = Fixture::new();
-    for args in [&["explain"][..], &["explain", "--list", "--run", "x"]] {
+    for args in [
+        &["explain", "--list", "--run", "x"][..],
+        &["explain", "p", "--list"],
+        &["explain", "--cwd", "/", "--run", "x"],
+    ] {
         let output = fx.playpen(args).output().expect("playpen");
         assert_refused(&output, "refusal.invocation.usage");
     }
@@ -233,4 +239,155 @@ fn a_request_for_help_opens_no_record() {
         assert!(!output.stderr.is_empty(), "help goes to stderr");
     }
     assert_eq!(fx.run_ids(), Vec::<String>::new());
+}
+
+/// `explain <profile>` with `args`, with no `PLAYPEN_PROFILE` of the caller's own unless `env`
+/// gives one.
+fn explain_profile(fx: &Fixture, args: &[&str], env: Option<&str>) -> std::process::Command {
+    let mut command = fx.playpen(&["explain"]);
+    command
+        .args(args)
+        .arg("--policy")
+        .arg(&fx.policy)
+        .env_remove("PLAYPEN_PROFILE");
+    if let Some(profile) = env {
+        command.env("PLAYPEN_PROFILE", profile);
+    }
+    command
+}
+
+fn resolved(fx: &Fixture, args: &[&str], env: Option<&str>) -> Value {
+    let before = fx.run_ids();
+    let output = explain_profile(fx, args, env)
+        .arg("--json")
+        .output()
+        .expect("playpen explain");
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_eq!(fx.run_ids(), before, "explain launches nothing");
+    serde_json::from_slice(&output.stdout).expect("JSON")
+}
+
+#[test]
+fn explain_resolves_a_profile_with_provenance_on_every_entry() {
+    let fx = Fixture::new();
+    let form = resolved(&fx, &["p"], None);
+    assert_eq!(form["profile"], "p");
+    assert_eq!(form["policy"], fx.policy.to_str().unwrap());
+    assert_eq!(
+        form["selection"],
+        serde_json::json!([{"step": "explicit", "outcome": "selected", "profile": "p"}])
+    );
+    let paths = form["paths"].as_array().expect("paths");
+    let root = fx.root().canonicalize().expect("root");
+    assert!(
+        paths.iter().any(|p| p["path"] == root.to_str().unwrap()
+            && p["access"] == "readwrite"
+            && p["from"] == "workspace:w.roots[0]"),
+        "{form}"
+    );
+    assert!(paths.iter().any(|p| p["from"] == "floor"), "{form}");
+    let entries = paths
+        .iter()
+        .chain(form["mach_services"].as_array().expect("services"))
+        .chain([&form["network"]]);
+    for entry in entries {
+        assert!(
+            entry["from"].as_str().is_some_and(|from| !from.is_empty()),
+            "an entry without provenance: {entry}"
+        );
+    }
+    assert_eq!(
+        form["network"],
+        serde_json::json!({"mode": "allow-all", "from": "built-in"})
+    );
+}
+
+/// The human form is rendered from the JSON one: every path and its provenance appear in it.
+#[test]
+fn the_human_form_shows_what_the_json_form_holds() {
+    let fx = Fixture::new();
+    let form = resolved(&fx, &["p"], None);
+    let output = explain_profile(&fx, &["p"], None)
+        .output()
+        .expect("playpen explain");
+    assert!(output.status.success(), "{output:?}");
+    let human = String::from_utf8(output.stdout).expect("utf-8");
+    assert!(human.contains("selected  p"), "{human}");
+    assert!(
+        human.contains("network   allow-all  (from built-in)"),
+        "{human}"
+    );
+    for path in form["paths"].as_array().expect("paths") {
+        let line = format!(
+            "{}  (from {})",
+            path["path"].as_str().unwrap(),
+            path["from"].as_str().unwrap()
+        );
+        assert!(human.contains(&line), "{line} missing from {human}");
+    }
+}
+
+#[test]
+fn explain_selects_from_the_environment_then_the_working_directory() {
+    let fx = Fixture::new();
+    let form = resolved(&fx, &[], Some("p"));
+    assert_eq!(form["selection"][1]["step"], "environment");
+    assert_eq!(form["selection"][1]["outcome"], "selected");
+
+    // A policy whose one profile is selected by a prefix: the fixture's root.
+    let root = fx.root().canonicalize().expect("root");
+    let policy = fx.policy_dir.path().join("prefixed.json");
+    let document = serde_json::json!({
+        "version": 1,
+        "workspaces": {"w": {"roots": [{"path": root, "mode": "read"}]}},
+        "profiles": {"p": {"prefixes": [root], "workspaces": ["w"], "toolchain": []}},
+    });
+    std::fs::write(&policy, document.to_string()).expect("policy");
+    let output = fx
+        .playpen(&[
+            "explain",
+            "--json",
+            "--policy",
+            policy.to_str().unwrap(),
+            "--cwd",
+        ])
+        .arg(root.join("sub"))
+        .env_remove("PLAYPEN_PROFILE")
+        .output()
+        .expect("playpen explain");
+    assert!(output.status.success(), "{output:?}");
+    let form: Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    assert_eq!(
+        form["selection"][2],
+        serde_json::json!({
+            "step": "cwd", "outcome": "selected", "profile": "p", "prefix": root,
+        })
+    );
+
+    let output = fx
+        .playpen(&[
+            "explain",
+            "--policy",
+            policy.to_str().unwrap(),
+            "--cwd",
+            "/",
+        ])
+        .env_remove("PLAYPEN_PROFILE")
+        .output()
+        .expect("playpen explain");
+    assert_explain_refused(&output, "refusal.selection.no-match");
+}
+
+#[test]
+fn explain_refuses_where_run_would() {
+    let fx = Fixture::new();
+    let output = explain_profile(&fx, &["nope"], None)
+        .output()
+        .expect("playpen explain");
+    assert_explain_refused(&output, "refusal.selection.unknown-profile");
+    let output = explain_profile(&fx, &[], Some("nope"))
+        .output()
+        .expect("playpen explain");
+    assert_explain_refused(&output, "refusal.selection.unknown-profile");
 }

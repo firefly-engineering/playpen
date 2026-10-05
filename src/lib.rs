@@ -13,6 +13,7 @@ pub mod mechanism;
 pub mod policy;
 pub mod record;
 pub mod refusal;
+pub mod resolve;
 pub mod schema;
 pub mod select;
 pub mod self_test;

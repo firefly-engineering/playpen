@@ -13,16 +13,17 @@ use clap::error::{ContextKind, ErrorKind};
 use clap::{Parser, Subcommand};
 
 use crate::backend;
-use crate::capability::{PathGrant, Scope};
+use crate::capability::PathGrant;
 use crate::check;
 use crate::child;
 use crate::code::Code;
 use crate::explain;
 use crate::floor::floor;
 use crate::mechanism::{self, Mechanism};
-use crate::policy::{Policy, Profile, SearchPath, coherence};
+use crate::policy::{Policy, SearchPath, coherence};
 use crate::record::{self, RunId, RunRecord};
 use crate::refusal::{EXIT_REFUSED, Refusal};
+use crate::resolve;
 use crate::select;
 use crate::self_test;
 
@@ -37,7 +38,8 @@ struct Cli {
 enum Command {
     /// Run a target confined under a profile.
     Run(RunArgs),
-    /// Replay a stored run record, or list the runs the ring holds.
+    /// Show the boundary a profile resolves to, replay a stored run record, or list the runs the
+    /// ring holds.
     Explain(explain::Args),
     /// Validate a policy without launching anything.
     Check(check::Args),
@@ -70,6 +72,8 @@ pub struct Host {
     pub state: Option<PathBuf>,
     /// Where to look for the policy when `--policy` is not given.
     pub policies: SearchPath,
+    /// `PLAYPEN_PROFILE`, the selection chain's second step. `run` never reads it.
+    pub profile: Option<OsString>,
 }
 
 /// Run playpen with `args` (including `argv[0]`) on `host`. Returns the process exit status; on a
@@ -83,11 +87,6 @@ pub fn main(
     host: Host,
     probe: impl FnOnce() -> Mechanism,
 ) -> i32 {
-    let Host {
-        cwd,
-        state,
-        policies,
-    } = host;
     // Parsing has no effect, so it can come first. `explain` and `check` launch nothing
     // ([spec §14.2], [spec §10.5]), so they open no record and push no run out of the ring, and nor
     // does a request for help; anything else is a launch, and a command line that does not parse
@@ -97,17 +96,17 @@ pub fn main(
     // [spec §10.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#105-validation-tiers
     let parsed = match Cli::try_parse_from(args) {
         Ok(Cli {
-            command: Command::Check(args),
+            command: Command::Explain(args),
         }) => {
-            return match check::check(&args, &policies) {
+            return match explain::explain(&args, &host, &mut std::io::stdout().lock()) {
                 Ok(()) => 0,
                 Err(refusal) => refuse(&refusal, None),
             };
         }
         Ok(Cli {
-            command: Command::Explain(args),
+            command: Command::Check(args),
         }) => {
-            return match explain::explain(&args, state.as_deref(), &mut std::io::stdout().lock()) {
+            return match check::check(&args, &host.policies) {
                 Ok(()) => 0,
                 Err(refusal) => refuse(&refusal, None),
             };
@@ -122,6 +121,13 @@ pub fn main(
         }
         Err(err) => Err(err),
     };
+    // `run` resolves no context of its own, so `PLAYPEN_PROFILE` is not one of its inputs.
+    let Host {
+        cwd,
+        state,
+        policies,
+        profile: _,
+    } = host;
     // Step 1, before anything that can refuse, so that every refusal leaves a record.
     let run = match RunId::allocate() {
         Ok(run) => run,
@@ -239,7 +245,7 @@ fn run(
     })?;
     // Step 5.
     coherence::check(&loaded)?;
-    let roots = resolve_roots(&loaded.policy, selected)?;
+    let roots = resolve::roots(&loaded.policy, selected)?;
     check_cwd(cwd, &roots)?;
     // Step 7, on every launch, never from a cached verdict: the mechanism first, so a missing
     // capability is named as such rather than surfacing as a canary that could not be confined.
@@ -270,36 +276,6 @@ fn run(
     )
 }
 
-/// The selected profile's brought roots, canonicalised, as path grants with provenance. The
-/// coherence tier has already refused an undeclared workspace and a relative root.
-fn resolve_roots(policy: &Policy, selected: &Profile) -> Result<Vec<PathGrant>, Refusal> {
-    let mut grants = Vec::new();
-    for name in selected.workspaces.iter().map(|name| &name.value) {
-        let Some(workspace) = policy.workspaces.get(name) else {
-            continue;
-        };
-        for (i, root) in workspace.roots.iter().enumerate() {
-            let from = format!("workspace:{name}.roots[{i}]");
-            let path = root.path.canonicalize().map_err(|e| {
-                Refusal::new(
-                    Code::RootMissing,
-                    format!("{from}: root {} is unavailable: {e}", root.path.display()),
-                )
-            })?;
-            grants.push(PathGrant {
-                path,
-                access: root.mode.into(),
-                scope: Scope::Subtree,
-                from,
-                // Policy-declared, so never exempt: a brought root of `~` is exactly the breach
-                // the state-reachability check exists to refuse (ADR 0027).
-                state_derived: false,
-            });
-        }
-    }
-    Ok(grants)
-}
-
 /// The child starts in the caller's CWD, which must lie inside a granted root ([spec §11.5]).
 ///
 /// [spec §11.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#115-working-directory
@@ -328,7 +304,7 @@ fn cwd_granted(cwd: &Path, roots: &[PathGrant]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capability::Access;
+    use crate::capability::{Access, Scope};
 
     fn root(path: &str) -> PathGrant {
         PathGrant {

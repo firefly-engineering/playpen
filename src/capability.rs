@@ -6,10 +6,11 @@
 
 use std::path::PathBuf;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// What a grant allows. Execution follows readability: every readable path is executable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Access {
     Read,
@@ -17,7 +18,7 @@ pub enum Access {
 }
 
 /// How much of the filesystem a path grant covers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Scope {
     /// The path and, for a directory, everything beneath it.

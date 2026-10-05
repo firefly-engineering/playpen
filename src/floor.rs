@@ -25,7 +25,7 @@ use crate::capability::{Access, CapabilitySet, PathGrant, Scope};
 use crate::code::Code;
 use crate::refusal::Refusal;
 
-const FROM: &str = "floor";
+pub const FROM: &str = "floor";
 
 #[cfg(target_os = "macos")]
 const PATHS: &[(&str, Scope)] = &[

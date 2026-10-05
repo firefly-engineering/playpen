@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Resolved",
+  "description": "The resolved form: what `explain --json` prints, and what its human form is rendered from.",
+  "type": "object",
+  "properties": {
+    "policy": {
+      "description": "The policy document the boundary was resolved from.",
+      "type": "string"
+    },
+    "selection": {
+      "description": "How the profile was selected: each step up to the one that selected.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Step"
+      }
+    },
+    "profile": {
+      "type": "string"
+    },
+    "paths": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ResolvedPath"
+      }
+    },
+    "mach_services": {
+      "description": "macOS Mach services the child may look up; every other service is denied.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ResolvedService"
+      }
+    },
+    "network": {
+      "$ref": "#/$defs/ResolvedNetwork"
+    }
+  },
+  "required": [
+    "policy",
+    "selection",
+    "profile",
+    "paths",
+    "mach_services",
+    "network"
+  ],
+  "$defs": {
+    "Step": {
+      "description": "One step of the chain, and what came of it.",
+      "type": "object",
+      "properties": {
+        "step": {
+          "$ref": "#/$defs/Source"
+        }
+      },
+      "required": [
+        "step"
+      ],
+      "oneOf": [
+        {
+          "description": "The step had no input: no `--profile`, no `PLAYPEN_PROFILE`, or no prefix containing the\nworking directory.",
+          "type": "object",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "skipped"
+            }
+          },
+          "required": [
+            "outcome",
+            "reason"
+          ]
+        },
+        {
+          "description": "The step chose `profile`; for the CWD step, by the prefix that matched.",
+          "type": "object",
+          "properties": {
+            "profile": {
+              "type": "string"
+            },
+            "prefix": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "outcome": {
+              "type": "string",
+              "const": "selected"
+            }
+          },
+          "required": [
+            "outcome",
+            "profile"
+          ]
+        },
+        {
+          "description": "The step had an input and it refused: the refusal's code.",
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "refused"
+            }
+          },
+          "required": [
+            "outcome",
+            "code"
+          ]
+        }
+      ]
+    },
+    "Source": {
+      "type": "string",
+      "enum": [
+        "explicit",
+        "environment",
+        "cwd"
+      ]
+    },
+    "ResolvedPath": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "access": {
+          "$ref": "#/$defs/Access"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "from": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "access",
+        "scope",
+        "from"
+      ]
+    },
+    "Access": {
+      "description": "What a grant allows. Execution follows readability: every readable path is executable.",
+      "type": "string",
+      "enum": [
+        "read",
+        "readwrite"
+      ]
+    },
+    "Scope": {
+      "description": "How much of the filesystem a path grant covers.",
+      "oneOf": [
+        {
+          "description": "The path and, for a directory, everything beneath it.",
+          "type": "string",
+          "const": "subtree"
+        },
+        {
+          "description": "The path itself and nothing beneath it.",
+          "type": "string",
+          "const": "literal"
+        }
+      ]
+    },
+    "ResolvedService": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "from": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "from"
+      ]
+    },
+    "ResolvedNetwork": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/NetworkMode"
+        },
+        "from": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode",
+        "from"
+      ]
+    },
+    "NetworkMode": {
+      "description": "playpen confines no network traffic ([spec §6.1]): the one mode there is.\n\n[spec §6.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#61-what-is-not-confined",
+      "type": "string",
+      "enum": [
+        "allow-all"
+      ]
+    }
+  }
+}
