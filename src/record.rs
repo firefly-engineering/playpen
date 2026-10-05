@@ -29,6 +29,7 @@ use crate::capability::{Access, CapabilitySet, PathGrant, Scope};
 use crate::code::Code;
 use crate::fault::Fault;
 use crate::refusal::Refusal;
+use crate::select::Trace;
 
 /// The record format this playpen writes. A reader branches on it before anything else.
 pub const FORMAT: u32 = 1;
@@ -199,6 +200,10 @@ pub struct Record {
     pub policy: Option<PathBuf>,
     /// The resolved profile.
     pub profile: Option<String>,
+    /// How the profile was selected ([`crate::select`]): each step up to the one that selected or
+    /// refused. Additive, so a record written before selection was traced still reads.
+    #[serde(default)]
+    pub selection: Option<Trace>,
     /// The capability set the child was confined under.
     pub capabilities: Option<CapabilitySet>,
     pub launched_at_unix_ms: Option<u64>,
@@ -339,6 +344,7 @@ impl RunRecord {
             kind: None,
             policy: None,
             profile: None,
+            selection: None,
             capabilities: None,
             launched_at_unix_ms: None,
             pid: None,
@@ -393,9 +399,10 @@ impl RunRecord {
         self.record.policy = Some(policy.to_path_buf());
     }
 
-    /// The resolved profile.
-    pub fn profile(&mut self, profile: &str) {
-        self.record.profile = Some(profile.to_string());
+    /// The selection trace, and the profile it selected if it did.
+    pub fn selection(&mut self, trace: &Trace, profile: Option<&str>) {
+        self.record.selection = Some(trace.clone());
+        self.record.profile = profile.map(str::to_owned);
     }
 
     /// Complete the record before the fork ([spec §4.2], step 15): the capability set and the
@@ -740,7 +747,14 @@ mod tests {
         assert_eq!(opened.run, id.as_str());
         assert_eq!(opened.refusal, None);
 
-        record.profile("p");
+        let trace = vec![crate::select::Step {
+            step: crate::select::Source::Explicit,
+            outcome: crate::select::Outcome::Selected {
+                profile: "p".into(),
+                prefix: None,
+            },
+        }];
+        record.selection(&trace, Some("p"));
         let caps = CapabilitySet {
             paths: vec![PathGrant {
                 path: "/src/playpen".into(),

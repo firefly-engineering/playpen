@@ -34,6 +34,11 @@ fn a_successful_run_records_policy_profile_capabilities_pid_and_timestamps() {
     assert_eq!(record["format"], 1);
     assert_eq!(record["policy"], fx.policy.to_str().unwrap());
     assert_eq!(record["profile"], "p");
+    // `run` names its profile, so the chain is its explicit step alone.
+    assert_eq!(
+        record["selection"],
+        serde_json::json!([{"step": "explicit", "outcome": "selected", "profile": "p"}])
+    );
     assert_eq!(record["kind"], "claude");
     assert_eq!(record["pid"], pid);
     assert_eq!(record["status"], 3);
@@ -174,5 +179,28 @@ fn a_relative_policy_path_is_recorded_absolute() {
     assert_eq!(
         recorded.canonicalize().expect("names the file"),
         fx.policy.canonicalize().expect("policy")
+    );
+}
+
+/// The run that refuses is the one whose record is most wanted, so its trace is kept too.
+#[test]
+fn a_refused_selection_records_its_trace() {
+    let fx = Fixture::new();
+    let output = fx
+        .playpen(&["run", "--profile", "nope", "--agent", "claude", "--policy"])
+        .arg(&fx.policy)
+        .args(["--", "true"])
+        .output()
+        .expect("playpen");
+    assert_refused(&output, "refusal.selection.unknown-profile");
+    let record = the_only_record(&fx);
+    assert_eq!(record["profile"], Value::Null);
+    assert_eq!(
+        record["selection"],
+        serde_json::json!([{
+            "step": "explicit",
+            "outcome": "refused",
+            "code": "refusal.selection.unknown-profile",
+        }])
     );
 }

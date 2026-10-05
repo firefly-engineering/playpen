@@ -23,6 +23,7 @@ use crate::mechanism::{self, Mechanism};
 use crate::policy::{Policy, Profile, SearchPath, coherence};
 use crate::record::{self, RunId, RunRecord};
 use crate::refusal::{EXIT_REFUSED, Refusal};
+use crate::select;
 use crate::self_test;
 
 #[derive(Debug, Parser)]
@@ -220,18 +221,22 @@ fn run(
         Err(_) => record.policy(policy_path),
     }
     let loaded = Policy::load(policy_path)?;
-    // Step 4. `run` takes its profile explicitly and resolves no context of its own.
-    let selected = loaded.policy.profiles.get(profile).ok_or_else(|| {
-        let known: Vec<_> = loaded.policy.profiles.keys().map(String::as_str).collect();
+    // Step 4. `run` takes its profile explicitly and resolves no context of its own, so its chain
+    // is the explicit step alone.
+    let inputs = select::Inputs {
+        explicit: Some(profile),
+        env: None,
+        cwd: cwd.as_deref().ok(),
+    };
+    let (trace, selected) = select::select(&loaded.policy, inputs);
+    record.selection(&trace, selected.as_deref().ok());
+    let selected = selected?;
+    let selected = loaded.policy.profiles.get(&selected).ok_or_else(|| {
         Refusal::new(
             Code::SelectionUnknownProfile,
-            format!(
-                "profile {profile:?} is not in the policy; known profiles: {}",
-                known.join(", ")
-            ),
+            format!("profile {selected:?} is not in the policy"),
         )
     })?;
-    record.profile(profile);
     // Step 5.
     coherence::check(&loaded)?;
     let roots = resolve_roots(&loaded.policy, selected)?;

@@ -14,5 +14,6 @@ pub mod policy;
 pub mod record;
 pub mod refusal;
 pub mod schema;
+pub mod select;
 pub mod self_test;
 pub mod supervisor;
