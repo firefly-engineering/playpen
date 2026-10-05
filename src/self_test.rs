@@ -77,7 +77,7 @@ pub fn canary(caps: &CapabilitySet) -> Result<(), Refusal> {
     }
     let mut command = Command::new(&path);
     // The canary's refusal is carried inside the self-test's own line, which names the run.
-    let started = child::spawn_confined(caps, &mut command, None, || {
+    let started = child::spawn_confined(caps, &mut command, None, None, || {
         redirect(&null, 0)?;
         redirect(&null, 1)?;
         redirect(&writer, 2)

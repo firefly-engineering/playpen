@@ -4,6 +4,8 @@
 
 #![allow(dead_code)] // each suite uses its own subset
 
+use std::fs::File;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -185,4 +187,33 @@ pub fn verdict(output: Output) -> Value {
 
 pub fn probe_outside(args: &[&str]) -> Value {
     verdict(Command::new(PROBE).args(args).output().expect("run probe"))
+}
+
+/// A new pseudo-terminal: the master, and the slave as a file.
+pub fn pty() -> (OwnedFd, File) {
+    // SAFETY: posix_openpt has no memory preconditions.
+    let master = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
+    assert!(master >= 0, "posix_openpt");
+    // SAFETY: `master` is a fresh descriptor nothing else owns.
+    let master = unsafe { OwnedFd::from_raw_fd(master) };
+    // SAFETY: grantpt and unlockpt act on the master descriptor only.
+    unsafe {
+        assert_eq!(libc::grantpt(master.as_raw_fd()), 0, "grantpt");
+        assert_eq!(libc::unlockpt(master.as_raw_fd()), 0, "unlockpt");
+    }
+    // SAFETY: ptsname returns null or a NUL-terminated string, read before any other pty call.
+    let name = unsafe {
+        let name = libc::ptsname(master.as_raw_fd());
+        assert!(!name.is_null(), "ptsname");
+        std::ffi::CStr::from_ptr(name)
+            .to_str()
+            .expect("utf-8")
+            .to_owned()
+    };
+    let slave = File::options()
+        .read(true)
+        .write(true)
+        .open(name)
+        .expect("open slave");
+    (master, slave)
 }

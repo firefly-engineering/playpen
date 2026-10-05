@@ -1079,9 +1079,10 @@ playpen owes this contract to its callers regardless of backend
 
 - **stdio is inherited untouched.** No PTY, no piping, no interposition.
 - **stdout is sacred**: a run never writes to it. Diagnostics go to stderr.
-- Catchable **signals are forwarded** to the child. The child stays in the caller's process
-  group, its job, so a pipeline around playpen keeps the terminal and the terminal's own
-  signals reach the child directly. A signal sent to playpen therefore **reaches the agent
+- Catchable **signals are forwarded** to the child, from the moment it exists: a signal sent
+  while it is still preparing to `exec` the target reaches it too. The child stays in the
+  caller's process group, its job, so a pipeline around playpen keeps the terminal and the
+  terminal's own signals reach the child directly. A signal sent to playpen therefore **reaches the agent
   exactly once, where the platform can tell** — which syscall discriminates is a backend matter
   ([§15.4](#154-named-asymmetries)), and the one case no platform can tell is the twelfth named
   residual ([§18](#18-named-residuals)). A job stop stops playpen with the child, by the

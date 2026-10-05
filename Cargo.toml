@@ -37,6 +37,12 @@ toml = "0.9"
 name = "floor_self_test"
 harness = false
 
+# Re-runs itself as each job, so the signals a supervisor holds for its whole life are never the
+# test's own: a harness of its own, since libtest would not hand over `main`.
+[[test]]
+name = "pre_exec"
+harness = false
+
 # The enforcement suite (spec §17). Its `P-canary` row is the floor self-test, so it too runs
 # outside the libtest harness.
 [[test]]

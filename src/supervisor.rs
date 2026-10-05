@@ -29,6 +29,7 @@
 //! [spec §11.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#116-process-transparency
 
 use std::mem::MaybeUninit;
+use std::os::fd::{AsRawFd, BorrowedFd};
 
 use libc::{c_int, pid_t, sigset_t};
 
@@ -146,6 +147,9 @@ pub struct HeldSignals {
     /// ignore. An ignored one stays ignored, and the child inherits that, as `nohup` relies on.
     held: Vec<c_int>,
     set: sigset_t,
+    /// `set` without `SIGCHLD`: what is forwarded before the child has `exec`ed, while the wait
+    /// for the child is not yet the supervisor's to take.
+    forwarded: sigset_t,
     /// The mask the caller gave playpen, restored in the child before `exec`.
     caller_mask: sigset_t,
 }
@@ -194,9 +198,13 @@ impl HeldSignals {
                 std::io::Error::from_raw_os_error(err),
             ));
         }
+        let mut forwarded = set;
+        // SAFETY: `forwarded` is an initialised copy of `set`.
+        unsafe { libc::sigdelset(&mut forwarded, libc::SIGCHLD) };
         Ok(Self {
             held,
             set,
+            forwarded,
             caller_mask,
         })
     }
@@ -233,17 +241,74 @@ impl HeldSignals {
                 }
                 continue;
             }
-            if !child_already_has(sig, origin) {
-                // A child already gone has nobody left to tell; its exit arrives as SIGCHLD.
-                // SAFETY: kill has no memory preconditions.
-                unsafe { libc::kill(child, sig) };
+            deliver(child, sig, origin);
+        }
+    }
+
+    /// Forward held signals to `child` until `report` is ready to read: the child has `exec`ed,
+    /// which closes it empty, or has refused or died, which writes to it or closes it. A signal
+    /// sent to playpen reaches the child from the moment it exists, not only once it has
+    /// `exec`ed ([#117](https://github.com/firefly-engineering/playpen/issues/117)); the child has
+    /// released its signals by then, so one forwarded acts on it as on the target.
+    ///
+    /// `SIGCHLD` is left pending for [`supervise`](Self::supervise). The pipe is polled at an
+    /// interval, so nothing runs in a signal handler and no platform needs a descriptor for its
+    /// signals; the window is normally microseconds, and `poll` returns as soon as it closes.
+    pub fn forward_until_ready(&self, child: pid_t, report: BorrowedFd<'_>) {
+        loop {
+            let mut ready = libc::pollfd {
+                fd: report.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: `ready` is one valid pollfd for the duration of the call.
+            match unsafe { libc::poll(&mut ready, 1, FORWARD_POLL_MS) } {
+                0 => {}
+                // Interrupted is not ready; any other failure is left to the read that follows.
+                -1 if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {
+                }
+                _ => return,
             }
-            if is_job_stop(sig) {
-                // The handler replaced the default stop, so stop as the rest of the job does: the
-                // caller's shell waits for every process in it. Its `SIGCONT` resumes us.
-                stop_as_the_job(sig);
+            while pending(&self.forwarded) {
+                if let Some((sig, origin)) = take(&self.forwarded) {
+                    deliver(child, sig, origin);
+                }
             }
         }
+    }
+}
+
+/// How long [`HeldSignals::forward_until_ready`] waits on the report pipe before looking for a
+/// held signal: the most a signal sent in the pre-`exec` window waits to be forwarded.
+const FORWARD_POLL_MS: c_int = 10;
+
+/// Whether any signal in `set` is pending, so that taking one returns at once.
+fn pending(set: &sigset_t) -> bool {
+    let mut pending = empty_set();
+    // SAFETY: `pending` is initialised; sigpending fills it.
+    if unsafe { libc::sigpending(&mut pending) } != 0 {
+        return false;
+    }
+    forwardable()
+        .into_iter()
+        // SAFETY: both sets are initialised; sigismember only reads them.
+        .any(|sig| unsafe {
+            libc::sigismember(&pending, sig) == 1 && libc::sigismember(set, sig) == 1
+        })
+}
+
+/// Forward `sig` to `child` unless it has it already, then stop with the job if it was a job
+/// stop. The one place a held signal is acted on, before `exec` and after.
+fn deliver(child: pid_t, sig: c_int, origin: Origin) {
+    if !child_already_has(sig, origin) {
+        // A child already gone has nobody left to tell; its exit arrives as SIGCHLD.
+        // SAFETY: kill has no memory preconditions.
+        unsafe { libc::kill(child, sig) };
+    }
+    if is_job_stop(sig) {
+        // The handler replaced the default stop, so stop as the rest of the job does: the
+        // caller's shell waits for every process in it. Its `SIGCONT` resumes us.
+        stop_as_the_job(sig);
     }
 }
 

@@ -7,7 +7,7 @@ mod common;
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::Arc;
@@ -17,7 +17,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use common::{Fixture, os_bin};
+use common::{Fixture, os_bin, pty};
 
 /// The (device, inode) of an open file, as the probe's `stdio` action reports it.
 fn identity(file: &File) -> Value {
@@ -297,35 +297,6 @@ fn the_agent_does_not_outlive_a_killed_supervisor() {
         status, None,
         "playpen died by the signal rather than exiting with a status"
     );
-}
-
-/// A new pseudo-terminal: the master, and the slave as a file.
-fn pty() -> (OwnedFd, File) {
-    // SAFETY: posix_openpt has no memory preconditions.
-    let master = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
-    assert!(master >= 0, "posix_openpt");
-    // SAFETY: `master` is a fresh descriptor nothing else owns.
-    let master = unsafe { OwnedFd::from_raw_fd(master) };
-    // SAFETY: grantpt and unlockpt act on the master descriptor only.
-    unsafe {
-        assert_eq!(libc::grantpt(master.as_raw_fd()), 0, "grantpt");
-        assert_eq!(libc::unlockpt(master.as_raw_fd()), 0, "unlockpt");
-    }
-    // SAFETY: ptsname returns null or a NUL-terminated string, read before any other pty call.
-    let name = unsafe {
-        let name = libc::ptsname(master.as_raw_fd());
-        assert!(!name.is_null(), "ptsname");
-        std::ffi::CStr::from_ptr(name)
-            .to_str()
-            .expect("utf-8")
-            .to_owned()
-    };
-    let slave = File::options()
-        .read(true)
-        .write(true)
-        .open(name)
-        .expect("open slave");
-    (master, slave)
 }
 
 /// Run `command` as the leader of a new session whose controlling terminal is `slave`, on stdin.

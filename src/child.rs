@@ -22,6 +22,10 @@ use crate::supervisor::HeldSignals;
 /// `on_exec` receives the child's pid once the target has been `exec`ed. Returns the status the
 /// supervisor exits with. `run` names the run on a refusal line the child has to write itself.
 ///
+/// `prepare` runs in the child once its signals are its own again and before it is confined: the
+/// launch has nothing to do there, and a test holds the child before `exec` with it. It runs
+/// between `fork` and `exec`, so it is bound by the single-threaded rule below.
+///
 /// `on_fault` records a fault, and is called only on the path that then aborts ([ADR 0024]): once
 /// the agent has run, a status playpen cannot learn is a defect rather than a refusal, so this
 /// never returns an error for it. Both callbacks write the run's record, which the caller owns.
@@ -34,6 +38,7 @@ pub fn run_confined(
     caps: &CapabilitySet,
     argv: &[OsString],
     run: &RunId,
+    prepare: impl FnOnce() -> Result<(), Refusal>,
     on_exec: impl FnOnce(libc::pid_t),
     on_fault: impl FnOnce(&Fault),
 ) -> Result<i32, Refusal> {
@@ -44,9 +49,9 @@ pub fn run_confined(
     command.args(args);
 
     let held = HeldSignals::block()?;
-    let started = spawn_confined(caps, &mut command, Some(run), || {
+    let started = spawn_confined(caps, &mut command, Some(run), Some(&held), || {
         held.release_in_child();
-        Ok(())
+        prepare()
     })?;
     match started {
         Started::Exec(pid) => {
@@ -77,11 +82,12 @@ pub(crate) enum Started {
 /// close-on-exec pipe, which `exec` closes empty, so the supervisor records the code and writes
 /// the line with the run id. `prepare` runs between `fork` and `exec`, so it is bound by the same
 /// single-threaded rule. `run` names the run should the report itself fail and the child have
-/// to write the line.
+/// to write the line. While it waits, signals `forwarding` holds are forwarded to the child.
 pub(crate) fn spawn_confined(
     caps: &CapabilitySet,
     command: &mut Command,
     run: Option<&RunId>,
+    forwarding: Option<&HeldSignals>,
     prepare: impl FnOnce() -> Result<(), Refusal>,
 ) -> Result<Started, Refusal> {
     let pipe_refusal = |e: std::io::Error| {
@@ -111,9 +117,10 @@ pub(crate) fn spawn_confined(
         pid => pid,
     };
     // The child holds the only other write end; the read below ends at its `exec` or its exit.
-    // Signals stay held, not forwarded, until then
-    // ([#117](https://github.com/firefly-engineering/playpen/issues/117)).
     drop(reporter);
+    if let Some(held) = forwarding {
+        held.forward_until_ready(pid, report.as_fd());
+    }
     match read_report(report) {
         None => Ok(Started::Exec(pid)),
         Some(refusal) => {

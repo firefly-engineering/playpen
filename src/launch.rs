@@ -223,6 +223,7 @@ fn run(
         &caps,
         argv,
         &run,
+        || Ok(()),
         |pid| record.borrow_mut().spawned(pid),
         |fault| record.borrow_mut().fault(fault),
     )
