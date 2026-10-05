@@ -614,9 +614,15 @@ The floor is built in, always applied, and **neither widenable nor narrowable by
   lookup: `com.apple.trustd` and `com.apple.trustd.agent` (trust evaluation),
   `com.apple.system.notification_center` (notify), and
   `com.apple.system.opendirectoryd.libinfo` (directory lookup, without which `getpwuid` resolves
-  the user to a bare uid). `com.apple.SecurityServer`, `securityd` and the XPC variant are
-  therefore denied, with no knob to re-add them. No explicit deny list ships, because shipping
-  one would imply the allow-list is permissive.
+  the user to a bare uid). The Keychain's services are therefore denied, with no knob to re-add
+  them: `com.apple.SecurityServer` (file-based keychains, served by `securityd`) and the
+  data-protection keychain's `com.apple.securityd.xpc`, `com.apple.securityd.general`,
+  `com.apple.securityd.ckks`, `com.apple.securityd.sos` and `com.apple.securityd.aps` (served by
+  `secd`). That set is what resolves through the bootstrap server on macOS 15 and macOS 26, where
+  it was measured; it is not promised for other versions. `N-keychain`
+  ([§17.2](#172-rows)) asserts exactly this set and is the live check, so a service a later macOS
+  adds, renames or drops surfaces as that row to update. No explicit deny list ships, because
+  shipping one would imply the allow-list is permissive.
 
 Amended by [#48](https://github.com/firefly-engineering/playpen/issues/48), which measured what an
 ordinary dynamically linked binary needs.

@@ -187,8 +187,11 @@ fn dedicated_grants(dir: &Path) -> Result<Vec<PathGrant>, Refusal> {
 }
 
 /// Mach services: trust evaluation, and the notify and directory-lookup essentials that libSystem
-/// reaches during ordinary startup. The Keychain's services (`com.apple.SecurityServer`,
-/// `securityd`, the XPC variant) are absent and so denied, with no knob to re-add them.
+/// reaches during ordinary startup. The Keychain's services (`com.apple.SecurityServer` and the
+/// `com.apple.securityd.*` family, as `N-keychain` enumerates them) are absent and so denied, with
+/// no knob to re-add them ([spec §8.2]).
+///
+/// [spec §8.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#82-the-floor
 #[cfg(target_os = "macos")]
 const MACH_SERVICES: &[&str] = &[
     "com.apple.trustd",
