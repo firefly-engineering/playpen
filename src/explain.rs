@@ -42,6 +42,12 @@ pub struct Args {
     cwd: Option<PathBuf>,
     #[arg(long, value_name = "PATH", conflicts_with_all = ["run", "list"])]
     policy: Option<PathBuf>,
+    /// Resolve as the shim of this name would: its kind, its pinned profile if it has one, and
+    /// the argv it injects ([spec §11.3]).
+    ///
+    /// [spec §11.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#113-shims
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["run", "list", "profile"])]
+    shim: Option<String>,
     /// Replay the record of one run.
     #[arg(long, value_name = "ID", conflicts_with = "list")]
     run: Option<String>,
@@ -105,8 +111,23 @@ fn resolve(args: &Args, host: &Host) -> Result<Resolved, Refusal> {
         None => path.to_owned(),
     };
     let cwd = args.cwd.as_deref().map(absolute);
+    // Named with `--shim`, the shim decides what `run` would be given: its kind, its pinned
+    // profile if it has one, and the argv it injects ([spec §11.3]).
+    //
+    // [spec §11.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#113-shims
+    let shim = match &args.shim {
+        Some(name) => Some((name.as_str(), shim_named(&loaded, name)?)),
+        None => None,
+    };
+    let kind = match shim {
+        Some((_, shim)) => Some(crate::kind::require(&shim.kind)?),
+        None => None,
+    };
     let inputs = select::Inputs {
-        explicit: args.profile.as_deref(),
+        explicit: args
+            .profile
+            .as_deref()
+            .or_else(|| shim.and_then(|(_, shim)| shim.profile.as_deref())),
         env: host.profile.as_deref(),
         cwd: cwd.as_deref().or(here),
     };
@@ -119,11 +140,24 @@ fn resolve(args: &Args, host: &Host) -> Result<Resolved, Refusal> {
     // Resolved as `run` resolves it. Before any run the directory may not exist, and the first run
     // creates it where it is named, so the path as named is the one that run would resolve.
     let state = state.canonicalize().unwrap_or_else(|_| state.to_owned());
-    let layout = Layout::unlaunched(&state, &loaded.policy, &name, selected, None)
+    let layout = Layout::unlaunched(&state, &loaded.policy, &name, selected, kind)
         .with_home(crate::environment::home(&host.env).as_deref());
     let caps = resolve::capabilities(&loaded.policy, &name, &layout)?;
     let executable = crate::integrity::executable(&host.executable)?;
-    crate::integrity::check(&caps, &absolute(&path), &executable)?;
+    // The shim link, where `--shim` names one and this host has it installed. `explain` was not
+    // invoked through it, so an absent link is not a refusal here, where in a shim launch it is:
+    // the link that launch ran through must exist, because it ran.
+    let link = shim.and_then(|(name, _)| {
+        crate::launch::invoking_link(
+            &std::ffi::OsString::from("playpen"),
+            name,
+            &executable,
+            here,
+            &host.env,
+        )
+        .ok()
+    });
+    crate::integrity::check(&caps, &absolute(&path), &executable, link.as_deref())?;
     record::refuse_if_reachable(host.state.as_deref(), &caps.paths)?;
     // What a run would provision does not exist until a run creates it, and the backend compiles
     // only paths that do, so the budget is checked without it: a handful of entries against a
@@ -133,12 +167,50 @@ fn resolve(args: &Args, host: &Host) -> Result<Resolved, Refusal> {
         .paths
         .retain(|grant| !grant.state_derived || grant.path.exists());
     crate::backend::check(&provisioned)?;
-    // `explain` of a profile names no kind, and a kind is never inferred ([spec §11.2]), so the
-    // kind table's entries are not among what it shows.
+    // `explain` of a profile alone names no kind, and a kind is never inferred ([spec §11.2]), so
+    // the kind table's entries show only where a shim named one.
     //
     // [spec §11.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#112-kind
-    let env = resolve::environment(&loaded.policy, &name, selected, &host.env, &layout, None);
-    Ok(Resolved::new(absolute(&path), trace, name, &caps, &env))
+    let env = resolve::environment(&loaded.policy, &name, selected, &host.env, &layout, kind);
+    // The injected argv, with provenance, shown outward only: it is never projected inward, and
+    // the agent already holds its own argv ([spec §9.3]).
+    //
+    // [spec §9.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#93-inward-and-outward
+    let argv = match shim {
+        Some((name, shim)) => {
+            let mut argv = vec![resolve::InjectedArg {
+                value: shim.target.display().to_string(),
+                from: format!("shim:{name}.target"),
+            }];
+            argv.extend(
+                shim.flags
+                    .iter()
+                    .enumerate()
+                    .map(|(i, flag)| resolve::InjectedArg {
+                        value: flag.clone(),
+                        from: format!("shim:{name}.flags[{i}]"),
+                    }),
+            );
+            argv
+        }
+        None => Vec::new(),
+    };
+    Ok(Resolved::new(absolute(&path), trace, name, &caps, &env).with_argv(argv))
+}
+
+/// The shim named `name`, or the refusal that the policy declares none ([spec §11.3]).
+///
+/// [spec §11.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#113-shims
+fn shim_named<'a>(
+    loaded: &'a crate::policy::Loaded,
+    name: &str,
+) -> Result<&'a crate::policy::Shim, Refusal> {
+    loaded.policy.shims.get(name).ok_or_else(|| {
+        Refusal::new(
+            Code::ShimUnknown,
+            format!("{} declares no shim named {name:?}", loaded.path.display()),
+        )
+    })
 }
 
 /// The resolved form, section by section: the selection trace, then the capability set.
@@ -200,6 +272,17 @@ fn render_resolved(resolved: &Resolved, out: &mut impl Write) -> io::Result<()> 
             OneLine(&var_line),
             OneLine(&var.from)
         )?;
+    }
+    if !resolved.argv.is_empty() {
+        writeln!(out, "argv")?;
+        for arg in &resolved.argv {
+            writeln!(
+                out,
+                "  {}  (from {})",
+                OneLine(&arg.value),
+                OneLine(&arg.from)
+            )?;
+        }
     }
     Ok(())
 }

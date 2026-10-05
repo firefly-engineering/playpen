@@ -47,6 +47,14 @@
       "items": {
         "$ref": "#/$defs/ResolvedVar"
       }
+    },
+    "argv": {
+      "description": "The argv a shim injects ahead of the caller's: the target it resolved, then each literal\nflag ([spec §11.3]). Empty where no shim was named. Shown outward only, and never projected\ninward — the manifest omits it, because the agent already holds its own argv.\n\n[spec §11.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#113-shims",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/InjectedArg"
+      },
+      "default": []
     }
   },
   "required": [
@@ -273,6 +281,22 @@
       },
       "required": [
         "name",
+        "from"
+      ]
+    },
+    "InjectedArg": {
+      "description": "One token a shim puts in front of the caller's argv, with where it was written. playpen reads\nnone of them: a flag can make the agent work or not work, and can never move the boundary.",
+      "type": "object",
+      "properties": {
+        "value": {
+          "type": "string"
+        },
+        "from": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "value",
         "from"
       ]
     }

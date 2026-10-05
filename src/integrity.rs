@@ -14,13 +14,29 @@ use crate::capability::{Access, CapabilitySet, Class, Scope};
 use crate::code::Code;
 use crate::refusal::Refusal;
 
-/// Refuse if `caps` lets the confined tree write the policy file at `policy` or the playpen
-/// executable at `executable`.
-pub fn check(caps: &CapabilitySet, policy: &Path, executable: &Path) -> Result<(), Refusal> {
-    for (what, path) in [
-        ("the policy file", policy),
-        ("the playpen executable", executable),
-    ] {
+/// Refuse if `caps` lets the confined tree write the policy file at `policy`, the playpen
+/// executable at `executable`, or — where playpen was reached through one — the invoking shim link
+/// at `shim`.
+///
+/// The shim link is on the list for the same reason the executable is: an operator's `PATH` sends
+/// the next `claude` through it, so a profile that can repoint it chooses what runs unconfined
+/// next time. Its directory is covered too, because an entry can be replaced from its parent
+/// ([`writable_by`]).
+pub fn check(
+    caps: &CapabilitySet,
+    policy: &Path,
+    executable: &Path,
+    shim: Option<&Path>,
+) -> Result<(), Refusal> {
+    let subjects = [
+        ("the policy file", Some(policy)),
+        ("the playpen executable", Some(executable)),
+        ("the invoking shim link", shim),
+    ];
+    for (what, path) in subjects.into_iter().filter_map(|(what, path)| {
+        let path = path?;
+        Some((what, path))
+    }) {
         for entry in entries(what, path)? {
             if let Some(from) = writable_by(caps, &entry) {
                 return Err(Refusal::new(
@@ -169,7 +185,7 @@ mod tests {
         }
 
         fn check(&self, caps: &CapabilitySet) -> Result<(), Refusal> {
-            check(caps, &self.policy(), &self.executable())
+            check(caps, &self.policy(), &self.executable(), None)
         }
     }
 
@@ -238,7 +254,7 @@ mod tests {
         let link = links.path().join("policy.yaml");
         std::os::unix::fs::symlink(files.policy(), &link).expect("symlink");
         let writable = caps(vec![grant(links.path(), Access::ReadWrite)]);
-        let refusal = check(&writable, &link, &files.executable()).expect_err("refused");
+        let refusal = check(&writable, &link, &files.executable(), None).expect_err("refused");
         assert_eq!(refusal.code, Code::IntegrityWritable);
     }
 
@@ -274,11 +290,11 @@ mod tests {
             classes: vec![Class::Write],
             from: "workspace:w.roots[0].exclude[0]".into(),
         });
-        let refusal = check(&excluded, &policy, &files.executable()).expect_err("refused");
+        let refusal = check(&excluded, &policy, &files.executable(), None).expect_err("refused");
         assert_eq!(refusal.code, Code::IntegrityWritable);
         // Excluding the directory instead closes it.
         excluded.exclusions[0].path = dir.canonicalize().expect("canonical");
-        assert_eq!(check(&excluded, &policy, &files.executable()), Ok(()));
+        assert_eq!(check(&excluded, &policy, &files.executable(), None), Ok(()));
     }
 
     /// A symlinked directory on the way to the policy, sitting in a writable root, can be repointed
@@ -290,8 +306,8 @@ mod tests {
         let link = writable.path().join("cfg");
         std::os::unix::fs::symlink(files.policy_dir.path(), &link).expect("symlink");
         let caps = caps(vec![grant(writable.path(), Access::ReadWrite)]);
-        let refusal =
-            check(&caps, &link.join("policy.yaml"), &files.executable()).expect_err("refused");
+        let refusal = check(&caps, &link.join("policy.yaml"), &files.executable(), None)
+            .expect_err("refused");
         assert_eq!(refusal.code, Code::IntegrityWritable);
     }
 
@@ -306,6 +322,7 @@ mod tests {
             &caps(vec![]),
             &files.policy(),
             Path::new("/nonexistent/playpen"),
+            None,
         )
         .expect_err("refused");
         assert_eq!(refusal.code, Code::IntegrityUnresolvable);

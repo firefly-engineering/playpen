@@ -300,6 +300,21 @@ pub struct Resolved {
     ///
     /// [spec §9.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#93-inward-and-outward
     pub env: Vec<ResolvedVar>,
+    /// The argv a shim injects ahead of the caller's: the target it resolved, then each literal
+    /// flag ([spec §11.3]). Empty where no shim was named. Shown outward only, and never projected
+    /// inward — the manifest omits it, because the agent already holds its own argv.
+    ///
+    /// [spec §11.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#113-shims
+    #[serde(default)]
+    pub argv: Vec<InjectedArg>,
+}
+
+/// One token a shim puts in front of the caller's argv, with where it was written. playpen reads
+/// none of them: a flag can make the agent work or not work, and can never move the boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InjectedArg {
+    pub value: String,
+    pub from: String,
 }
 
 /// One variable of the constructed environment.
@@ -408,7 +423,17 @@ impl Resolved {
                     from: var.from.clone(),
                 })
                 .collect(),
+            argv: Vec::new(),
         }
+    }
+
+    /// This resolved form with the argv a shim injects. Separate from [`Resolved::new`] because
+    /// the capability set and the environment are what a launch resolves; the injected argv is
+    /// what the shim front-end put in front of it, and only `explain --shim` has one.
+    #[must_use]
+    pub fn with_argv(mut self, argv: Vec<InjectedArg>) -> Self {
+        self.argv = argv;
+        self
     }
 }
 

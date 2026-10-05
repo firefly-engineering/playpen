@@ -7,6 +7,7 @@
 //! [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
 
 use std::ffi::OsString;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 
 use clap::error::{ContextKind, ErrorKind};
@@ -101,6 +102,14 @@ pub fn main(
     //
     // [spec §14.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#142-playpen-explain
     // [spec §10.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#105-validation-tiers
+    let args: Vec<OsString> = args.into_iter().collect();
+    // Invoked under any name other than `playpen`, the binary is a **shim**: a thin front-end over
+    // `run` that reads nothing of the caller's argv ([spec §11.3]).
+    //
+    // [spec §11.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#113-shims
+    if let Some(name) = args.first().and_then(shim_name) {
+        return shim_main(&name, &args[0], &args[1..], host, probe);
+    }
     let parsed = match Cli::try_parse_from(args) {
         Ok(Cli {
             command: Command::Explain(args),
@@ -177,10 +186,18 @@ fn invoke(
     let kind = kind::require(&agent)?;
     record.kind(&agent);
     let policy = policies.locate(policy.as_deref())?;
+    let (policy_file, loaded) = load(&policy, cwd.as_deref().ok(), record)?;
     run(
-        &profile,
-        kind,
-        &policy,
+        Context {
+            // `run` takes its profile explicitly and resolves no context of its own, so its chain
+            // is the explicit step alone.
+            explicit: Some(profile),
+            env_profile: None,
+            kind,
+            shim: None,
+        },
+        &policy_file,
+        &loaded,
         &argv,
         cwd,
         state.as_deref(),
@@ -190,6 +207,290 @@ fn invoke(
         probe,
         self_test::floor,
     )
+}
+
+/// The name playpen was invoked under, where that name is not `playpen` itself ([spec §11.3]).
+/// An `argv[0]` with no file name, or one that is not UTF-8, is no shim name: there is nothing to
+/// look up in `shims`.
+///
+/// [spec §11.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#113-shims
+fn shim_name(argv0: &OsString) -> Option<String> {
+    let name = Path::new(argv0).file_name()?.to_str()?;
+    (name != "playpen").then(|| name.to_owned())
+}
+
+/// A shim invocation, from `argv[1]` on: everything the caller passed, opaque, with the shim's own
+/// `flags` prepended ([spec §11.3]).
+fn shim_main(
+    name: &str,
+    argv0: &OsString,
+    argv: &[OsString],
+    host: Host,
+    probe: impl FnOnce() -> Mechanism,
+) -> i32 {
+    // Re-entry comes first, before anything is opened or recorded: inside an existing boundary the
+    // shim `exec`s the target and never re-sandboxes, so there is no run of its own to record.
+    if host
+        .env
+        .iter()
+        .any(|(var, _)| var == environment::PLAYPEN_ACTIVE)
+    {
+        let refusal = reenter(name, argv, &host);
+        return refuse(&refusal, None);
+    }
+    let run = match RunId::allocate() {
+        Ok(run) => run,
+        Err(refusal) => return refuse(&refusal, None),
+    };
+    let mut record = match RunRecord::open(&run, host.state.as_deref()) {
+        Ok(record) => record,
+        Err(refusal) => return refuse(&refusal, Some(&run)),
+    };
+    match shim_invoke(name, argv0, argv, host, &mut record, probe) {
+        Ok(status) => {
+            record.finish(status);
+            status
+        }
+        Err(refusal) => {
+            record.refuse(&refusal);
+            refuse(&refusal, Some(&run))
+        }
+    }
+}
+
+fn shim_invoke(
+    name: &str,
+    argv0: &OsString,
+    argv: &[OsString],
+    host: Host,
+    record: &mut RunRecord,
+    probe: impl FnOnce() -> Mechanism,
+) -> Result<i32, Refusal> {
+    let Host {
+        cwd,
+        state,
+        policies,
+        profile,
+        executable,
+        env,
+    } = host;
+    // A shim takes no option of playpen's: every argument it was given belongs to the target.
+    let policy = policies.locate(None)?;
+    let (policy_file, loaded) = load(&policy, cwd.as_deref().ok(), record)?;
+    let shim = loaded.policy.shims.get(name).ok_or_else(|| {
+        Refusal::new(
+            Code::ShimUnknown,
+            format!(
+                "playpen was invoked as {name:?}, which {} declares no shim for; declared \
+                 shims: {}",
+                policy_file.display(),
+                known(loaded.policy.shims.keys()),
+            ),
+        )
+    })?;
+    let kind = kind::require(&shim.kind)?;
+    record.kind(&shim.kind);
+    // The target is the absolute path in `target`, resolved at launch. playpen never searches
+    // `PATH`: a shim on `PATH` that searched `PATH` would find itself.
+    let target = resolve_target(name, &shim.target)?;
+    // The shim's flags are prepended to the caller's argv, and playpen reads neither.
+    let mut full = Vec::with_capacity(1 + shim.flags.len() + argv.len());
+    full.push(target.into_os_string());
+    full.extend(shim.flags.iter().map(OsString::from));
+    full.extend_from_slice(argv);
+    run(
+        Context {
+            // A pinned profile is the chain's explicit step; without one the chain decides.
+            explicit: shim.profile.clone(),
+            env_profile: profile,
+            kind,
+            // Self-integrity extends to the link playpen was invoked through ([spec §11.7]): it
+            // runs unconfined on the next launch exactly as the executable does.
+            //
+            // [spec §11.7]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#117-self-integrity
+            shim: Some(invoking_link(
+                argv0,
+                name,
+                &integrity::executable(&executable)?,
+                cwd.as_deref().ok(),
+                &env,
+            )?),
+        },
+        &policy_file,
+        &loaded,
+        &full,
+        cwd,
+        state.as_deref(),
+        executable,
+        &env,
+        record,
+        probe,
+        self_test::floor,
+    )
+}
+
+/// The shim's `target`, resolved at launch. Never a `PATH` search ([spec §11.3]).
+fn resolve_target(name: &str, target: &Path) -> Result<PathBuf, Refusal> {
+    let missing = |detail: String| {
+        Refusal::new(
+            Code::RootMissing,
+            format!("shim:{name}.target is {}, which {detail}", target.display()),
+        )
+    };
+    if !target.is_absolute() {
+        return Err(missing(
+            "is not an absolute path; playpen never searches PATH for a shim's target".into(),
+        ));
+    }
+    // Resolved only to show it is there: a dangling link refuses. The path handed to `exec` is the
+    // one the policy declared, not what it resolved to, because `argv[0]` is the target's own
+    // business — a multicall binary reached through a stable link decides what it is from the name
+    // it was invoked by ([ADR 0019]).
+    //
+    // [ADR 0019]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0019-a-homebrew-toolchain-is-a-keg-list-and-a-shim-is-the-playpen-binary.md
+    target
+        .canonicalize()
+        .map_err(|e| missing(format!("is unavailable: {e}")))?;
+    Ok(target.to_owned())
+}
+
+/// The link playpen was invoked through, for self-integrity ([spec §11.7]).
+///
+/// It cannot be read back from the running executable: an `exec` of a symlink leaves
+/// `/proc/self/exe` — and macOS's equivalent — naming what the link resolved to, never the link.
+/// So it is found the way the caller found it. Invoked by a path, `argv[0]` *is* the link. Invoked
+/// by a bare name, the caller's `PATH` found it, and the first entry of that `PATH` named `name`
+/// which resolves to this executable is the one that ran. That is a `PATH` search for the *link*,
+/// which is a different thing from searching `PATH` for a shim's `target` ([spec §11.3]) — the
+/// target is always the absolute path the policy declares.
+///
+/// A link that cannot be found is `refusal.integrity.unresolvable`: integrity that cannot be shown
+/// is refused, never assumed.
+///
+/// [spec §11.7]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#117-self-integrity
+/// [spec §11.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#113-shims
+pub fn invoking_link(
+    argv0: &OsString,
+    name: &str,
+    executable: &Path,
+    cwd: Option<&Path>,
+    env: &[(OsString, OsString)],
+) -> Result<PathBuf, Refusal> {
+    let unresolvable = |detail: String| {
+        Refusal::new(
+            Code::IntegrityUnresolvable,
+            format!(
+                "the shim link playpen was invoked through cannot be found, so it cannot be shown \
+                 unwritable: {detail}"
+            ),
+        )
+    };
+    let argv0 = Path::new(argv0);
+    if argv0.parent().is_some_and(|parent| parent != Path::new("")) {
+        return Ok(match cwd {
+            Some(cwd) => cwd.join(argv0),
+            None => argv0.to_owned(),
+        });
+    }
+    let resolved = executable
+        .canonicalize()
+        .map_err(|e| unresolvable(format!("{}: {e}", executable.display())))?;
+    let path = env
+        .iter()
+        .rev()
+        .find(|(var, _)| var == "PATH")
+        .map(|(_, value)| value.clone())
+        .ok_or_else(|| unresolvable("the environment names no PATH".into()))?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|link| link.canonicalize().is_ok_and(|target| target == resolved))
+        .ok_or_else(|| {
+            unresolvable(format!(
+                "no PATH entry named {name:?} resolves to {}",
+                resolved.display()
+            ))
+        })
+}
+
+/// A shim invoked inside an existing boundary: `exec` the target in place, where the phantom, the
+/// proxy and the manifest all still hold ([spec §11.3]). It never re-sandboxes, keeps the outer
+/// run's environment, and opens no record of its own.
+///
+/// Returns only on failure: a successful `exec` replaces this process.
+fn reenter(name: &str, argv: &[OsString], host: &Host) -> Refusal {
+    // The policy is read again from inside, because a shim's target lives nowhere else. A boundary
+    // that grants no read of the policy cannot re-enter, and says so.
+    let resolved = host
+        .policies
+        .locate(None)
+        .and_then(|path| Policy::load(&path));
+    let loaded = match resolved {
+        Ok(loaded) => loaded,
+        Err(refusal) => return refusal,
+    };
+    let Some(shim) = loaded.policy.shims.get(name) else {
+        return Refusal::new(
+            Code::ShimUnknown,
+            format!(
+                "playpen was invoked as {name:?} inside a boundary, and {} declares no shim for \
+                 it; declared shims: {}",
+                loaded.path.display(),
+                known(loaded.policy.shims.keys()),
+            ),
+        );
+    };
+    let target = match resolve_target(name, &shim.target) {
+        Ok(target) => target,
+        Err(refusal) => return refusal,
+    };
+    let mut full: Vec<OsString> = shim.flags.iter().map(OsString::from).collect();
+    full.extend_from_slice(argv);
+    // The outer run's environment is this process's own, so `exec` keeps it whole: nothing is
+    // constructed a second time.
+    let error = std::process::Command::new(&target).args(&full).exec();
+    Refusal::new(
+        Code::TargetExec,
+        format!("cannot exec the target {}: {error}", target.display()),
+    )
+}
+
+/// `names`, comma-separated, or `none`.
+fn known<'a>(names: impl Iterator<Item = &'a String>) -> String {
+    let names: Vec<_> = names.map(String::as_str).collect();
+    if names.is_empty() {
+        "none".into()
+    } else {
+        names.join(", ")
+    }
+}
+
+/// Read the policy at `path`, recording the absolute path it was read from first, so a stored
+/// record names the file whatever directory it is read from.
+fn load(
+    path: &Path,
+    cwd: Option<&Path>,
+    record: &mut RunRecord,
+) -> Result<(PathBuf, crate::policy::Loaded), Refusal> {
+    let policy_file = match cwd {
+        Some(cwd) => cwd.join(path),
+        None => path.to_owned(),
+    };
+    record.policy(&policy_file);
+    let loaded = Policy::load(path)?;
+    Ok((policy_file, loaded))
+}
+
+/// What the invocation decided before the launch sequence proper: how the profile is chosen, the
+/// stated kind, and the shim link this playpen was reached through, if any.
+struct Context {
+    /// The chain's explicit step: `--profile`, or a shim's pinned `profile`.
+    explicit: Option<String>,
+    /// `PLAYPEN_PROFILE`, the chain's second step. `None` for `run`, which resolves no context.
+    env_profile: Option<OsString>,
+    kind: &'static Kind,
+    /// The link playpen was invoked through, which self-integrity holds unwritable beside the
+    /// executable and the policy.
+    shim: Option<PathBuf>,
 }
 
 fn refuse(refusal: &Refusal, run: Option<&RunId>) -> i32 {
@@ -217,9 +518,9 @@ fn usage_refusal(err: &clap::Error) -> Refusal {
     reason = "step 7's two checks are each a seam a test replaces"
 )]
 fn run(
-    profile: &str,
-    kind: &'static Kind,
-    policy_path: &Path,
+    context: Context,
+    policy_file: &Path,
+    loaded: &crate::policy::Loaded,
     argv: &[OsString],
     cwd: std::io::Result<PathBuf>,
     state: Option<&Path>,
@@ -229,31 +530,30 @@ fn run(
     probe: impl FnOnce() -> Mechanism,
     floor_self_test: impl FnOnce() -> Result<(), Refusal>,
 ) -> Result<i32, Refusal> {
-    // Absolute, so a stored record names the file whatever directory it is read from.
-    let policy_file = match &cwd {
-        Ok(cwd) => cwd.join(policy_path),
-        Err(_) => policy_path.to_owned(),
-    };
-    record.policy(&policy_file);
-    let loaded = Policy::load(policy_path)?;
-    // Step 4. `run` takes its profile explicitly and resolves no context of its own, so its chain
-    // is the explicit step alone.
+    let Context {
+        explicit,
+        env_profile,
+        kind,
+        shim,
+    } = context;
+    // Step 4.
     let inputs = select::Inputs {
-        explicit: Some(profile),
-        env: None,
+        explicit: explicit.as_deref(),
+        env: env_profile.as_deref(),
         cwd: cwd.as_deref().ok(),
     };
     let (trace, selected) = select::select(&loaded.policy, inputs);
     record.selection(&trace, selected.as_deref().ok());
-    let selected = selected?;
-    let selected = loaded.policy.profiles.get(&selected).ok_or_else(|| {
+    let profile = selected?;
+    let profile = profile.as_str();
+    let selected = loaded.policy.profiles.get(profile).ok_or_else(|| {
         Refusal::new(
             Code::SelectionUnknownProfile,
-            format!("profile {selected:?} is not in the policy"),
+            format!("profile {profile:?} is not in the policy"),
         )
     })?;
     // Step 5.
-    coherence::check(&loaded)?;
+    coherence::check(loaded)?;
     // Step 6: everything decidable from this host as it is now. The capability set resolves every
     // root, link and exclusion, refusing any that is missing.
     let roots = resolve::roots(&loaded.policy, selected)?;
@@ -278,8 +578,14 @@ fn run(
                 .with_home(environment::home(env).as_deref())
         })?;
     let caps = resolve::capabilities(&loaded.policy, profile, &layout)?;
-    // Nothing that runs unconfined on the next launch is writable from inside this one.
-    integrity::check(&caps, &policy_file, &integrity::executable(&executable)?)?;
+    // Nothing that runs unconfined on the next launch is writable from inside this one: the policy,
+    // the executable, and the link this playpen was invoked through.
+    integrity::check(
+        &caps,
+        policy_file,
+        &integrity::executable(&executable)?,
+        shim.as_deref(),
+    )?;
     // The existence-tier containment check, run once the capability set is complete because the
     // rule is about *every* granted path and the floor is a grant too: on a non-FHS host it is a
     // declared closure read from a `PLAYPEN_FLOOR`-selected directory, so it is neither
@@ -449,10 +755,16 @@ mod tests {
         std::fs::write(&executable, "").expect("executable");
         let id = RunId::allocate().expect("id");
         let mut record = RunRecord::open(&id, Some(state.path())).expect("record");
+        let loaded = Policy::load(&policy).expect("the policy parses");
         let refusal = run(
-            "p",
-            kind::require("claude").expect("a known kind"),
+            Context {
+                explicit: Some("p".into()),
+                env_profile: None,
+                kind: kind::require("claude").expect("a known kind"),
+                shim: None,
+            },
             &policy,
+            &loaded,
             &argv,
             Ok(root.path().into()),
             Some(state.path()),
