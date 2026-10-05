@@ -8,6 +8,7 @@ fn main() {
         policies: playpen::policy::SearchPath::new(var("XDG_CONFIG_HOME"), var("HOME")),
         profile: var(playpen::select::ENV),
         executable: std::env::current_exe(),
+        env: std::env::vars_os().collect(),
     };
     let status = playpen::launch::main(
         std::env::args_os(),

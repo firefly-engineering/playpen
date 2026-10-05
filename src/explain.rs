@@ -117,7 +117,8 @@ fn resolve(args: &Args, host: &Host) -> Result<Resolved, Refusal> {
     crate::integrity::check(&caps, &absolute(&path), &executable)?;
     record::refuse_if_reachable(host.state.as_deref(), &caps.paths)?;
     crate::backend::check(&caps)?;
-    Ok(Resolved::new(absolute(&path), trace, name, &caps))
+    let env = resolve::environment(&loaded.policy, &name, &host.env);
+    Ok(Resolved::new(absolute(&path), trace, name, &caps, &env))
 }
 
 /// The resolved form, section by section: the selection trace, then the capability set.
@@ -166,7 +167,21 @@ fn render_resolved(resolved: &Resolved, out: &mut impl Write) -> io::Result<()> 
         out,
         "network   {mode}  (from {})",
         OneLine(&resolved.network.from)
-    )
+    )?;
+    writeln!(out, "env")?;
+    for var in &resolved.env {
+        let var_line = match &var.value {
+            Some(value) => format!("{}={value}", var.name),
+            None => format!("{} (inherited)", var.name),
+        };
+        writeln!(
+            out,
+            "  {}  (from {})",
+            OneLine(&var_line),
+            OneLine(&var.from)
+        )?;
+    }
+    Ok(())
 }
 
 /// The selection trace, one step a line.

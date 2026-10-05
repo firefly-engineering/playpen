@@ -89,6 +89,7 @@ fn supervise_held_child(ready: libc::c_int, counted: libc::c_int) -> i32 {
     child::run_confined(
         &caps,
         &argv,
+        &[],
         &run,
         hold,
         |_| {},

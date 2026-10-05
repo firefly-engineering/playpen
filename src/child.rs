@@ -13,12 +13,14 @@ use std::process::Command;
 use crate::backend;
 use crate::capability::CapabilitySet;
 use crate::code::Code;
+use crate::environment::Var;
 use crate::fault::Fault;
 use crate::record::RunId;
 use crate::refusal::{EXIT_REFUSED, Refusal};
 use crate::supervisor::HeldSignals;
 
-/// Fork, confine the child under `caps`, `exec` `argv` in the inherited CWD, and wait for it.
+/// Fork, confine the child under `caps`, `exec` `argv` in the inherited CWD with exactly the
+/// environment `env` and nothing inherited beside it, and wait for it.
 /// `on_exec` receives the child's pid once the target has been `exec`ed. Returns the status the
 /// supervisor exits with. `run` names the run on a refusal line the child has to write itself.
 ///
@@ -37,6 +39,7 @@ use crate::supervisor::HeldSignals;
 pub fn run_confined(
     caps: &CapabilitySet,
     argv: &[OsString],
+    env: &[Var],
     run: &RunId,
     prepare: impl FnOnce() -> Result<(), Refusal>,
     on_exec: impl FnOnce(libc::pid_t),
@@ -46,7 +49,10 @@ pub fn run_confined(
         .split_first()
         .ok_or_else(|| Refusal::new(Code::InvocationUsage, "no target after `--`"))?;
     let mut command = Command::new(target);
-    command.args(args);
+    command
+        .args(args)
+        .env_clear()
+        .envs(env.iter().map(|var| (&var.name, var.value.as_os_str())));
 
     let held = HeldSignals::block()?;
     let started = spawn_confined(caps, &mut command, Some(run), Some(&held), || {

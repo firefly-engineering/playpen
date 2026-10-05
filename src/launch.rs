@@ -76,6 +76,11 @@ pub struct Host {
     pub profile: Option<OsString>,
     /// The running playpen executable, which self-integrity requires the profile cannot write.
     pub executable: std::io::Result<PathBuf>,
+    /// The caller's environment, which the child's is constructed from by name and never
+    /// inherited whole ([spec §9]).
+    ///
+    /// [spec §9]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#9-the-environment
+    pub env: Vec<(OsString, OsString)>,
 }
 
 /// Run playpen with `args` (including `argv[0]`) on `host`. Returns the process exit status; on a
@@ -123,32 +128,16 @@ pub fn main(
         }
         Err(err) => Err(err),
     };
-    // `run` resolves no context of its own, so `PLAYPEN_PROFILE` is not one of its inputs.
-    let Host {
-        cwd,
-        state,
-        policies,
-        profile: _,
-        executable,
-    } = host;
     // Step 1, before anything that can refuse, so that every refusal leaves a record.
     let run = match RunId::allocate() {
         Ok(run) => run,
         Err(refusal) => return refuse(&refusal, None),
     };
-    let mut record = match RunRecord::open(&run, state.as_deref()) {
+    let mut record = match RunRecord::open(&run, host.state.as_deref()) {
         Ok(record) => record,
         Err(refusal) => return refuse(&refusal, Some(&run)),
     };
-    match invoke(
-        parsed,
-        cwd,
-        state.as_deref(),
-        &policies,
-        executable,
-        &mut record,
-        probe,
-    ) {
+    match invoke(parsed, host, &mut record, probe) {
         Ok(status) => {
             record.finish(status);
             status
@@ -162,13 +151,19 @@ pub fn main(
 
 fn invoke(
     parsed: Result<RunArgs, clap::Error>,
-    cwd: std::io::Result<PathBuf>,
-    state: Option<&Path>,
-    policies: &SearchPath,
-    executable: std::io::Result<PathBuf>,
+    host: Host,
     record: &mut RunRecord,
     probe: impl FnOnce() -> Mechanism,
 ) -> Result<i32, Refusal> {
+    // `run` resolves no context of its own, so `PLAYPEN_PROFILE` is not one of its inputs.
+    let Host {
+        cwd,
+        state,
+        policies,
+        profile: _,
+        executable,
+        env,
+    } = host;
     let RunArgs {
         profile,
         agent,
@@ -192,8 +187,9 @@ fn invoke(
         &policy,
         &argv,
         cwd,
-        state,
+        state.as_deref(),
         executable,
+        &env,
         record,
         probe,
         self_test::floor,
@@ -231,6 +227,7 @@ fn run(
     cwd: std::io::Result<PathBuf>,
     state: Option<&Path>,
     executable: std::io::Result<PathBuf>,
+    env: &[(OsString, OsString)],
     record: &mut RunRecord,
     probe: impl FnOnce() -> Mechanism,
     floor_self_test: impl FnOnce() -> Result<(), Refusal>,
@@ -280,6 +277,8 @@ fn run(
     floor_self_test()?;
     // Step 12: the capability set compiles on this mechanism.
     backend::check(&caps)?;
+    // Step 14.
+    let env = resolve::environment(&loaded.policy, profile, env);
     record.launch(&caps, backend::denial_tag(record.id()))?;
     let run = record.id().clone();
     // Both callbacks write the record, and only one of them ever fires, but the borrow checker
@@ -288,6 +287,7 @@ fn run(
     child::run_confined(
         &caps,
         argv,
+        &env,
         &run,
         || Ok(()),
         |pid| record.borrow_mut().spawned(pid),
@@ -421,6 +421,7 @@ mod tests {
             Ok(root.path().into()),
             Some(state.path()),
             Ok(executable),
+            &[],
             &mut record,
             probe,
             floor_self_test,

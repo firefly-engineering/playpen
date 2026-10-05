@@ -5,6 +5,7 @@ pub mod capability;
 pub mod check;
 pub mod child;
 pub mod code;
+pub mod environment;
 pub mod explain;
 pub mod fault;
 pub mod floor;

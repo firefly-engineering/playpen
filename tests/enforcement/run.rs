@@ -440,6 +440,7 @@ pub fn as_playpen_offering_nothing(
         policies: playpen::policy::SearchPath::of(Vec::new()),
         profile: None,
         executable: std::env::current_exe(),
+        env: Vec::new(),
     };
     playpen::launch::main(argv, host, || {
         Mechanism::new("a mechanism offering nothing", &[])

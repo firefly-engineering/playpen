@@ -12,6 +12,7 @@
 //!
 //! [spec §10.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#104-the-resolved-form
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use schemars::JsonSchema;
@@ -19,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::capability::{Access, CapabilitySet, Class, PathDenial, PathGrant, Scope};
 use crate::code::Code;
+use crate::environment::{self, Value, Var};
 use crate::floor::floor;
 use crate::policy::{Policy, Profile};
 use crate::refusal::Refusal;
@@ -150,6 +152,17 @@ pub fn capabilities(policy: &Policy, name: &str) -> Result<CapabilitySet, Refusa
     Ok(caps)
 }
 
+/// The environment a launch of profile `name` constructs on a host whose own is `host`
+/// ([spec §9]). `run` hands it to the child and `explain` shows it.
+///
+/// [spec §9]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#9-the-environment
+pub fn environment(policy: &Policy, name: &str, host: &[(OsString, OsString)]) -> Vec<Var> {
+    let Some(selected) = policy.profiles.get(name) else {
+        return Vec::new();
+    };
+    environment::construct(policy, name, selected, host, Vec::new(), |_| None)
+}
+
 /// Every exclusion on the selected profile's roots, brought and toolchain alike, at its resolved
 /// path ([spec §8.4]). One that does not exist refuses: an exclusion whose path has gone is a leak
 /// that reopened silently.
@@ -219,6 +232,21 @@ pub struct Resolved {
     /// macOS Mach services the child may look up; every other service is denied.
     pub mach_services: Vec<ResolvedService>,
     pub network: ResolvedNetwork,
+    /// The constructed environment, by name ([spec §9.3]): outward only, since the agent can read
+    /// its own `environ`.
+    ///
+    /// [spec §9.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#93-inward-and-outward
+    pub env: Vec<ResolvedVar>,
+}
+
+/// One variable of the constructed environment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ResolvedVar {
+    pub name: String,
+    /// What playpen or the policy wrote, shown lossily where it is not UTF-8. `null` for a name
+    /// passed through from the host, whose value playpen never inspects, and so never states.
+    pub value: Option<String>,
+    pub from: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -262,8 +290,15 @@ pub enum NetworkMode {
 pub const BUILT_IN: &str = "built-in";
 
 impl Resolved {
-    /// The resolved form of `caps`, selected by `selection` as `profile` from the policy at `policy`.
-    pub fn new(policy: PathBuf, selection: Trace, profile: String, caps: &CapabilitySet) -> Self {
+    /// The resolved form of `caps` and `env`, selected by `selection` as `profile` from the policy
+    /// at `policy`.
+    pub fn new(
+        policy: PathBuf,
+        selection: Trace,
+        profile: String,
+        caps: &CapabilitySet,
+        env: &[Var],
+    ) -> Self {
         Self {
             policy,
             selection,
@@ -299,6 +334,17 @@ impl Resolved {
                 mode: NetworkMode::AllowAll,
                 from: BUILT_IN.into(),
             },
+            env: env
+                .iter()
+                .map(|var| ResolvedVar {
+                    name: var.name.clone(),
+                    value: match &var.value {
+                        Value::Inherited(_) => None,
+                        Value::Written(value) => Some(value.to_string_lossy().into_owned()),
+                    },
+                    from: var.from.clone(),
+                })
+                .collect(),
         }
     }
 }

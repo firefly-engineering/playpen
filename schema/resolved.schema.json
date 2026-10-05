@@ -40,6 +40,13 @@
     },
     "network": {
       "$ref": "#/$defs/ResolvedNetwork"
+    },
+    "env": {
+      "description": "The constructed environment, by name ([spec §9.3]): outward only, since the agent can read\nits own `environ`.\n\n[spec §9.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#93-inward-and-outward",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ResolvedVar"
+      }
     }
   },
   "required": [
@@ -49,7 +56,8 @@
     "paths",
     "exclusions",
     "mach_services",
-    "network"
+    "network",
+    "env"
   ],
   "$defs": {
     "Step": {
@@ -243,6 +251,29 @@
       "type": "string",
       "enum": [
         "allow-all"
+      ]
+    },
+    "ResolvedVar": {
+      "description": "One variable of the constructed environment.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "description": "What playpen or the policy wrote, shown lossily where it is not UTF-8. `null` for a name\npassed through from the host, whose value playpen never inspects, and so never states.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "from": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "from"
       ]
     }
   }

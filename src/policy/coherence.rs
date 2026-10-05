@@ -17,7 +17,11 @@ use crate::refusal::Refusal;
 type Check = fn(&Loaded) -> Result<(), Refusal>;
 
 /// Every check, in the order they run. A new coherence code is one more entry here.
-const CHECKS: &[Check] = &[workspaces_are_declared, roots_are_absolute];
+const CHECKS: &[Check] = &[
+    workspaces_are_declared,
+    roots_are_absolute,
+    fragments_are_declared,
+];
 
 /// Run the coherence tier over `loaded`.
 pub fn check(loaded: &Loaded) -> Result<(), Refusal> {
@@ -78,6 +82,27 @@ fn roots_are_absolute(loaded: &Loaded) -> Result<(), Refusal> {
         )),
         None => Ok(()),
     }
+}
+
+/// A profile lists only declared env fragments (`refusal.fragment.unknown`).
+fn fragments_are_declared(loaded: &Loaded) -> Result<(), Refusal> {
+    let Loaded { path, policy } = loaded;
+    for (profile, selected) in &policy.profiles {
+        for (i, fragment) in selected.env.fragments.iter().enumerate() {
+            if !policy.fragments.env.contains_key(fragment) {
+                return Err(Refusal::new(
+                    Code::FragmentUnknown,
+                    format!(
+                        "{}: profile:{profile}.env.fragments[{i}] is {fragment:?}, which is not \
+                         declared; declared env fragments: {}",
+                        path.display(),
+                        known(policy.fragments.env.keys()),
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `names`, comma-separated, or `none`.
@@ -191,6 +216,27 @@ profiles:
         assert_eq!(refusal.code, Code::RootRelative);
         assert!(
             refusal.message().contains("profile:p.toolchain[0]"),
+            "{refusal}"
+        );
+    }
+
+    #[test]
+    fn an_undeclared_env_fragment_is_refused() {
+        let text = "\
+version: 1
+fragments:
+  env: { rust: [CARGO_HOME] }
+profiles:
+  p: { workspaces: [], toolchain: [], env: { fragments: [rust, nope] } }
+";
+        let refusal = checked(text).expect_err("refused");
+        assert_eq!(refusal.code, Code::FragmentUnknown);
+        assert!(
+            refusal.message().contains("profile:p.env.fragments[1]"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.message().ends_with("declared env fragments: rust"),
             "{refusal}"
         );
     }
