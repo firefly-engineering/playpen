@@ -24,8 +24,8 @@ use tempfile::{NamedTempFile, TempDir};
 use crate::common::{self, PROBE};
 use crate::row::{
     Action, Cause, Checked, Declined, Expected, Fixture, Invocation, Listening, MERGED_TYPO,
-    Outcome, Row, Seen, Services, Signalled, Target, Verdict, applies, judge, judge_refusal,
-    judge_unexamined,
+    OVER_CEILING, Outcome, Row, Seen, Services, Signalled, Target, Verdict, applies, judge,
+    judge_refusal, judge_unexamined,
 };
 use playpen::refusal::EXIT_REFUSED;
 
@@ -453,6 +453,8 @@ fn decline(invocation: Invocation) -> Declined {
     // Where this invocation's records land. Usually the fixture's own state directory, but a row
     // may move it, which is the whole point of `StateReachable`.
     let mut runs = fixture.runs();
+    // What an invocation made that must outlive playpen's run.
+    let mut held = None;
     let mut command = match invocation {
         Invocation::Usage => fixture.playpen(&["run"]),
         Invocation::MissingCapability => {
@@ -495,6 +497,27 @@ fn decline(invocation: Invocation) -> Declined {
                 "version": 1,
                 "workspaces": {"w": {"roots": [{"path": fixture.root(), "mode": "readwrite"}]}},
                 "profiles": {"p": {"workspaces": ["w"], "toolchain": []}},
+            });
+            fs::write(&policy, document.to_string()).expect("write policy");
+            let mut command =
+                fixture.playpen(&["run", "--profile", "p", "--agent", "claude", "--policy"]);
+            command.arg(&policy).arg("--").arg(canary_path());
+            command
+        }
+        Invocation::OverCeiling => {
+            let tools = held.insert(TempDir::new().expect("toolchain roots"));
+            let toolchain: Vec<Value> = (0..OVER_CEILING)
+                .map(|i| {
+                    let root = tools.path().join(format!("root-{i:05}"));
+                    fs::create_dir(&root).expect("toolchain root");
+                    serde_json::json!({"path": root})
+                })
+                .collect();
+            let policy = fixture.policy_dir.path().join("over-ceiling.json");
+            let document = serde_json::json!({
+                "version": 1,
+                "workspaces": {"w": {"roots": [{"path": fixture.root(), "mode": "read"}]}},
+                "profiles": {"p": {"workspaces": ["w"], "toolchain": toolchain}},
             });
             fs::write(&policy, document.to_string()).expect("write policy");
             let mut command =

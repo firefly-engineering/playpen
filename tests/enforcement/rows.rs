@@ -265,4 +265,16 @@ pub const ROWS: &[Row] = &[
         expected: Expected::Recorded(Code::IntegrityWritable),
         from: &[Decision::Adr(16), Decision::Issue(66)],
     },
+    Row {
+        id: "R-ceiling",
+        class: Class::Refusal,
+        platform: Platform {
+            scope: Scope::Only(Os::MacOs, Asymmetry::CompiledProfileCeiling),
+            ..BOTH
+        },
+        fixture: Fixture::Outside,
+        action: Action::Refuse(Invocation::OverCeiling),
+        expected: Expected::Recorded(Code::BudgetExceeded),
+        from: &[Decision::Adr(16), Decision::Issue(67)],
+    },
 ];

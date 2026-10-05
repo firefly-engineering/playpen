@@ -1447,7 +1447,7 @@ Measured on macOS 26.5 and source-read for Linux
 | Nestable | **no**: a nested `sandbox_init` returns `EPERM` | stacks (Landlock layers intersect) |
 | Denial errno | `EPERM` | `EACCES`, `EXDEV`, `EPERM` (+ `ENOSYS` if a user-notify supervisor dies) |
 | Out-of-band denial log | kernel log, free | Landlock audit: ABI 7 (6.15+), with preconditions ([§14.5](#145---trace-denials)) |
-| Policy size limit | **65,535 compiled bytes** (~1013 `subpath` rules) | none practical |
+| Policy size limit | **65,535 bytes** in one compiled data object (about 6,300 subtree roots as nono emits them, whatever their length; measured on macOS 26.6) | none practical |
 | Deprecated | yes, since 2017, with **no supported successor** | no |
 
 macOS has no alternative mechanism. App Sandbox cannot be imposed on a launched binary.
@@ -1458,7 +1458,15 @@ applies system-wide.
 
 macOS caps the compiled profile at 65,535 bytes. The limit is reported in `errorbuf` with
 **`errno` untouched**, so playpen reads `errorbuf`. Exceeding it is `refusal.budget.exceeded`,
-naming the ceiling, the resolved size and the largest-contributing root. On a Nix host the
+naming the ceiling, the resolved size and the largest-contributing root: the source contributing
+the most path grants, such as `profile:<p>.toolchain`.
+
+On macOS 26.6 `errorbuf` reads `data object length <size> exceeds maximum (<ceiling>)`, reached
+near 6,300 subtree roots, and compiling a profile that large takes the kernel tens of seconds
+before it fails. playpen reads that sentence word for word, and any other sentence keeps its
+own code (`refusal.mechanism.unavailable`, with the text). libsandbox also writes its own account
+of the failure to stderr, so the backend points stderr at `/dev/null` around `sandbox_init`, and
+the refusal stays one line. On a Nix host the
 module checks the closure's size at build time, and the launch-time refusal is the backstop.
 
 ### 15.4 Named asymmetries

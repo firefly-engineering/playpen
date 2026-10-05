@@ -38,7 +38,7 @@ pub fn apply(caps: &CapabilitySet, tag: Option<&str>) -> Result<(), Refusal> {
     let mut set = compile(caps)?;
     set.set_seatbelt_deny_message(tag.map(str::to_owned));
     #[cfg(target_os = "macos")]
-    Sandbox::apply_auto(&set).map_err(translate)?;
+    without_stderr(|| Sandbox::apply_auto(&set)).map_err(|err| applied(caps, err))?;
     #[cfg(target_os = "linux")]
     Sandbox::apply_auto(&set).map(drop).map_err(translate)?;
     Ok(())
@@ -48,6 +48,100 @@ pub fn apply(caps: &CapabilitySet, tag: Option<&str>) -> Result<(), Refusal> {
 /// `run` checks before it forks and `explain` before it reports, so both refuse alike.
 pub fn check(caps: &CapabilitySet) -> Result<(), Refusal> {
     compile(caps).map(drop)
+}
+
+/// Run `apply` with stderr pointed at `/dev/null`, then restore it. libsandbox writes its own
+/// account of a failed `sandbox_init` to stderr, beside the `errorbuf` nono hands back; the
+/// refusal carries that, and a refusal is one line.
+#[cfg(target_os = "macos")]
+fn without_stderr<T>(apply: impl FnOnce() -> T) -> T {
+    // SAFETY: dup, open, dup2 and close act on descriptors this function owns or on stderr, which
+    // it restores before returning; the path is a NUL-terminated literal.
+    unsafe {
+        let saved = libc::dup(libc::STDERR_FILENO);
+        let null = libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+        if saved < 0 || null < 0 {
+            // Nothing to restore to, or nowhere to point it: apply with stderr as it is.
+            for fd in [saved, null].into_iter().filter(|&fd| fd >= 0) {
+                libc::close(fd);
+            }
+            return apply();
+        }
+        libc::dup2(null, libc::STDERR_FILENO);
+        libc::close(null);
+        let result = apply();
+        libc::dup2(saved, libc::STDERR_FILENO);
+        libc::close(saved);
+        result
+    }
+}
+
+/// The compiled-profile ceiling, as `errorbuf` reports a profile over it ([spec §15.3]).
+///
+/// [spec §15.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#153-the-compiled-profile-ceiling
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Ceiling {
+    size: u64,
+    ceiling: u64,
+}
+
+/// Read `errorbuf` as the ceiling's sentence, `data object length <size> exceeds maximum
+/// (<ceiling>)`, word for word as macOS 26.6 writes it. `errno` is untouched on this failure, so
+/// the sentence is the only account there is. Anything else is not this failure, and keeps its
+/// own code.
+#[cfg(target_os = "macos")]
+fn over_ceiling(errorbuf: &str) -> Option<Ceiling> {
+    let words: Vec<&str> = errorbuf.split_whitespace().collect();
+    let [
+        "data",
+        "object",
+        "length",
+        size,
+        "exceeds",
+        "maximum",
+        ceiling,
+    ] = words.as_slice()
+    else {
+        return None;
+    };
+    Some(Ceiling {
+        size: size.parse().ok()?,
+        ceiling: ceiling.strip_prefix('(')?.strip_suffix(')')?.parse().ok()?,
+    })
+}
+
+/// The refusal for `err`, raised applying `caps`. Over the ceiling, it names the ceiling, the
+/// compiled size and the source contributing the most grants, which is where to cut.
+#[cfg(target_os = "macos")]
+fn applied(caps: &CapabilitySet, err: NonoError) -> Refusal {
+    let NonoError::SandboxInit(errorbuf) = &err else {
+        return translate(err);
+    };
+    let Some(Ceiling { size, ceiling }) = over_ceiling(errorbuf) else {
+        return translate(err);
+    };
+    // A grant's source is its provenance up to its index: every root of one toolchain, or of one
+    // workspace's roots, is one source.
+    let source = |from: &str| from.split('[').next().unwrap_or(from).to_owned();
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    for grant in &caps.paths {
+        *counts.entry(source(&grant.from)).or_default() += 1;
+    }
+    let largest = counts
+        .iter()
+        .max_by_key(|&(_, count)| *count)
+        .map(|(source, count)| {
+            format!("{source}, with {count} of {} path grants", caps.paths.len())
+        })
+        .unwrap_or_else(|| "nothing".into());
+    Refusal::new(
+        Code::BudgetExceeded,
+        format!(
+            "the compiled profile is {size} bytes, over macOS's ceiling of {ceiling}; the largest \
+             contributor is {largest}"
+        ),
+    )
 }
 
 /// Translate playpen's capability set into nono's.
@@ -416,5 +510,59 @@ mod tests {
             "{refusal}"
         );
         assert!(refusal.message().contains("issues/127"), "{refusal}");
+    }
+
+    /// `errorbuf`'s sentence for a profile over the ceiling, as macOS 26.6 writes it.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_ceilings_sentence_is_read_for_size_and_ceiling() {
+        assert_eq!(
+            over_ceiling("data object length 72815 exceeds maximum (65535)"),
+            Some(Ceiling {
+                size: 72815,
+                ceiling: 65535
+            })
+        );
+        for other in [
+            "profile rejected",
+            "data object length lots exceeds maximum (65535)",
+            "data object length 72815 exceeds maximum 65535",
+            "data object length 72815 exceeds maximum (65535) and more",
+        ] {
+            assert_eq!(over_ceiling(other), None, "{other}");
+        }
+    }
+
+    /// Over the ceiling is `refusal.budget.exceeded`, naming the ceiling, the size and the source
+    /// that contributed the most grants; any other failure keeps its own code.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_profile_over_the_ceiling_is_a_budget_refusal() {
+        let grant = |from: &str| PathGrant {
+            path: "/x".into(),
+            access: Access::Read,
+            scope: Scope::Subtree,
+            from: from.into(),
+            state_derived: false,
+        };
+        let caps = CapabilitySet {
+            paths: vec![
+                grant("floor"),
+                grant("profile:p.toolchain[0]"),
+                grant("profile:p.toolchain[1]"),
+                grant("workspace:w.roots[0]"),
+            ],
+            ..CapabilitySet::default()
+        };
+        let refusal = applied(
+            &caps,
+            NonoError::SandboxInit("data object length 72815 exceeds maximum (65535)".into()),
+        );
+        assert_eq!(refusal.code, Code::BudgetExceeded);
+        for named in ["65535", "72815", "profile:p.toolchain", "2 of 4"] {
+            assert!(refusal.message().contains(named), "{named}: {refusal}");
+        }
+        let other = applied(&caps, NonoError::SandboxInit("profile rejected".into()));
+        assert_eq!(other.code, Code::MechanismUnavailable);
     }
 }

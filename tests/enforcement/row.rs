@@ -379,7 +379,17 @@ pub enum Invocation {
     ///
     /// [spec §11.7]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#117-self-integrity
     WritablePolicy,
+    /// `playpen run` under a profile whose toolchain is [`OVER_CEILING`] roots, which compiles to
+    /// a Seatbelt profile over macOS's ceiling ([spec §15.3]). The count is generous, never the
+    /// assertion: a macOS that raised the ceiling would launch, and the row would fail saying so.
+    ///
+    /// [spec §15.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#153-the-compiled-profile-ceiling
+    OverCeiling,
 }
+
+/// Roots enough to put a profile over the compiled-profile ceiling. On macOS 26.6 the ceiling is
+/// reached near 6,300 subtree roots, whatever their paths' length.
+pub const OVER_CEILING: usize = 8000;
 
 /// The policy [`Invocation::MergedTypo`] runs under, with `{root}` for its one root's path.
 pub const MERGED_TYPO: &str = "\
