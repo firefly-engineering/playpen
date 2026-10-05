@@ -6,8 +6,15 @@
 use playpen::code::Code;
 
 use crate::row::{
-    Action, Asymmetry, BOTH, Class, Decision, Expected, Fixture, Invocation, Os, Platform, Row,
-    Scope, Services, Target,
+    Action, Asymmetry, BOTH, Class, Decision, Expected, Fixture, Invocation, Os, Platform,
+    Precondition, Row, Scope, Services, Target,
+};
+
+/// Both platforms, for a row that puts a decoy in the caller's home when the host lacks the real
+/// target.
+const IN_HOME: Platform = Platform {
+    scope: Scope::Both,
+    requires: &[Precondition::HomeWritable],
 };
 
 pub const ROWS: &[Row] = &[
@@ -39,7 +46,7 @@ pub const ROWS: &[Row] = &[
     Row {
         id: "N-ssh-key",
         class: Class::Negative,
-        platform: BOTH,
+        platform: IN_HOME,
         fixture: Fixture::ProbeRoot,
         action: Action::Read(Target::SshKey),
         expected: Expected::Denial,
@@ -48,7 +55,7 @@ pub const ROWS: &[Row] = &[
     Row {
         id: "N-ssh-config",
         class: Class::Negative,
-        platform: BOTH,
+        platform: IN_HOME,
         fixture: Fixture::ProbeRoot,
         action: Action::Read(Target::SshConfig),
         expected: Expected::Denial,
@@ -57,7 +64,7 @@ pub const ROWS: &[Row] = &[
     Row {
         id: "N-aws",
         class: Class::Negative,
-        platform: BOTH,
+        platform: IN_HOME,
         fixture: Fixture::ProbeRoot,
         action: Action::List(Target::Aws),
         expected: Expected::Denial,
@@ -66,7 +73,7 @@ pub const ROWS: &[Row] = &[
     Row {
         id: "N-npmrc",
         class: Class::Negative,
-        platform: BOTH,
+        platform: IN_HOME,
         fixture: Fixture::ProbeRoot,
         action: Action::Read(Target::Npmrc),
         expected: Expected::Denial,

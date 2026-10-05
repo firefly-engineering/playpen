@@ -1522,6 +1522,12 @@ linuxbrew and `~/.local` follow the keg-list or coarse-root shapes.
   asserts the boundary's behaviour *inside*. A negative whose target is absent outside is a
   setup failure. The fixture **creates a decoy** where the host lacks a real target. `ENOENT`
   from inside is a **failed** negative.
+- **A decoy the fixture writes outside a temp directory is recognisable by its own content and
+  is reclaimed at fixture time**, so a run killed before its teardown costs one stale decoy and
+  never a permanent one. A file is a decoy only when its entire content is the decoy line; a
+  directory only when it holds nothing but its decoy marker, or, for one made only to hold other
+  decoys, nothing at all. Where such a write is impossible, the row is skipped by name, never
+  moved somewhere weaker.
 - **Three outcomes**: *runs*; *`n/a` by platform* (a named asymmetry already on the ledger);
   *skipped* (a precondition missing on this host, always **named**, never inferred).
 - **Actors.** The bare-floor canary uses **OS-owned binaries only**. Everything else uses the
@@ -1545,10 +1551,10 @@ Row ids are provisional. The implementation owns the final ids.
 
 | Id | Class | Asserts | Platform |
 |---|---|---|---|
-| `N-ssh-key` | negative | `~/.ssh/id_*` unreadable (decoy) | both |
-| `N-ssh-config` | negative | `~/.ssh/config` unreadable (decoy) | both |
-| `N-aws` | negative | `~/.aws` unreadable (decoy) | both |
-| `N-npmrc` | negative | `~/.npmrc` unreadable (decoy) | both |
+| `N-ssh-key` | negative | `~/.ssh/id_*` unreadable (decoy) | both; skip `skip.host.home-not-writable` |
+| `N-ssh-config` | negative | `~/.ssh/config` unreadable (decoy) | both; skip `skip.host.home-not-writable` |
+| `N-aws` | negative | `~/.aws` unreadable (decoy) | both; skip `skip.host.home-not-writable` |
+| `N-npmrc` | negative | `~/.npmrc` unreadable (decoy) | both; skip `skip.host.home-not-writable` |
 | `N-symlink` | negative | the above unreadable through a resolved symlink | both |
 | `N-store-stale` | negative | a store path outside the declared closure (decoy `…-home-manager-files/.ssh/config`) unreachable | both; skip `skip.host.no-nix` |
 | `N-keg-decoy` | negative | a manufactured decoy keg beside a granted keg is denied | both; skip `skip.host.no-homebrew` |

@@ -34,7 +34,7 @@ use crate::row::{
 pub fn run(rows: &[Row], home: &Path) -> Vec<Outcome> {
     let mut outcomes: Vec<Option<Outcome>> = rows
         .iter()
-        .map(|row| applies(&row.platform).err())
+        .map(|row| applies(&row.platform, home).err())
         .collect();
     let mut fixtures: Vec<Fixture> = Vec::new();
     for row in rows {
@@ -315,7 +315,14 @@ const INHERITED: RawFd = 99;
 /// What a decoy at a real credential path holds: inert in the file's own syntax, and naming its
 /// author, should a killed run leave it behind
 /// ([#118](https://github.com/firefly-engineering/playpen/issues/118)).
-const DECOY: &str = "# playpen enforcement-suite decoy, safe to delete\n";
+pub const DECOY: &str = "# playpen enforcement-suite decoy, safe to delete\n";
+
+/// The decoy key's name. `ssh` tries only its default identity names, so a leftover is never
+/// offered as a key.
+pub const SSH_KEY_DECOY: &str = "id_playpen-decoy";
+
+/// The file marking a decoy directory as one, holding [`DECOY`].
+pub const DECOY_MARKER: &str = "playpen-decoy";
 
 fn prepare(action: Action, home: &Path, made: &mut Made) -> Result<Prepared, String> {
     let mut decoys = Vec::new();
@@ -329,10 +336,11 @@ fn prepare(action: Action, home: &Path, made: &mut Made) -> Result<Prepared, Str
             }
             Target::Aws => {
                 let aws = home.join(".aws");
+                reclaim_dir(&aws, Some(DECOY_MARKER), made)?;
                 if aws.symlink_metadata().is_err() {
                     // Marked, so a decoy a killed run leaves behind names its author.
                     decoy_dir_at(&aws, made)?;
-                    decoy_file(&aws.join("playpen-decoy"), made)?;
+                    decoy_file(&aws.join(DECOY_MARKER), made)?;
                 }
                 Ok(vec![aws])
             }
@@ -471,14 +479,64 @@ fn user_temp_dir() -> Result<Option<PathBuf>, String> {
     Ok(None)
 }
 
-/// `~/.ssh`, made with the mode ssh demands if the host has none.
+/// `~/.ssh`, made with the mode ssh demands if the host has none. The decoys the rows put in it
+/// are reclaimed first, then the directory itself if that leaves it empty.
 fn ssh_dir(home: &Path, made: &mut Made) -> Result<PathBuf, String> {
-    decoy_dir_at(&home.join(".ssh"), made)
+    let ssh = home.join(".ssh");
+    for name in [SSH_KEY_DECOY, "config"] {
+        reclaim_file(&ssh.join(name), made)?;
+    }
+    reclaim_dir(&ssh, None, made)?;
+    decoy_dir_at(&ssh, made)
 }
 
-/// `path` as the host has it, else a decoy file there. A dangling symlink counts as the host's:
-/// it is never written through.
+/// Whether `path` is a decoy: a regular file whose entire content is [`DECOY`]. Never a prefix or
+/// a line within a larger file, which could be a host's own file the suite once wrote beside.
+fn is_decoy(path: &Path) -> bool {
+    path.symlink_metadata().is_ok_and(|meta| meta.is_file())
+        && fs::read(path).is_ok_and(|content| content == DECOY.as_bytes())
+}
+
+/// Remove `path` if it is a decoy a killed run left behind, so the host is not taken to have it
+/// ([spec §17.1]). One this run made is still in use.
+///
+/// [spec §17.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#171-form
+fn reclaim_file(path: &Path, made: &Made) -> Result<(), String> {
+    if made.0.iter().any(|p| p == path) || !is_decoy(path) {
+        return Ok(());
+    }
+    fs::remove_file(path).map_err(|e| format!("reclaim {}: {e}", path.display()))
+}
+
+/// Remove the directory `path` if a killed run left it behind as a decoy: holding nothing but
+/// `marker`, itself a decoy, or nothing at all where there is no marker. Never recursive, so a
+/// directory that has since gained anything of the host's survives.
+fn reclaim_dir(path: &Path, marker: Option<&str>, made: &Made) -> Result<(), String> {
+    if made.0.iter().any(|p| p == path) || !path.symlink_metadata().is_ok_and(|meta| meta.is_dir())
+    {
+        return Ok(());
+    }
+    let failed = |e: std::io::Error| format!("reclaim {}: {e}", path.display());
+    let entries: Vec<_> = fs::read_dir(path)
+        .map_err(failed)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<Result<_, _>>()
+        .map_err(failed)?;
+    match (marker, entries.as_slice()) {
+        (None, []) => {}
+        (Some(marker), [only]) if only == marker && is_decoy(&path.join(marker)) => {
+            fs::remove_file(path.join(marker)).map_err(failed)?;
+        }
+        _ => return Ok(()),
+    }
+    fs::remove_dir(path).map_err(failed)
+}
+
+/// `path` as the host has it, else a decoy file there; a decoy a killed run left there is
+/// reclaimed first. A dangling symlink counts as the host's: it is never written through, and
+/// nothing is ever appended to a file that exists.
 fn decoy_file(path: &Path, made: &mut Made) -> Result<PathBuf, String> {
+    reclaim_file(path, made)?;
     if path.symlink_metadata().is_err() {
         File::options()
             .write(true)
@@ -506,23 +564,21 @@ fn decoy_dir_at(path: &Path, made: &mut Made) -> Result<PathBuf, String> {
 
 /// The host's own `~/.ssh/id_*` private key if it has one; else a decoy in its place, so the
 /// row exercises the same path resolution on a fresh runner.
+/// A host with a key of its own is left untouched: nothing is written and nothing reclaimed.
 fn ssh_key(home: &Path, made: &mut Made) -> Result<PathBuf, String> {
     let ssh = home.join(".ssh");
     if let Ok(entries) = fs::read_dir(&ssh) {
         let mut keys: Vec<PathBuf> = entries
             .filter_map(Result::ok)
             .map(|entry| entry.path())
-            .filter(|path| is_private_key(path) && path.is_file())
+            .filter(|path| is_private_key(path) && path.is_file() && !is_decoy(path))
             .collect();
         keys.sort();
         if let Some(key) = keys.into_iter().next() {
             return Ok(key);
         }
     }
-    let decoy = ssh_dir(home, made)?.join("id_playpen-decoy");
-    fs::write(&decoy, DECOY).map_err(|e| format!("decoy {}: {e}", decoy.display()))?;
-    made.0.push(decoy.clone());
-    Ok(decoy)
+    decoy_file(&ssh_dir(home, made)?.join(SSH_KEY_DECOY), made)
 }
 
 fn is_private_key(path: &Path) -> bool {

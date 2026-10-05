@@ -20,10 +20,12 @@ use std::path::{Path, PathBuf};
 
 use playpen::code::Code;
 use row::{
-    Action, Asymmetry, BOTH, Cause, Class, Declined, Expected, Fixture, Os, Outcome, Platform, Row,
-    Scope, Seen, Target, Verdict, judge, judge_refusal,
+    Action, Asymmetry, BOTH, Cause, Class, Declined, Expected, Fixture, Os, Outcome, Platform,
+    Precondition, Row, Scope, Seen, Target, Verdict, judge, judge_refusal,
 };
 use rows::ROWS;
+use run::{DECOY, DECOY_MARKER, SSH_KEY_DECOY};
+use tempfile::TempDir;
 
 fn main() {
     // Re-run by `R-missing-cap` as playpen: its inputs are read here, as `src/main.rs` reads them.
@@ -73,6 +75,30 @@ fn main() {
         (
             "a_row_scoped_to_the_other_platform_is_na_and_never_runs",
             a_row_scoped_to_the_other_platform_is_na_and_never_runs,
+        ),
+        (
+            "decoys_a_killed_run_left_are_reclaimed_and_the_rows_run",
+            decoys_a_killed_run_left_are_reclaimed_and_the_rows_run,
+        ),
+        (
+            "a_file_that_merely_contains_the_decoy_line_is_the_hosts",
+            a_file_that_merely_contains_the_decoy_line_is_the_hosts,
+        ),
+        (
+            "a_decoy_directory_holding_anything_else_is_the_hosts",
+            a_decoy_directory_holding_anything_else_is_the_hosts,
+        ),
+        (
+            "a_non_empty_ssh_directory_is_the_hosts",
+            a_non_empty_ssh_directory_is_the_hosts,
+        ),
+        (
+            "a_host_with_a_key_of_its_own_is_left_untouched",
+            a_host_with_a_key_of_its_own_is_left_untouched,
+        ),
+        (
+            "an_unwritable_home_skips_the_rows_that_write_there",
+            an_unwritable_home_skips_the_rows_that_write_there,
         ),
     ];
     for (name, check) in checks {
@@ -270,4 +296,129 @@ fn a_row_scoped_to_the_other_platform_is_na_and_never_runs() {
         let outcomes = run::run(&[row], Path::new("/nonexistent/playpen-home"));
         assert_eq!(outcomes, [Outcome::NotApplicable(asymmetry)]);
     }
+}
+
+/// The rows that put a decoy in the caller's home when the host lacks the real target: those that
+/// need it writable. `ids` narrows them; empty, it takes them all.
+fn in_home(ids: &[&str]) -> Vec<Row> {
+    let rows: Vec<Row> = ROWS
+        .iter()
+        .filter(|row| row.platform.requires.contains(&Precondition::HomeWritable))
+        .filter(|row| ids.is_empty() || ids.contains(&row.id))
+        .copied()
+        .collect();
+    // Every id asked for names a row that writes in the home.
+    assert!(ids.is_empty() || rows.len() == ids.len(), "{ids:?}");
+    rows
+}
+
+/// A home of the check's own holding `files`, each at a path relative to it.
+fn home_with(files: &[(&str, &str)]) -> TempDir {
+    let home = TempDir::new().expect("home");
+    for (path, content) in files {
+        let path = home.path().join(path);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+        std::fs::write(path, content).expect("plant");
+    }
+    home
+}
+
+/// Every path under `home`, relative to it, with a file's content.
+fn contents(home: &Path) -> Vec<(PathBuf, Option<String>)> {
+    let mut seen = Vec::new();
+    let mut pending = vec![home.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("list") {
+            let path = entry.expect("entry").path();
+            let relative = path.strip_prefix(home).expect("under home").to_path_buf();
+            if path.is_dir() {
+                seen.push((relative, None));
+                pending.push(path);
+            } else {
+                seen.push((
+                    relative,
+                    Some(std::fs::read_to_string(&path).expect("read")),
+                ));
+            }
+        }
+    }
+    seen.sort();
+    seen
+}
+
+/// A run killed before its teardown leaves every decoy behind. The next run reclaims each one
+/// rather than take it for the host's, asserts against a fresh decoy, and tears that down.
+fn decoys_a_killed_run_left_are_reclaimed_and_the_rows_run() {
+    let home = home_with(&[
+        (&format!(".ssh/{SSH_KEY_DECOY}"), DECOY),
+        (".ssh/config", DECOY),
+        (".npmrc", DECOY),
+        (&format!(".aws/{DECOY_MARKER}"), DECOY),
+    ]);
+    let outcomes = run::run(&in_home(&[]), home.path());
+    assert!(
+        outcomes.iter().all(|o| *o == Outcome::Runs(Verdict::Pass)),
+        "{outcomes:?}"
+    );
+    assert_eq!(contents(home.path()), [], "a decoy outlived the run");
+}
+
+/// Content is the discriminator, and only an exact match: a host file the decoy line was once
+/// appended to, or that quotes it, is the host's.
+fn a_file_that_merely_contains_the_decoy_line_is_the_hosts() {
+    let npmrc = format!("registry=https://example.invalid/\n{DECOY}");
+    let home = home_with(&[(".npmrc", &npmrc)]);
+    let before = contents(home.path());
+    run::run(&in_home(&["N-npmrc"]), home.path());
+    assert_eq!(contents(home.path()), before);
+}
+
+/// A decoy directory that has since gained anything of the host's is the host's, whole: removal is
+/// never recursive.
+fn a_decoy_directory_holding_anything_else_is_the_hosts() {
+    let home = home_with(&[
+        (&format!(".aws/{DECOY_MARKER}"), DECOY),
+        (".aws/credentials", "[default]\n"),
+    ]);
+    let before = contents(home.path());
+    run::run(&in_home(&["N-aws"]), home.path());
+    assert_eq!(contents(home.path()), before);
+}
+
+/// `~/.ssh` is reclaimed only when empty, so the host's own files in it survive every run.
+fn a_non_empty_ssh_directory_is_the_hosts() {
+    let home = home_with(&[(".ssh/known_hosts", "example.invalid ssh-ed25519 AAAA\n")]);
+    let before = contents(home.path());
+    run::run(&in_home(&["N-ssh-key", "N-ssh-config"]), home.path());
+    assert_eq!(contents(home.path()), before, "only the decoys went");
+}
+
+/// A host key is what the row reads, so nothing is written, and a stale decoy beside it is not
+/// this row's to reclaim.
+fn a_host_with_a_key_of_its_own_is_left_untouched() {
+    let home = home_with(&[
+        (".ssh/id_ed25519", "not a real key\n"),
+        (&format!(".ssh/{SSH_KEY_DECOY}"), DECOY),
+    ]);
+    let before = contents(home.path());
+    let outcomes = run::run(&in_home(&["N-ssh-key"]), home.path());
+    assert_eq!(outcomes, [Outcome::Runs(Verdict::Pass)]);
+    assert_eq!(contents(home.path()), before);
+}
+
+/// Never a setup failure, which would read like a boundary regression, and never a synthetic
+/// home, which would assert less than the spec says.
+fn an_unwritable_home_skips_the_rows_that_write_there() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = home_with(&[]);
+    let mode = |mode| {
+        std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(mode)).expect("chmod")
+    };
+    mode(0o500);
+    let outcomes = run::run(&in_home(&[]), home.path());
+    mode(0o700);
+    assert_eq!(
+        outcomes,
+        vec![Outcome::Skipped(Precondition::HomeWritable); in_home(&[]).len()]
+    );
 }

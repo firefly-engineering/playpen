@@ -5,6 +5,8 @@
 //! [spec §17.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#171-form
 
 use std::fmt;
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 
 use playpen::code::Code;
 use playpen::refusal::EXIT_REFUSED;
@@ -12,6 +14,7 @@ use playpen::refusal::EXIT_REFUSED;
 use crate::common::DENIAL_ERRNOS;
 
 /// One assertion of the suite.
+#[derive(Clone, Copy)]
 pub struct Row {
     /// Stable, and the name a report and a reverse query use.
     pub id: &'static str,
@@ -38,6 +41,7 @@ pub enum Class {
 }
 
 /// Where a row applies, and what it needs of the host there.
+#[derive(Clone, Copy)]
 pub struct Platform {
     pub scope: Scope,
     /// Probed before the row runs; the first that does not hold skips the row by its name.
@@ -107,18 +111,36 @@ ledger! {
 
 /// A host precondition a row needs, each probed explicitly and skipping by its own stable name
 /// (`skip.host.no-nix`, …). A skip is never inferred from a failure: [`judge`] has no skip to
-/// return. No row needs one yet; the first that does adds its variant and its probe here.
+/// return.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Precondition {}
+pub enum Precondition {
+    /// The caller's home directory can be written, so a row whose real target the host lacks can
+    /// put a decoy there. Without it such a row would fail for a reason about the host that reads
+    /// like a boundary regression, and a synthetic home would assert less than [spec §17.2] says.
+    ///
+    /// [spec §17.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#172-rows
+    HomeWritable,
+}
 
 impl Precondition {
     /// The stable name the row is skipped under when this does not hold.
     pub fn skip(self) -> &'static str {
-        match self {}
+        match self {
+            Precondition::HomeWritable => "skip.host.home-not-writable",
+        }
     }
 
-    pub fn holds(self) -> bool {
-        match self {}
+    /// Probed without writing anything: a probe that wrote would need the reclamation it guards.
+    pub fn holds(self, home: &Path) -> bool {
+        match self {
+            Precondition::HomeWritable => {
+                let Ok(path) = std::ffi::CString::new(home.as_os_str().as_bytes()) else {
+                    return false;
+                };
+                // SAFETY: `path` is NUL-terminated and outlives the call.
+                unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
+            }
+        }
     }
 }
 
@@ -360,14 +382,15 @@ impl fmt::Display for Outcome {
     }
 }
 
-/// Whether `platform` lets a row run on this host, or what it is instead.
-pub fn applies(platform: &Platform) -> Result<(), Outcome> {
+/// Whether `platform` lets a row run on this host, whose caller's home is `home`, or what it is
+/// instead.
+pub fn applies(platform: &Platform, home: &Path) -> Result<(), Outcome> {
     if let Scope::Only(os, asymmetry) = platform.scope
         && os != Os::HERE
     {
         return Err(Outcome::NotApplicable(asymmetry));
     }
-    match platform.requires.iter().find(|p| !p.holds()) {
+    match platform.requires.iter().find(|p| !p.holds(home)) {
         Some(&missing) => Err(Outcome::Skipped(missing)),
         None => Ok(()),
     }
