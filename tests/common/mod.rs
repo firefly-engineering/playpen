@@ -55,6 +55,12 @@ impl Fixture {
 
     /// The root is granted at `mode` (`read` or `readwrite`).
     pub fn with_mode(mode: &str) -> Self {
+        Self::with_toolchain(mode, &[])
+    }
+
+    /// The root is granted at `mode`, and the profile's toolchain is `toolchain`.
+    pub fn with_toolchain(mode: &str, toolchain: &[&Path]) -> Self {
+        let toolchain: Vec<Value> = toolchain.iter().map(|path| json!({"path": path})).collect();
         let root = TempDir::new().expect("root");
         std::fs::copy(PROBE, root.path().join("probe")).expect("copy probe");
         let policy_dir = TempDir::new().expect("policy dir");
@@ -62,7 +68,7 @@ impl Fixture {
         let document = json!({
             "version": 1,
             "workspaces": {"w": {"roots": [{"path": root.path(), "mode": mode}]}},
-            "profiles": {"p": {"workspaces": ["w"], "toolchain": []}},
+            "profiles": {"p": {"workspaces": ["w"], "toolchain": toolchain}},
         });
         std::fs::write(&policy, document.to_string()).expect("write policy");
         Self {

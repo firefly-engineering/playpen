@@ -6,8 +6,8 @@
 //! workspaces, lifetimes or profiles beyond the selection that chose it. Every entry carries a
 //! `from:` naming its authored source, the only bridge back to the policy.
 //!
-//! `run` launches from [`capabilities`]'s parts and `explain` renders [`Resolved`] built from the
-//! same function, so what `explain` shows is what a launch would grant, never a second reading of
+//! `run` launches from [`capabilities`] and `explain` renders [`Resolved`] built from the same
+//! function, so what `explain` shows is what a launch would grant, never a second reading of
 //! the policy.
 //!
 //! [spec §10.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#104-the-resolved-form
@@ -83,9 +83,49 @@ fn link(named: &Path, from: &str) -> Result<Option<PathGrant>, Refusal> {
     }))
 }
 
-/// The whole capability set a launch of `selected` applies: the floor, then the profile's roots.
-pub fn capabilities(policy: &Policy, selected: &Profile) -> Result<CapabilitySet, Refusal> {
+/// The toolchain of profile `name`: one read-only root per entry, the link too where an entry names
+/// one ([spec §8.3]). Read grants execute, and a toolchain root carries no `mode`, so nothing in it
+/// is ever writable.
+///
+/// [spec §8.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#83-toolchain
+pub fn toolchain(name: &str, selected: &Profile) -> Result<Vec<PathGrant>, Refusal> {
+    let mut grants = Vec::new();
+    for (i, root) in selected.toolchain.iter().enumerate() {
+        let from = format!("profile:{name}.toolchain[{i}]");
+        let path = root.path.canonicalize().map_err(|e| {
+            Refusal::new(
+                Code::RootMissing,
+                format!(
+                    "{from}: toolchain root {} is unavailable: {e}",
+                    root.path.display()
+                ),
+            )
+        })?;
+        grants.extend(link(&root.path, &from)?);
+        grants.push(PathGrant {
+            path,
+            access: Access::Read,
+            scope: Scope::Subtree,
+            from,
+            state_derived: false,
+        });
+    }
+    Ok(grants)
+}
+
+/// The whole capability set a launch of profile `name` applies ([spec §8.1]): the floor, the
+/// toolchain, then the brought roots. `run` applies it and `explain` shows it.
+///
+/// [spec §8.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#81-shape
+pub fn capabilities(policy: &Policy, name: &str) -> Result<CapabilitySet, Refusal> {
+    let Some(selected) = policy.profiles.get(name) else {
+        return Err(Refusal::new(
+            Code::SelectionUnknownProfile,
+            format!("profile {name:?} is not in the policy"),
+        ));
+    };
     let mut caps = floor()?;
+    caps.paths.extend(toolchain(name, selected)?);
     caps.paths.extend(roots(policy, selected)?);
     Ok(caps)
 }
@@ -224,5 +264,86 @@ mod tests {
                 .any(|g| g.path == named && g.access == Access::Read && g.scope == Scope::Literal)
         );
         assert!(grants.iter().all(|g| g.from == "workspace:w.roots[0]"));
+    }
+
+    fn with_toolchain(toolchain: &[&Path]) -> Policy {
+        let toolchain: Vec<_> = toolchain
+            .iter()
+            .map(|path| serde_json::json!({"path": path}))
+            .collect();
+        let text = serde_json::json!({
+            "version": 1,
+            "profiles": {"p": {"workspaces": [], "toolchain": toolchain}},
+        });
+        Policy::parse(&text.to_string(), Path::new("/p.json")).expect("parses")
+    }
+
+    /// Toolchain roots are read and execute only, each with its own provenance ([spec §8.3]).
+    ///
+    /// [spec §8.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#83-toolchain
+    #[test]
+    fn toolchain_roots_are_read_only_with_provenance() {
+        let first = tempfile::TempDir::new().expect("first");
+        let second = tempfile::TempDir::new().expect("second");
+        let policy = with_toolchain(&[first.path(), second.path()]);
+        let grants = toolchain("p", &policy.profiles["p"]).expect("resolves");
+        let expected: Vec<_> = [&first, &second]
+            .iter()
+            .enumerate()
+            .map(|(i, dir)| PathGrant {
+                path: dir.path().canonicalize().expect("canonical"),
+                access: Access::Read,
+                scope: Scope::Subtree,
+                from: format!("profile:p.toolchain[{i}]"),
+                state_derived: false,
+            })
+            .collect();
+        assert_eq!(grants, expected);
+    }
+
+    /// A keg list names stable per-package links, resolved at launch: link and target are both
+    /// granted.
+    #[test]
+    fn a_toolchain_root_named_by_a_link_grants_the_link_and_its_target() {
+        let keg = tempfile::TempDir::new().expect("keg");
+        let opt = tempfile::TempDir::new().expect("opt");
+        let link = opt.path().join("git");
+        std::os::unix::fs::symlink(keg.path(), &link).expect("symlink");
+        let policy = with_toolchain(&[&link]);
+        let grants = toolchain("p", &policy.profiles["p"]).expect("resolves");
+        assert_eq!(grants.len(), 2, "{grants:?}");
+        assert!(grants.iter().all(|g| g.access == Access::Read));
+        assert!(
+            grants
+                .iter()
+                .any(|g| g.scope == Scope::Literal && g.path.ends_with("git"))
+        );
+    }
+
+    #[test]
+    fn a_missing_toolchain_root_is_refused() {
+        let dir = tempfile::TempDir::new().expect("dir");
+        let policy = with_toolchain(&[&dir.path().join("gone")]);
+        let refusal = toolchain("p", &policy.profiles["p"]).expect_err("refused");
+        assert_eq!(refusal.code, Code::RootMissing);
+        assert!(
+            refusal.message().contains("profile:p.toolchain[0]"),
+            "{refusal}"
+        );
+    }
+
+    /// The capability set is the floor, the toolchain and the brought roots: what `run` applies
+    /// and `explain` shows.
+    #[test]
+    fn the_capability_set_holds_the_toolchain() {
+        let tool = tempfile::TempDir::new().expect("tool");
+        let policy = with_toolchain(&[tool.path()]);
+        let caps = capabilities(&policy, "p").expect("resolves");
+        assert!(caps.paths.iter().any(|g| g.from == "floor"));
+        assert!(
+            caps.paths
+                .iter()
+                .any(|g| g.from == "profile:p.toolchain[0]")
+        );
     }
 }

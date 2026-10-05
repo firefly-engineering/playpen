@@ -1789,7 +1789,7 @@ rather than a `refusal.*` code needing an exemption from the gate.
 | `refusal.endpoint.unsatisfiable` † | coherence | a rule set that no path under the route's prefix can match |
 | `refusal.env.reserved` † | coherence | a policy entry collides with a reserved name ([§9.2](#92-set-entries)) |
 | `refusal.env.forbidden` | coherence | `SSH_AUTH_SOCK` in `env.allow`, an env fragment, or `set:` |
-| `refusal.root.relative` † | coherence | a brought root's path is not absolute |
+| `refusal.root.relative` † | coherence | a brought or toolchain root's path is not absolute |
 
 ### Invocation and selection
 

@@ -23,8 +23,9 @@ use tempfile::{NamedTempFile, TempDir};
 
 use crate::common::{self, PROBE};
 use crate::row::{
-    Action, Cause, Checked, Declined, Fixture, Invocation, Listening, MERGED_TYPO, Outcome, Row,
-    Seen, Services, Signalled, Target, Verdict, applies, judge, judge_refusal, judge_unexamined,
+    Action, Cause, Checked, Declined, Expected, Fixture, Invocation, Listening, MERGED_TYPO,
+    Outcome, Row, Seen, Services, Signalled, Target, Verdict, applies, judge, judge_refusal,
+    judge_unexamined,
 };
 use playpen::refusal::EXIT_REFUSED;
 
@@ -57,6 +58,7 @@ pub fn run(rows: &[Row], home: &Path) -> Vec<Outcome> {
             Fixture::Outside => members.iter().map(|row| refusal(row)).collect(),
             Fixture::NothingGranted => members.iter().map(|row| nothing_granted(row)).collect(),
             Fixture::DescendantDenied => members.iter().map(|row| descendant_denied(row)).collect(),
+            Fixture::Toolchain => members.iter().map(|row| toolchain(row)).collect(),
         };
         for (i, verdict) in batch.into_iter().zip(verdicts) {
             outcomes[i] = Some(Outcome::Runs(verdict));
@@ -86,6 +88,165 @@ fn nothing_granted(row: &Row) -> Verdict {
             "{action:?} needs a grant, and nothing granted admits none"
         )),
     }
+}
+
+/// A row under a toolchain of one root made beside its target. The neighbour is read first, on
+/// both sides: outside it shows the probe can read the kind of path at all, inside that the
+/// toolchain was applied, without which a denial of the target would prove nothing.
+fn toolchain(row: &Row) -> Verdict {
+    let mut made = Made::default();
+    let made_paths = match row.action {
+        Action::Read(Target::StaleStorePath) => store_paths(),
+        Action::Read(Target::DecoyKeg) => kegs(&mut made),
+        action => Err(format!("{action:?} has no toolchain to stand beside")),
+    };
+    let Beside {
+        root,
+        neighbour,
+        targets,
+        _dir,
+    } = match made_paths {
+        Ok(beside) => beside,
+        Err(why) => return Verdict::Setup(why),
+    };
+    let paths: Vec<String> = match std::iter::once(&neighbour)
+        .chain(&targets)
+        .map(|path| utf8(path))
+        .collect()
+    {
+        Ok(paths) => paths,
+        Err(why) => return Verdict::Setup(why),
+    };
+    let ops: Vec<&str> = paths
+        .iter()
+        .flat_map(|path| ["read", path.as_str()])
+        .collect();
+    let outside = Command::new(PROBE)
+        .args(&ops)
+        .output()
+        .expect("run the probe");
+    let fixture = common::Fixture::with_toolchain("read", &[root.as_path()]);
+    let probe = fixture.probe();
+    let mut argv = vec![probe.to_str().expect("a UTF-8 probe path")];
+    argv.extend(&ops);
+    let inside = fixture
+        .run(&argv)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run playpen");
+    let (outside, inside) = match (observe(outside, paths.len()), observe(inside, paths.len())) {
+        (Ok(outside), Ok(inside)) => (outside, inside),
+        (Err(why), _) => return Verdict::Setup(format!("outside: {why}")),
+        (_, Err(why)) => return Verdict::Fail(format!("inside: {why}")),
+    };
+    match judge(Expected::Succeeds, &outside[0], &inside[0]) {
+        Verdict::Pass => {}
+        Verdict::Fail(why) => {
+            return Verdict::Fail(format!(
+                "the toolchain's own root is unreadable inside, so it was not applied: {why}"
+            ));
+        }
+        setup => return setup,
+    }
+    outside[1..]
+        .iter()
+        .zip(&inside[1..])
+        .map(|(outside, inside)| judge(row.expected, outside, inside))
+        .find(|verdict| *verdict != Verdict::Pass)
+        .unwrap_or(Verdict::Pass)
+}
+
+/// What a toolchain row made: the root its toolchain grants, a file under it, and the targets
+/// beside it that the grant must not reach.
+struct Beside {
+    root: PathBuf,
+    neighbour: PathBuf,
+    targets: Vec<PathBuf>,
+    /// Where the trees the store copied were built, removed with the row.
+    _dir: Option<TempDir>,
+}
+
+/// Two store paths: a closure the toolchain grants, and beside it a stale `home-manager-files`
+/// generation holding `.ssh/config`. Both are content-addressed copies of trees made here, so the
+/// row never writes over anything of the host's, and the store collects them when unrooted.
+fn store_paths() -> Result<Beside, String> {
+    let dir = TempDir::new().map_err(|e| format!("store sources: {e}"))?;
+    let tree = |name: &str, file: &str| -> Result<PathBuf, String> {
+        let tree = dir.path().join(name);
+        let path = tree.join(file);
+        fs::create_dir_all(path.parent().expect("a parent")).map_err(|e| format!("{e}"))?;
+        fs::write(&path, DECOY).map_err(|e| format!("{}: {e}", path.display()))?;
+        let output = Command::new("nix-store")
+            .arg("--add")
+            .arg(&tree)
+            .output()
+            .map_err(|e| format!("nix-store --add: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "nix-store --add {}: {}",
+                tree.display(),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        Ok(PathBuf::from(
+            String::from_utf8_lossy(&output.stdout).trim(),
+        ))
+    };
+    let closure = tree("playpen-suite-closure", "granted")?;
+    let stale = tree("home-manager-files", ".ssh/config")?;
+    Ok(Beside {
+        neighbour: closure.join("granted"),
+        root: closure,
+        targets: vec![stale.join(".ssh/config")],
+        _dir: Some(dir),
+    })
+}
+
+/// The keg a toolchain row grants, and the decoy keg beside it.
+const KEGS: [&str; 2] = ["playpen-decoy-granted", "playpen-decoy-keg"];
+
+/// Two manufactured kegs laid out as Homebrew lays out its own — `Cellar/<keg>/<version>`, with
+/// `opt/<keg>` a relative link to it — each holding only its decoy marker. The toolchain grants
+/// the first through its `opt` link, as a keg list does; the second's marker is the target.
+fn kegs(made: &mut Made) -> Result<Beside, String> {
+    let prefix = crate::row::homebrew_prefix().ok_or("no Homebrew prefix")?;
+    let mut markers = Vec::new();
+    for keg in KEGS {
+        let link = prefix.join("opt").join(keg);
+        let cellar = prefix.join("Cellar").join(keg);
+        reclaim_keg(&link, &cellar, made)?;
+        if link.symlink_metadata().is_ok() {
+            return Err(format!("{} is the host's", link.display()));
+        }
+        decoy_dir_at(&cellar, made)?;
+        decoy_dir_at(&cellar.join("0"), made)?;
+        decoy_file(&cellar.join("0").join(DECOY_MARKER), made)?;
+        std::os::unix::fs::symlink(Path::new("../Cellar").join(keg).join("0"), &link)
+            .map_err(|e| format!("link {}: {e}", link.display()))?;
+        made.0.push(link.clone());
+        markers.push(link.join(DECOY_MARKER));
+    }
+    let root = prefix.join("opt").join(KEGS[0]);
+    let decoy = markers.pop().expect("two kegs");
+    Ok(Beside {
+        root,
+        neighbour: markers.pop().expect("two kegs"),
+        targets: vec![decoy],
+        _dir: None,
+    })
+}
+
+/// Remove a manufactured keg a killed run left behind: the `opt` link only when it points at
+/// exactly the keg's decoy version, and the cellar only as far as it holds nothing but decoys.
+fn reclaim_keg(link: &Path, cellar: &Path, made: &Made) -> Result<(), String> {
+    let ours = link
+        .file_name()
+        .map(|keg| Path::new("../Cellar").join(keg).join("0"));
+    if fs::read_link(link).ok() == ours && ours.is_some() && !made.0.iter().any(|p| p == link) {
+        fs::remove_file(link).map_err(|e| format!("reclaim {}: {e}", link.display()))?;
+    }
+    reclaim_dir(&cellar.join("0"), Some(DECOY_MARKER), made)?;
+    reclaim_dir(cellar, None, made)
 }
 
 fn descendant_denied(row: &Row) -> Verdict {
@@ -546,8 +707,10 @@ struct Made(Vec<PathBuf>);
 impl Drop for Made {
     fn drop(&mut self) {
         for path in self.0.iter().rev() {
-            // Best effort: a decoy that cannot be removed is reported by nothing else either.
-            let _ = if path.is_dir() {
+            // Best effort: a decoy that cannot be removed is reported by nothing else either. The
+            // entry itself decides, so a link to a directory is removed as the link it is.
+            let is_dir = path.symlink_metadata().is_ok_and(|meta| meta.is_dir());
+            let _ = if is_dir {
                 fs::remove_dir(path)
             } else {
                 fs::remove_file(path)
@@ -611,6 +774,9 @@ fn prepare(action: Action, home: &Path, root: &Path, made: &mut Made) -> Result<
                 let dir = TempDir::new().map_err(|e| format!("decoy directory: {e}"))?;
                 Ok(vec![decoy_dir.insert(dir).path().to_owned()])
             }
+            Target::StaleStorePath | Target::DecoyKeg => Err(format!(
+                "{target:?} stands beside a toolchain, and the probe's root has none"
+            )),
             Target::LinkedCredentials => {
                 let key = ssh_key(home, made)?;
                 let ssh = ssh_dir(home, made)?;

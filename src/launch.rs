@@ -18,7 +18,6 @@ use crate::check;
 use crate::child;
 use crate::code::Code;
 use crate::explain;
-use crate::floor::floor;
 use crate::mechanism::{self, Mechanism};
 use crate::policy::{Policy, SearchPath, coherence};
 use crate::record::{self, RunId, RunRecord};
@@ -252,8 +251,7 @@ fn run(
     probe().require(mechanism::REQUIRED)?;
     floor_self_test()?;
 
-    let mut caps = floor()?;
-    caps.paths.extend(roots);
+    let caps = resolve::capabilities(&loaded.policy, profile)?;
     // The existence-tier containment check, run once the capability set is complete because the
     // rule is about *every* granted path and the floor is a grant too: on a non-FHS host it is a
     // declared closure read from a `PLAYPEN_FLOOR`-selected directory, so it is neither

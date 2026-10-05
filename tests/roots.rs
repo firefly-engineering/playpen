@@ -180,3 +180,28 @@ fn a_dangling_link_is_refused_naming_the_path() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains(link.to_str().unwrap()), "{stderr}");
 }
+
+/// A binary runs only where a grant covers it: the agent's own included ([spec §8.1], Appendix C
+/// item C9).
+///
+/// [spec §8.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#81-shape
+#[test]
+fn a_binary_covered_by_a_toolchain_root_runs_and_an_uncovered_one_is_denied() {
+    let fx = Fixture::new();
+    let covered = TempDir::new().expect("toolchain");
+    let uncovered = TempDir::new().expect("elsewhere");
+    let (covered_bin, uncovered_bin) = (runnable(covered.path()), runnable(uncovered.path()));
+    let policy = fx.policy_named(
+        "toolchain.json",
+        &json!({
+            "version": 1,
+            "workspaces": {"w": {"roots": [{"path": fx.root(), "mode": "readwrite"}]}},
+            "profiles": {"p": {"workspaces": ["w"], "toolchain": [{"path": covered.path()}]}},
+        }),
+    );
+    assert_eq!(fx.probe_under(&policy, &["exec", &covered_bin])["ok"], true);
+    assert_denied(&fx.probe_under(&policy, &["exec", &uncovered_bin]));
+    // Read and execute only.
+    let planted = covered.path().join("planted");
+    assert_denied(&fx.probe_under(&policy, &["write", planted.to_str().unwrap()]));
+}

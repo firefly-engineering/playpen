@@ -122,6 +122,11 @@ pub enum Precondition {
     ///
     /// [spec §17.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#172-rows
     HomeWritable,
+    /// `nix-store` runs, so a store path can be made to stand outside a declared closure.
+    Nix,
+    /// `brew --prefix` names a prefix whose `Cellar` and `opt` can be written, so a keg can be
+    /// manufactured beside another.
+    Homebrew,
 }
 
 impl Precondition {
@@ -129,21 +134,44 @@ impl Precondition {
     pub fn skip(self) -> &'static str {
         match self {
             Precondition::HomeWritable => "skip.host.home-not-writable",
+            Precondition::Nix => "skip.host.no-nix",
+            Precondition::Homebrew => "skip.host.no-homebrew",
         }
     }
 
     /// Probed without writing anything: a probe that wrote would need the reclamation it guards.
     pub fn holds(self, home: &Path) -> bool {
         match self {
-            Precondition::HomeWritable => {
-                let Ok(path) = std::ffi::CString::new(home.as_os_str().as_bytes()) else {
-                    return false;
-                };
-                // SAFETY: `path` is NUL-terminated and outlives the call.
-                unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
-            }
+            Precondition::HomeWritable => writable(home),
+            Precondition::Nix => std::process::Command::new("nix-store")
+                .arg("--version")
+                .output()
+                .is_ok_and(|output| output.status.success()),
+            Precondition::Homebrew => homebrew_prefix().is_some_and(|prefix| {
+                writable(&prefix.join("Cellar")) && writable(&prefix.join("opt"))
+            }),
         }
     }
+}
+
+/// Homebrew's prefix, as `brew` reports it.
+pub fn homebrew_prefix() -> Option<std::path::PathBuf> {
+    let output = std::process::Command::new("brew")
+        .arg("--prefix")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    let prefix = String::from_utf8(output.stdout).ok()?;
+    Some(prefix.trim().into())
+}
+
+/// Whether `path` can be written, probed without writing anything.
+fn writable(path: &Path) -> bool {
+    let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: `path` is NUL-terminated and outlives the call.
+    unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
 }
 
 /// What a row runs against. Rows sharing a policy fixture share one confined launch.
@@ -167,6 +195,13 @@ pub enum Fixture {
     /// One confined launch of a shell that forks the probe, so that every denial is a
     /// descendant's; then the run's denials, pulled from the platform's log outside.
     DescendantDenied,
+    /// One launch per row, under a profile whose toolchain is a single root the row makes beside
+    /// its target: a closure path beside a stale store path, a keg beside a decoy keg
+    /// ([spec §8.3]). The neighbour must be readable inside, or the toolchain was not applied and
+    /// the negative would prove nothing.
+    ///
+    /// [spec §8.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#83-toolchain
+    Toolchain,
 }
 
 /// The closed set of checks.
@@ -217,6 +252,9 @@ impl Action {
     pub fn admits(self, fixture: Fixture) -> bool {
         match self {
             Action::Canary => matches!(fixture, Fixture::BareFloor | Fixture::NothingGranted),
+            Action::Read(Target::StaleStorePath | Target::DecoyKeg) => {
+                fixture == Fixture::Toolchain
+            }
             Action::Read(_)
             | Action::Create(_)
             | Action::List(_)
@@ -254,6 +292,14 @@ pub enum Target {
     ///
     /// [spec §8.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#85-symlinks
     LinkedCredentials,
+    /// `.ssh/config` in a store path named `…-home-manager-files`, outside the declared closure:
+    /// the stale generation a coarse store root would leak ([spec §8.3]).
+    ///
+    /// [spec §8.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#83-toolchain
+    StaleStorePath,
+    /// The marker of a manufactured keg in Homebrew's prefix, beside a manufactured keg the
+    /// toolchain grants through its `opt` link.
+    DecoyKeg,
 }
 
 /// Mach services, named by what they serve.

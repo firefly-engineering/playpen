@@ -111,14 +111,8 @@ fn resolve(args: &Args, host: &Host) -> Result<Resolved, Refusal> {
     };
     let (trace, selected) = select::select(&loaded.policy, inputs);
     let name = selected?;
-    let Some(profile) = loaded.policy.profiles.get(&name) else {
-        return Err(Refusal::new(
-            Code::SelectionUnknownProfile,
-            format!("profile {name:?} is not in the policy"),
-        ));
-    };
     coherence::check(&loaded)?;
-    let caps = resolve::capabilities(&loaded.policy, profile)?;
+    let caps = resolve::capabilities(&loaded.policy, &name)?;
     record::refuse_if_reachable(host.state.as_deref(), &caps.paths)?;
     Ok(Resolved::new(absolute(&path), trace, name, &caps))
 }

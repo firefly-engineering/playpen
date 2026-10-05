@@ -89,6 +89,30 @@ pub const ROWS: &[Row] = &[
         from: &[Decision::Adr(14), Decision::Adr(16), Decision::Issue(64)],
     },
     Row {
+        id: "N-store-stale",
+        class: Class::Negative,
+        platform: Platform {
+            scope: Scope::Both,
+            requires: &[Precondition::Nix],
+        },
+        fixture: Fixture::Toolchain,
+        action: Action::Read(Target::StaleStorePath),
+        expected: Expected::Denial,
+        from: &[Decision::Adr(14), Decision::Adr(16), Decision::Issue(65)],
+    },
+    Row {
+        id: "N-keg-decoy",
+        class: Class::Negative,
+        platform: Platform {
+            scope: Scope::Both,
+            requires: &[Precondition::Homebrew],
+        },
+        fixture: Fixture::Toolchain,
+        action: Action::Read(Target::DecoyKeg),
+        expected: Expected::Denial,
+        from: &[Decision::Adr(19), Decision::Adr(16), Decision::Issue(65)],
+    },
+    Row {
         id: "N-hosttemp",
         class: Class::Negative,
         platform: BOTH,

@@ -46,25 +46,38 @@ fn workspaces_are_declared(loaded: &Loaded) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// A brought root is an absolute path (`refusal.root.relative`): a relative one would be resolved
-/// against whatever directory playpen happened to start in.
+/// A brought or toolchain root is an absolute path (`refusal.root.relative`): a relative one would
+/// be resolved against whatever directory playpen happened to start in.
 fn roots_are_absolute(loaded: &Loaded) -> Result<(), Refusal> {
     let Loaded { path, policy } = loaded;
-    for (name, workspace) in &policy.workspaces {
-        for (i, root) in workspace.roots.iter().enumerate() {
-            if !root.path.is_absolute() {
-                return Err(Refusal::new(
-                    Code::RootRelative,
-                    format!(
-                        "{}: workspace:{name}.roots[{i}] is {}, which is not an absolute path",
-                        path.display(),
-                        root.path.display()
-                    ),
-                ));
-            }
-        }
+    let brought = policy.workspaces.iter().flat_map(|(name, workspace)| {
+        workspace
+            .roots
+            .iter()
+            .enumerate()
+            .map(move |(i, root)| (format!("workspace:{name}.roots[{i}]"), &root.path))
+    });
+    let toolchain = policy.profiles.iter().flat_map(|(name, profile)| {
+        profile
+            .toolchain
+            .iter()
+            .enumerate()
+            .map(move |(i, root)| (format!("profile:{name}.toolchain[{i}]"), &root.path))
+    });
+    match brought
+        .chain(toolchain)
+        .find(|(_, root)| !root.is_absolute())
+    {
+        Some((from, root)) => Err(Refusal::new(
+            Code::RootRelative,
+            format!(
+                "{}: {from} is {}, which is not an absolute path",
+                path.display(),
+                root.display()
+            ),
+        )),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// `names`, comma-separated, or `none`.
@@ -163,6 +176,21 @@ profiles:
             refusal
                 .message()
                 .starts_with(&format!("{ORIGIN}:5:21 (defined at {ORIGIN}:3:15): ")),
+            "{refusal}"
+        );
+    }
+
+    #[test]
+    fn a_relative_toolchain_root_is_refused() {
+        let text = "\
+version: 1
+profiles:
+  p: { workspaces: [], toolchain: [{ path: nix/store/x }] }
+";
+        let refusal = checked(text).expect_err("refused");
+        assert_eq!(refusal.code, Code::RootRelative);
+        assert!(
+            refusal.message().contains("profile:p.toolchain[0]"),
             "{refusal}"
         );
     }
