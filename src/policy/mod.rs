@@ -106,6 +106,8 @@ pub struct Workspace {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Root {
+    #[serde(deserialize_with = "literal")]
+    #[schemars(extend("pattern" = LITERAL_PATTERN))]
     pub path: PathBuf,
     pub mode: Mode,
     #[serde(default)]
@@ -134,6 +136,8 @@ impl From<Mode> for Access {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Exclusion {
+    #[serde(deserialize_with = "literal")]
+    #[schemars(extend("pattern" = LITERAL_PATTERN))]
     pub path: PathBuf,
     #[serde(default)]
     pub classes: Option<Vec<Class>>,
@@ -231,6 +235,8 @@ pub struct Profile {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ToolchainRoot {
+    #[serde(deserialize_with = "literal")]
+    #[schemars(extend("pattern" = LITERAL_PATTERN))]
     pub path: PathBuf,
     #[serde(default)]
     pub exclude: Vec<Exclusion>,
@@ -288,6 +294,27 @@ pub struct Shim {
     /// Literal argv tokens, prepended to the caller's. Never a shell string.
     #[serde(default)]
     pub flags: Vec<String>,
+}
+
+/// The characters that make a path a glob. A grant is a literal path, never a pattern
+/// ([spec §5.2]), so a path holding one is refused at parse rather than taken for a name.
+///
+/// [spec §5.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#52-brought-roots
+const GLOB: [char; 3] = ['*', '?', '['];
+
+/// [`GLOB`] as the schema states it, for editors that validate against it.
+const LITERAL_PATTERN: &str = r"^[^*?\[]*$";
+
+/// A path that is a grant: any path except one holding a glob character.
+fn literal<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<PathBuf, D::Error> {
+    let path = PathBuf::deserialize(deserializer)?;
+    if path.to_string_lossy().contains(GLOB) {
+        return Err(serde::de::Error::custom(format!(
+            "{} is a glob; a grant is a literal path",
+            path.display()
+        )));
+    }
+    Ok(path)
 }
 
 /// A policy as read from one file: the document, and the file it came from, which every later

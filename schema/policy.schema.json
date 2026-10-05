@@ -169,7 +169,8 @@
       "type": "object",
       "properties": {
         "path": {
-          "type": "string"
+          "type": "string",
+          "pattern": "^[^*?\\[]*$"
         },
         "mode": {
           "$ref": "#/$defs/Mode"
@@ -199,7 +200,8 @@
       "type": "object",
       "properties": {
         "path": {
-          "type": "string"
+          "type": "string",
+          "pattern": "^[^*?\\[]*$"
         },
         "classes": {
           "type": [
@@ -402,7 +404,8 @@
       "type": "object",
       "properties": {
         "path": {
-          "type": "string"
+          "type": "string",
+          "pattern": "^[^*?\\[]*$"
         },
         "exclude": {
           "type": "array",

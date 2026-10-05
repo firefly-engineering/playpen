@@ -457,3 +457,31 @@ shims:
     kind: omp
     profile: firefly
 "#;
+
+/// A root is a literal path, never a pattern ([spec §5.2]): a glob is refused at parse, wherever a
+/// path is a grant.
+///
+/// [spec §5.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#52-brought-roots
+#[test]
+fn a_glob_in_a_root_is_a_type_refusal() {
+    for glob in ["/src/*", "/src/play?en", "/src/[ab]"] {
+        // Quoted, so the glob is a path to YAML and not flow syntax or an alias.
+        let text = MINIMAL.replace("/src/playpen", &format!("{glob:?}"));
+        let refusal = refused(&text, Code::PolicyType);
+        assert!(names(&refusal, 5, 17), "{refusal}");
+    }
+}
+
+#[test]
+fn a_glob_in_an_exclusion_or_a_toolchain_root_is_a_type_refusal() {
+    let excluded = MINIMAL.replace(
+        "mode: readwrite }",
+        "mode: readwrite, exclude: [{ path: \"/src/playpen/*\" }] }",
+    );
+    refused(&excluded, Code::PolicyType);
+    let toolchain = MINIMAL.replace(
+        "toolchain: []",
+        "toolchain: [{ path: \"/nix/store/*-git\" }]",
+    );
+    refused(&toolchain, Code::PolicyType);
+}

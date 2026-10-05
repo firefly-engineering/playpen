@@ -141,6 +141,28 @@ impl Fixture {
         command
     }
 
+    /// Write `document` beside the fixture's own policy, as `name`, and return its path.
+    pub fn policy_named(&self, name: &str, document: &Value) -> PathBuf {
+        let path = self.policy_dir.path().join(name);
+        std::fs::write(&path, document.to_string()).expect("write policy");
+        path
+    }
+
+    /// `playpen run` of profile `p` under `policy`, from inside the root.
+    pub fn run_under(&self, policy: &Path, argv: &[&str]) -> Command {
+        let mut command = self.playpen(&["run", "--profile", "p", "--agent", "claude", "--policy"]);
+        command.arg(policy).arg("--").args(argv);
+        command
+    }
+
+    /// Run the probe confined under `policy` and return its verdict.
+    pub fn probe_under(&self, policy: &Path, args: &[&str]) -> Value {
+        let probe = self.probe();
+        let mut argv = vec![probe.to_str().expect("utf-8 path")];
+        argv.extend(args);
+        verdict(self.run_under(policy, &argv).output().expect("run playpen"))
+    }
+
     /// Run the probe confined and return its verdict.
     pub fn probe_inside(&self, args: &[&str]) -> Value {
         let probe = self.probe();
