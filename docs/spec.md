@@ -1439,9 +1439,9 @@ module checks the closure's size at build time, and the launch-time refusal is t
 A **named asymmetry** is a place where the two platforms are not equals, written down rather
 than absorbed. Each has a **suite row**, in the enforcement suite or the transparency suite
 depending on what it is a property of: the enforcement suite's verbs are about the boundary —
-read, create, list, inherited fd, Mach lookup, refuse — so an asymmetry in process transparency
-belongs in the transparency suite instead. A `—` in that column means the asymmetry is
-*unassertable*, never that its row lives elsewhere.
+read, create, list, inherited fd, Mach lookup, signal, connect, refuse — so an asymmetry in
+process transparency belongs in the transparency suite instead. A `—` in that column means the
+asymmetry is *unassertable*, never that its row lives elsewhere.
 
 | # | Asymmetry | Favours | Suite row |
 |---|---|---|---|
@@ -1454,7 +1454,8 @@ belongs in the transparency suite instead. A `—` in that column means the asym
 | 7 | signal **origin** is readable: `sigwaitinfo`'s `si_code` is `SI_KERNEL` for a tty keypress and `SI_USER` for a `kill`, where macOS reports `0` for both with `si_pid` set in both. Two live consequences, both macOS-only: a direct `kill -INT` to a foreground playpen is silently dropped, and `SIGTTIN`/`SIGTTOU` reach the agent twice, because the foreground proxy macOS falls back to is *inverted* for exactly those two — a process receiving one is by definition in a background group | Linux | `a_signal_sent_straight_to_a_foreground_playpen_is_forwarded`, transparency (`n/a` on macOS) |
 
 Linux's lack of a mechanism-native Keychain is recorded through `N-keychain` being `n/a` on
-Linux.
+Linux, and macOS's lack of abstract unix sockets through `N-abstract-socket` being `n/a` on
+macOS.
 
 ---
 
@@ -1560,6 +1561,8 @@ Row ids are provisional. The implementation owns the final ids.
 | `N-keg-decoy` | negative | a manufactured decoy keg beside a granted keg is denied | both; skip `skip.host.no-homebrew` |
 | `N-hosttemp` | negative | the host temp is unreachable | both |
 | `N-keychain` | negative | Keychain Mach services unreachable | macOS (`n/a` Linux) |
+| `N-signal` | negative | signal 0 to a decoy process started outside is denied: process scoping is enforced, not only requested | both |
+| `N-abstract-socket` | negative | connecting to a decoy abstract unix socket listening outside is denied | Linux (`n/a` macOS) |
 | `N-fd` | negative | an inherited credential fd reads as `EBADF` | both |
 | `N-unix-socket` | negative | a decoy unix socket listening outside every grant is refused | both; skip `skip.host.landlock-below-abi-9` |
 | `N-errno-law` | negative | a denial errno is in the platform set, never `ENOENT` | both |

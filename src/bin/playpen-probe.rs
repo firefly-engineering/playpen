@@ -23,6 +23,11 @@ enum Action {
     List(String),
     /// Run the path with no arguments and wait for it: ok only if it was `exec`ed and exited 0.
     Exec(String),
+    /// Send signal 0 to the pid: the permission check alone, delivering nothing.
+    Signal(libc::pid_t),
+    /// Connect to the abstract unix socket of this name (Linux).
+    #[cfg(target_os = "linux")]
+    ConnectAbstract(String),
     /// Read an inherited descriptor to the end, without opening anything.
     ReadFd(libc::c_int),
     /// Look the Mach service up by name in the bootstrap namespace.
@@ -85,6 +90,9 @@ fn parse(args: impl IntoIterator<Item = String>) -> Option<Vec<Action>> {
             "write" => Action::Write(args.next()?),
             "list" => Action::List(args.next()?),
             "exec" => Action::Exec(args.next()?),
+            "signal" => Action::Signal(args.next()?.parse().ok()?),
+            #[cfg(target_os = "linux")]
+            "connect-abstract" => Action::ConnectAbstract(args.next()?),
             "read-fd" => Action::ReadFd(args.next()?.parse().ok()?),
             #[cfg(target_os = "macos")]
             "look-up" => Action::LookUp(args.next()?),
@@ -119,6 +127,18 @@ fn verdict(action: &Action) -> String {
             std::fs::read_dir(path).and_then(|entries| entries.collect::<Result<Vec<_>, _>>()),
         ),
         Action::Exec(path) => io_verdict(exec(path)),
+        // SAFETY: kill has no memory preconditions, and signal 0 delivers nothing.
+        Action::Signal(pid) => io_verdict(match unsafe { libc::kill(*pid, 0) } {
+            0 => Ok(()),
+            _ => Err(std::io::Error::last_os_error()),
+        }),
+        #[cfg(target_os = "linux")]
+        Action::ConnectAbstract(name) => io_verdict({
+            use std::os::linux::net::SocketAddrExt;
+            use std::os::unix::net::{SocketAddr, UnixStream};
+            SocketAddr::from_abstract_name(name.as_bytes())
+                .and_then(|addr| UnixStream::connect_addr(&addr))
+        }),
         Action::ReadFd(fd) => io_verdict(read_fd(*fd)),
         #[cfg(target_os = "macos")]
         Action::LookUp(service) => look_up(service),

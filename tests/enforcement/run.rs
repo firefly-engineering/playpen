@@ -23,8 +23,8 @@ use tempfile::{NamedTempFile, TempDir};
 
 use crate::common::{self, PROBE};
 use crate::row::{
-    Action, Cause, Declined, Fixture, Invocation, Outcome, Row, Seen, Services, Target, Verdict,
-    applies, judge, judge_refusal,
+    Action, Cause, Declined, Fixture, Invocation, Listening, Outcome, Row, Seen, Services,
+    Signalled, Target, Verdict, applies, judge, judge_refusal,
 };
 
 /// Every row's outcome, in table order. `home` is the caller's home directory, where the
@@ -287,6 +287,70 @@ struct Prepared {
     inherited: Option<File>,
     _decoys: Vec<NamedTempFile>,
     _decoy_dir: Option<TempDir>,
+    _peer: Option<Running>,
+}
+
+/// What the fixture started for a row, stopped when dropped.
+enum Running {
+    Process(std::process::Child),
+    /// Closed by its own drop; held only to keep it listening.
+    #[cfg(target_os = "linux")]
+    Socket {
+        _listener: std::os::unix::net::UnixListener,
+    },
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        match self {
+            Running::Process(child) => {
+                // Best effort: the decoy only waits, and a kill that fails leaves nothing to reap.
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            #[cfg(target_os = "linux")]
+            Running::Socket { .. } => {}
+        }
+    }
+}
+
+/// Start `signalled` outside every boundary, and name it as the probe's operand.
+fn start(signalled: Signalled) -> Result<(Running, String), String> {
+    match signalled {
+        Signalled::DecoyProcess => {
+            let child = Command::new(common::os_bin("sleep"))
+                .arg("300")
+                .stdin(Stdio::null())
+                .spawn()
+                .map_err(|e| format!("decoy process: {e}"))?;
+            let pid = child.id().to_string();
+            Ok((Running::Process(child), pid))
+        }
+    }
+}
+
+/// Bind `listening` outside every boundary, and name it as the probe's operand.
+fn listen(listening: Listening) -> Result<(Running, String), String> {
+    match listening {
+        #[cfg(target_os = "linux")]
+        Listening::DecoyAbstractSocket => {
+            use std::os::linux::net::SocketAddrExt;
+            use std::os::unix::net::{SocketAddr, UnixListener};
+            // Unique to this run, so no other process's socket is ever the one reached.
+            let name = format!("playpen-decoy-{}", std::process::id());
+            let listener = SocketAddr::from_abstract_name(name.as_bytes())
+                .and_then(|addr| UnixListener::bind_addr(&addr))
+                .map_err(|e| format!("decoy abstract socket {name}: {e}"))?;
+            Ok((
+                Running::Socket {
+                    _listener: listener,
+                },
+                name,
+            ))
+        }
+        #[cfg(not(target_os = "linux"))]
+        Listening::DecoyAbstractSocket => Err("abstract unix sockets exist on Linux only".into()),
+    }
 }
 
 /// Paths the fixture made outside, removed in reverse order when the batch is done. One per batch,
@@ -371,6 +435,7 @@ fn prepare(action: Action, home: &Path, made: &mut Made) -> Result<Prepared, Str
     };
     let mut created = Vec::new();
     let mut inherited = None;
+    let mut peer = None;
     let ops = match action {
         Action::Canary => {
             return Err(
@@ -405,6 +470,16 @@ fn prepare(action: Action, home: &Path, made: &mut Made) -> Result<Prepared, Str
             .iter()
             .map(|service| ["look-up".to_owned(), (*service).to_owned()])
             .collect(),
+        Action::Signal(signalled) => {
+            let (running, pid) = start(signalled)?;
+            peer = Some(running);
+            vec![["signal".to_owned(), pid]]
+        }
+        Action::Connect(listening) => {
+            let (running, name) = listen(listening)?;
+            peer = Some(running);
+            vec![["connect-abstract".to_owned(), name]]
+        }
     };
     Ok(Prepared {
         ops,
@@ -412,6 +487,7 @@ fn prepare(action: Action, home: &Path, made: &mut Made) -> Result<Prepared, Str
         inherited,
         _decoys: decoys,
         _decoy_dir: decoy_dir,
+        _peer: peer,
     })
 }
 

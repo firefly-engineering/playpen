@@ -107,6 +107,8 @@ ledger! {
     // Recorded beneath the ledger's table rather than numbered in it: Linux has no
     // mechanism-native Keychain, so `N-keychain` is `n/a` there.
     Keychain => "a mechanism-native Keychain",
+    // Likewise: macOS has no abstract unix sockets, so `N-abstract-socket` is `n/a` there.
+    AbstractSockets => "abstract unix sockets",
 }
 
 /// A host precondition a row needs, each probed explicitly and skipping by its own stable name
@@ -186,6 +188,10 @@ pub enum Action {
     ReadInherited,
     /// The probe looks up each of the services by name in its bootstrap namespace (macOS).
     LookUp(Services),
+    /// The probe sends signal 0 to the process: the permission check alone.
+    Signal(Signalled),
+    /// The probe connects to the socket.
+    Connect(Listening),
     /// playpen is invoked so that it refuses, and leaves what it leaves behind.
     Refuse(Invocation),
 }
@@ -201,7 +207,9 @@ impl Action {
             | Action::Create(_)
             | Action::List(_)
             | Action::ReadInherited
-            | Action::LookUp(_) => fixture == Fixture::ProbeRoot,
+            | Action::LookUp(_)
+            | Action::Signal(_)
+            | Action::Connect(_) => fixture == Fixture::ProbeRoot,
             Action::Refuse(_) => fixture == Fixture::Outside,
         }
     }
@@ -236,6 +244,23 @@ pub enum Services {
     ///
     /// [spec §8.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#82-the-floor
     Keychain,
+}
+
+/// A process running outside every boundary, which process scoping keeps out of reach: started by
+/// the fixture before the row runs, and stopped when it is done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Signalled {
+    /// A process of the suite's own, which only waits.
+    DecoyProcess,
+}
+
+/// A socket listening outside every boundary, which process scoping keeps out of reach: bound by
+/// the fixture before the row runs, and closed when it is done. Never anything in the caller's
+/// home.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Listening {
+    /// An abstract unix socket the suite listens on, under a name of its own (Linux).
+    DecoyAbstractSocket,
 }
 
 /// An invocation playpen refuses.

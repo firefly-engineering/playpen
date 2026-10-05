@@ -6,8 +6,8 @@
 use playpen::code::Code;
 
 use crate::row::{
-    Action, Asymmetry, BOTH, Class, Decision, Expected, Fixture, Invocation, Os, Platform,
-    Precondition, Row, Scope, Services, Target,
+    Action, Asymmetry, BOTH, Class, Decision, Expected, Fixture, Invocation, Listening, Os,
+    Platform, Precondition, Row, Scope, Services, Signalled, Target,
 };
 
 /// Both platforms, for a row that puts a decoy in the caller's home when the host lacks the real
@@ -99,6 +99,29 @@ pub const ROWS: &[Row] = &[
         action: Action::LookUp(Services::Keychain),
         expected: Expected::Denial,
         from: &[Decision::Adr(6), Decision::Adr(16), Decision::Issue(54)],
+    },
+    // Process scoping, which every profile requires: asserted from inside, so a backend that stopped
+    // applying it fails here rather than passing on the strength of the request alone.
+    Row {
+        id: "N-signal",
+        class: Class::Negative,
+        platform: BOTH,
+        fixture: Fixture::ProbeRoot,
+        action: Action::Signal(Signalled::DecoyProcess),
+        expected: Expected::Denial,
+        from: &[Decision::Adr(16), Decision::Issue(55), Decision::Issue(121)],
+    },
+    Row {
+        id: "N-abstract-socket",
+        class: Class::Negative,
+        platform: Platform {
+            scope: Scope::Only(Os::Linux, Asymmetry::AbstractSockets),
+            ..BOTH
+        },
+        fixture: Fixture::ProbeRoot,
+        action: Action::Connect(Listening::DecoyAbstractSocket),
+        expected: Expected::Denial,
+        from: &[Decision::Adr(16), Decision::Issue(55), Decision::Issue(121)],
     },
     Row {
         id: "N-fd",
