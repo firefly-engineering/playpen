@@ -24,6 +24,7 @@ use crate::kind::{self, Kind};
 use crate::manifest::Manifest;
 use crate::mechanism::{self, Mechanism};
 use crate::policy::{Policy, SearchPath, coherence};
+use crate::present;
 use crate::provision::Layout;
 use crate::record::{self, RunId, RunRecord};
 use crate::refusal::{EXIT_REFUSED, Refusal};
@@ -299,6 +300,16 @@ fn run(
     // [spec §13.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#131-form
     let manifest = Manifest::new(&loaded.policy, selected, kind, &layout);
     manifest.write(&layout.manifest())?;
+    // The kind's presentation adapter, rendered into the kind's instruction entry point inside the
+    // agent state directory ([spec §13.3]). Nothing is rendered for a kind whose entry point
+    // playpen does not know.
+    //
+    // [spec §13.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#133-presentation
+    if let Some(agent_state) = layout.agent_state()
+        && let Some(rendered) = present::render(&manifest, kind, &agent_state, &layout.imports())
+    {
+        rendered.write()?;
+    }
     // Step 12: the capability set compiles on this mechanism.
     backend::check(&caps)?;
     // Step 14.

@@ -238,6 +238,73 @@ fn a_missing_share_source_refuses() {
     assert!(message.contains("gone.json"), "{message}");
 }
 
+/// The presentation adapter owns the kind's instruction entry point, rendered from the manifest
+/// and renamed into place on every launch ([spec §13.3]). A share entry naming that same file is
+/// composed **by reference**: the rendered file ends with the kind's `@` import of the real path,
+/// which is granted read and never write ([spec §5.6]).
+///
+/// [spec §13.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#133-presentation
+/// [spec §5.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#56-agent-state-directory
+#[test]
+fn the_entry_point_is_rendered_and_a_shared_one_is_imported() {
+    let fx = Fixture::new();
+    let (home, policy) = with_share(&fx, json!([]));
+    // Without a share entry: the adapter's file alone, stating facts and importing nothing.
+    let dir = redirect_at_home(&fx, &policy, home.path());
+    let entry = dir.join("CLAUDE.md");
+    let rendered = std::fs::read_to_string(&entry).expect("the rendered entry point");
+    assert!(rendered.contains("PLAYPEN_MANIFEST"), "{rendered}");
+    assert!(rendered.contains(fx.root().to_str().unwrap()), "{rendered}");
+    assert!(!rendered.contains('@'), "nothing to import: {rendered}");
+    assert!(
+        !entry.symlink_metadata().expect("the file").is_symlink(),
+        "the entry point is the adapter's own file"
+    );
+
+    // With one: the same facts, and the real file imported at the end.
+    let real = home.path().join(".claude/CLAUDE.md");
+    std::fs::write(&real, "# the operator's own instructions\n").expect("seed");
+    let (_, shared) = (
+        &real,
+        fx.policy_named(
+            "share-entry-point.json",
+            &json!({
+                "version": 1,
+                "workspaces": {"w": {"roots": [{"path": fx.root(), "mode": "readwrite"}]}},
+                "profiles": {"p": {
+                    "workspaces": ["w"],
+                    "toolchain": [],
+                    "agent_state": {"claude": {"share": ["CLAUDE.md"]}},
+                }},
+            }),
+        ),
+    );
+    let dir = redirect_at_home(&fx, &shared, home.path());
+    let composed = std::fs::read_to_string(dir.join("CLAUDE.md")).expect("the rendered file");
+    let canonical = real.canonicalize().expect("canonical");
+    assert!(
+        composed
+            .trim_end()
+            .ends_with(&format!("@{}", canonical.display())),
+        "the import is not the last line of:\n{composed}"
+    );
+    assert!(composed.contains("PLAYPEN_MANIFEST"), "{composed}");
+    // Readable inside, and not writable: the import points at the real file, which is granted
+    // read-only.
+    let probe = fx.probe();
+    let inside = |argv: &[&str]| {
+        let mut full = vec![probe.to_str().expect("a UTF-8 path")];
+        full.extend(argv);
+        common::verdict(
+            run_at_home(&fx, &shared, home.path(), &full)
+                .output()
+                .expect("playpen"),
+        )
+    };
+    assert_eq!(inside(&["read", canonical.to_str().unwrap()])["ok"], true);
+    assert_denied(&inside(&["write", canonical.to_str().unwrap()]));
+}
+
 /// A share entry is one name in the kind's agent home: a nested path or `..` names nothing
 /// playpen can share, and refuses rather than reaching out of the agent home.
 #[test]

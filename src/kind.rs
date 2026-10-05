@@ -21,6 +21,28 @@ pub struct Kind {
     ///
     /// [spec §5.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#56-agent-state-directory
     pub home: &'static str,
+    /// How this kind reads instruction, where playpen knows ([spec §13.3]). `None` where it does
+    /// not, and then nothing is rendered: a guess would be a file the agent never opens, stating
+    /// facts about a boundary to nobody.
+    ///
+    /// [spec §13.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#133-presentation
+    pub presentation: Option<Presentation>,
+}
+
+/// What the presentation adapter needs of a kind ([spec §13.3]).
+///
+/// [spec §13.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#133-presentation
+#[derive(Debug)]
+pub struct Presentation {
+    /// The file inside the agent state directory this kind reads for instruction, which the
+    /// adapter owns.
+    pub entry_point: &'static str,
+    /// What this kind reads as "also read this file", as the prefix an absolute path follows.
+    /// `None` where the kind has no import mechanism, and then a share entry naming the entry
+    /// point cannot be composed by reference and is `refusal.state.collision` ([spec §5.6]).
+    ///
+    /// [spec §5.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#56-agent-state-directory
+    pub import: Option<&'static str>,
 }
 
 /// Every kind this playpen knows.
@@ -30,12 +52,23 @@ pub const KINDS: &[Kind] = &[
         redirect: "CLAUDE_CONFIG_DIR",
         suppression: &[("CLAUDE_CODE_SANDBOXED", "1")],
         home: ".claude",
+        presentation: Some(Presentation {
+            entry_point: "CLAUDE.md",
+            import: Some("@"),
+        }),
     },
     Kind {
         name: "omp",
         redirect: "PI_CODING_AGENT_DIR",
         suppression: &[],
         home: ".omp",
+        // Which instruction entry point `omp` reads, and whether it has an import mechanism, is a
+        // handed-off question the liveness probe settles ([spec §20],
+        // [#107](https://github.com/firefly-engineering/playpen/issues/107)). Until it does, the
+        // honest entry is none: `$PLAYPEN_MANIFEST` still names this run's full layout.
+        //
+        // [spec §20]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#20-handed-off-questions
+        presentation: None,
     },
 ];
 

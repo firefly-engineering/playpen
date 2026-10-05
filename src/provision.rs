@@ -214,9 +214,50 @@ impl Layout {
     /// as a working policy.
     ///
     /// [spec §5.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#56-agent-state-directory
+    /// Whether `entry` names the kind's instruction entry point, which the presentation adapter
+    /// owns ([spec §13.3]). Such an entry is composed **by reference**: the rendered file ends
+    /// with the kind's import line pointing at the real file, rather than the real file replacing
+    /// the rendered one.
+    ///
+    /// [spec §13.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#133-presentation
+    fn is_entry_point(&self, entry: &str) -> bool {
+        self.kind
+            .and_then(|kind| kind.presentation.as_ref())
+            .is_some_and(|presentation| presentation.entry_point == entry)
+    }
+
+    /// The real paths of the share entries that name the kind's instruction entry point, for the
+    /// presentation adapter to import. Each is granted read-only by [`Layout::shares`], which has
+    /// already refused one that is missing.
+    pub fn imports(&self) -> Vec<PathBuf> {
+        self.shared()
+            .filter(|(_, entry, _)| self.is_entry_point(entry))
+            .filter_map(|(_, _, source)| source?.canonicalize().ok())
+            .collect()
+    }
+
     pub fn shares(&self) -> Result<Vec<PathGrant>, Refusal> {
         let mut grants = Vec::new();
         for (from, entry, source) in self.shared() {
+            // The adapter owns the entry point, so a share entry naming it can only be composed
+            // by reference. A kind with no import mechanism has no way to do that, and playpen
+            // will not drop the rendered file to make room: the collision is the refusal.
+            if self.is_entry_point(entry)
+                && self
+                    .kind
+                    .and_then(|kind| kind.presentation.as_ref())
+                    .and_then(|presentation| presentation.import)
+                    .is_none()
+            {
+                return Err(Refusal::new(
+                    Code::StateCollision,
+                    format!(
+                        "{from}: share entry {entry:?} is the instruction entry point of kind {:?}, \
+                         which has no import mechanism, so it cannot be composed by reference",
+                        self.kind.map_or("", |kind| kind.name),
+                    ),
+                ));
+            }
             let missing = |detail: String| {
                 Refusal::new(
                     Code::RootMissing,
@@ -441,6 +482,11 @@ impl Layout {
         for (from, entry, source) in self.shared() {
             // Sourceless entries have already refused in `shares`, which runs at step 6.
             let Some(source) = source else { continue };
+            // The entry point is the adapter's, composed by reference rather than linked: the
+            // rendered file lands here after this, carrying the import line.
+            if self.is_entry_point(entry) {
+                continue;
+            }
             let at = agent_state.join(entry);
             let io = |e: std::io::Error| {
                 Refusal::new(
@@ -1008,6 +1054,98 @@ mod tests {
                 .contains("profile:p.agent_state.claude.share[0]"),
             "{refusal}"
         );
+    }
+
+    /// A share entry naming the kind's instruction entry point is the adapter's to compose by
+    /// reference: no link is made over it, and its real path is an import instead ([spec §5.6]).
+    ///
+    /// [spec §5.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#56-agent-state-directory
+    #[test]
+    fn the_entry_point_is_composed_by_reference_and_never_linked_over() {
+        let state = tempfile::TempDir::new().expect("state");
+        let home = tempfile::TempDir::new().expect("home");
+        std::fs::create_dir(home.path().join(".claude")).expect("mkdir");
+        for name in ["CLAUDE.md", "settings.json"] {
+            std::fs::write(home.path().join(".claude").join(name), "x").expect("seed");
+        }
+        let policy = sharing(&["CLAUDE.md", "settings.json"]);
+        let id = RunId::allocate().expect("id");
+        let layout = Layout::new(
+            state.path(),
+            &id,
+            &policy,
+            "p",
+            &policy.profiles["p"],
+            claude(),
+        )
+        .with_home(Some(home.path()));
+        // Both are granted read-only; only the entry point is an import.
+        let granted = layout.shares().expect("resolves");
+        assert_eq!(granted.len(), 2, "{granted:?}");
+        assert!(granted.iter().all(|grant| grant.access == Access::Read));
+        assert_eq!(
+            layout.imports(),
+            [home
+                .path()
+                .canonicalize()
+                .expect("canonical")
+                .join(".claude/CLAUDE.md")]
+        );
+        let _provisioned = layout.provision().expect("provisioned");
+        let dir = layout.agent_state().expect("a kind was stated");
+        assert!(
+            dir.join("settings.json")
+                .symlink_metadata()
+                .expect("the link")
+                .is_symlink(),
+            "an ordinary share entry is a link"
+        );
+        assert!(
+            !dir.join("CLAUDE.md").exists(),
+            "the entry point was linked over instead of imported"
+        );
+    }
+
+    /// A kind with no import mechanism cannot compose the entry point by reference, and playpen
+    /// will not drop the rendered file to make room.
+    #[test]
+    fn a_kind_with_no_import_mechanism_refuses_the_entry_point_collision() {
+        // A kind of its own, since neither shipped kind is in this shape: `claude` imports, and
+        // `omp`'s entry point is a handed-off question, so it has none to collide with.
+        static NO_IMPORT: Kind = Kind {
+            name: "no-import",
+            redirect: "NO_IMPORT_DIR",
+            suppression: &[],
+            home: ".no-import",
+            presentation: Some(crate::kind::Presentation {
+                entry_point: "CLAUDE.md",
+                import: None,
+            }),
+        };
+        let text = serde_json::json!({
+            "version": 1,
+            "workspaces": {"w": {"roots": []}},
+            "profiles": {"p": {
+                "workspaces": ["w"],
+                "toolchain": [],
+                "agent_state": {"no-import": {"share": ["CLAUDE.md"]}},
+            }},
+        });
+        let policy = Policy::parse(&text.to_string(), Path::new("/p.json")).expect("parses");
+        let id = RunId::allocate().expect("id");
+        let layout = Layout::new(
+            Path::new("/state"),
+            &id,
+            &policy,
+            "p",
+            &policy.profiles["p"],
+            &NO_IMPORT,
+        )
+        .with_home(Some(Path::new("/home/u")));
+        let refusal = layout.shares().expect_err("refused");
+        assert_eq!(refusal.code, Code::StateCollision);
+        assert!(refusal.message().contains("no-import"), "{refusal}");
+        assert!(refusal.message().contains("import mechanism"), "{refusal}");
     }
 
     /// A name is one component, whatever it holds: nothing climbs out of where playpen put it.
