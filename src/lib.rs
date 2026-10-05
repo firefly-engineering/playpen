@@ -12,6 +12,7 @@ pub mod floor;
 pub mod integrity;
 pub mod kind;
 pub mod launch;
+pub mod manifest;
 pub mod mechanism;
 pub mod policy;
 pub mod provision;

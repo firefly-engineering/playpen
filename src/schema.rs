@@ -3,13 +3,13 @@
 //!
 //! [`SCHEMAS`] is every published schema with the file it is committed as, under `schema/` at the
 //! repository root. `just schema` writes them; a test fails whenever a committed file differs from
-//! a fresh generation, so a change to a type cannot land without its schema. The manifest joins the
-//! table when its type exists.
+//! a fresh generation, so a change to a type cannot land without its schema.
 //!
 //! [spec §10.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#103-schema
 
 use schemars::JsonSchema;
 
+use crate::manifest::Manifest;
 use crate::policy::Policy;
 use crate::resolve::Resolved;
 
@@ -28,6 +28,10 @@ pub const SCHEMAS: &[Schema] = &[
     Schema {
         file: "resolved.schema.json",
         generate: generate::<Resolved>,
+    },
+    Schema {
+        file: "manifest.schema.json",
+        generate: generate::<Manifest>,
     },
 ];
 

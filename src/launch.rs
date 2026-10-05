@@ -21,6 +21,7 @@ use crate::environment;
 use crate::explain;
 use crate::integrity;
 use crate::kind::{self, Kind};
+use crate::manifest::Manifest;
 use crate::mechanism::{self, Mechanism};
 use crate::policy::{Policy, SearchPath, coherence};
 use crate::provision::Layout;
@@ -291,6 +292,13 @@ fn run(
     floor_self_test()?;
     // Step 9. Removed again when this returns: at teardown, or on any refusal from here on.
     let _provisioned = layout.provision()?;
+    // The manifest, written on every run even when nothing is provisioned ([spec §13.1]): it is
+    // derived from the same resolution pass as the capability set, so what the agent is told and
+    // what the kernel enforces cannot drift.
+    //
+    // [spec §13.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#131-form
+    let manifest = Manifest::new(&loaded.policy, selected, kind, &layout);
+    manifest.write(&layout.manifest())?;
     // Step 12: the capability set compiles on this mechanism.
     backend::check(&caps)?;
     // Step 14.

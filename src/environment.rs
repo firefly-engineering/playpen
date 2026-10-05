@@ -69,7 +69,7 @@ pub const PLAYPEN_ACTIVE: &str = "PLAYPEN_ACTIVE";
 /// [spec §9.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#92-set-entries
 pub const SET_ENTRIES: &[&str] = &[
     TMPDIR,
-    "PLAYPEN_MANIFEST",
+    crate::manifest::ENV,
     PLAYPEN_ACTIVE,
     "HTTPS_PROXY",
     "NO_PROXY",

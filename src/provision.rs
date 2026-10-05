@@ -249,6 +249,15 @@ impl Layout {
         self.state.join(SCRATCH).join(&self.run)
     }
 
+    /// Where this run's manifest is written, which `PLAYPEN_MANIFEST` names ([spec §13.1]). In the
+    /// scratch, which the run is granted read-write: the manifest describes the boundary and never
+    /// constitutes it, so an agent rewriting it moves nothing.
+    ///
+    /// [spec §13.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#131-form
+    pub fn manifest(&self) -> PathBuf {
+        self.scratch().join(crate::manifest::FILE)
+    }
+
     /// The agent state directory of this profile and kind ([spec §5.6]): keyed by profile × kind
     /// and never by workspace, so two profiles sharing a workspace do not share the agent's
     /// history, and renaming a profile starts a fresh directory. `None` where the invocation

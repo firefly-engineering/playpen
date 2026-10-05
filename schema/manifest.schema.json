@@ -1,0 +1,331 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Manifest",
+  "description": "The boundary as the agent is told it ([spec §13.2]).\n\n[spec §13.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#132-content",
+  "type": "object",
+  "properties": {
+    "manifest_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "workspaces": {
+      "description": "The layout, in workspace vocabulary: the agent reads about its work the way the operator\ndeclared it, not as a flat list of paths.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Workspace"
+      }
+    },
+    "agent_state": {
+      "description": "The agent's own state directory, which the kind's redirect also names.",
+      "type": "string"
+    },
+    "run_scratch": {
+      "description": "The run's writable scratch, which `TMPDIR` also names. It holds this file.",
+      "type": "string"
+    },
+    "network": {
+      "$ref": "#/$defs/Network"
+    },
+    "failure": {
+      "$ref": "#/$defs/Failure"
+    }
+  },
+  "required": [
+    "manifest_version",
+    "workspaces",
+    "agent_state",
+    "run_scratch",
+    "network",
+    "failure"
+  ],
+  "$defs": {
+    "Workspace": {
+      "description": "One selected workspace, with everything it reaches.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "roots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Root"
+          }
+        },
+        "areas": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Area"
+          }
+        },
+        "forge": {
+          "description": "Which remote repositories this workspace's work may reach, where it declares any. Never\nunioned across a profile's workspaces.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Forge"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "roots",
+        "areas"
+      ]
+    },
+    "Root": {
+      "description": "A brought root at the mode it is granted. Exclusions are **not** stated: they map what is\nworth attacking ([spec §13.2]).\n\n[spec §13.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#132-content",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "mode": {
+          "$ref": "#/$defs/Mode"
+        }
+      },
+      "required": [
+        "path",
+        "mode"
+      ]
+    },
+    "Mode": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "readwrite"
+          ]
+        },
+        {
+          "description": "Read and execute. A readable path is an executable one.",
+          "type": "string",
+          "const": "read"
+        }
+      ]
+    },
+    "Area": {
+      "description": "A provisioned area: what it is for is its name, and how long it lasts is its lifetime.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "lifetime": {
+          "$ref": "#/$defs/Lifetime"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "lifetime",
+        "path"
+      ]
+    },
+    "Lifetime": {
+      "oneOf": [
+        {
+          "description": "Removed when this run ends.",
+          "type": "string",
+          "const": "ephemeral"
+        },
+        {
+          "description": "Kept for the next run of the same workspace.",
+          "type": "string",
+          "const": "persistent"
+        }
+      ]
+    },
+    "Forge": {
+      "description": "A workspace's forge scope: exactly one of an org or a list of repositories.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "org": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "org"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "repos": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "repos"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "Network": {
+      "description": "What the agent can know about the network ([spec §6.1], [spec §13.2]). There is no egress\nsetting and no host list to state, so what is stated is the one consequence that matters: the\nproxy is not the only way out, and a routed destination is authenticated *only* for requests\nsent through it.\n\n[spec §6.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#61-what-is-not-confined\n[spec §13.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#132-content",
+      "type": "object",
+      "properties": {
+        "egress": {
+          "$ref": "#/$defs/Egress"
+        },
+        "routes": {
+          "description": "Credential routes, each with its destination and delivery variable. Empty where the\nprofile resolves none, and then there is no proxy at all.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Route"
+          }
+        }
+      },
+      "required": [
+        "egress",
+        "routes"
+      ]
+    },
+    "Egress": {
+      "description": "playpen confines no network traffic: the one mode there is.",
+      "oneOf": [
+        {
+          "description": "Every destination is reachable, by any means, proxy or not.",
+          "type": "string",
+          "const": "unconfined"
+        }
+      ]
+    },
+    "Route": {
+      "description": "One credential route, as the agent is told it: where it goes and which variable carries the\nphantom. Never the secret, and never the minter that made it.",
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "path_prefix": {
+          "type": "string"
+        },
+        "delivery_env": {
+          "description": "The variable the phantom is delivered in.",
+          "type": "string"
+        },
+        "endpoints": {
+          "description": "The endpoint rule sets this route carries, by name, with their rules. Empty means\nunrestricted.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RuleSet"
+          }
+        }
+      },
+      "required": [
+        "host",
+        "path_prefix",
+        "delivery_env",
+        "endpoints"
+      ]
+    },
+    "RuleSet": {
+      "description": "A named, allow-only rule set ([spec §7.6]).\n\n[spec §7.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#76-endpoint-rule-sets",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Rule"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "rules"
+      ]
+    },
+    "Rule": {
+      "type": "object",
+      "properties": {
+        "method": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "method",
+        "path"
+      ]
+    },
+    "Failure": {
+      "description": "How to read a failure ([spec §13.2]). An agent that cannot tell a denial from an absence\nretries the wrong thing; this is the half the kernel cannot tell it.\n\n[spec §13.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#132-content",
+      "type": "object",
+      "properties": {
+        "denial_errnos": {
+          "description": "The errno names that mean the boundary refused, on this platform.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "enoent_means_absent": {
+          "description": "`ENOENT` means absent, and is never a denial.",
+          "type": "boolean"
+        },
+        "broker_denial": {
+          "description": "The broker's refusal vocabulary, stated **only where a denial can fire**: where some route\ncarries an endpoint rule set. `null` everywhere else, because a vocabulary for a denial\nthat cannot happen is noise the agent would reason from.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BrokerDenial"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "boundary_fixed_for_the_session": {
+          "description": "The boundary is fixed for the whole session: nothing the agent does widens it, and a retry\nafter a denial gets the same denial.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "denial_errnos",
+        "enoent_means_absent",
+        "boundary_fixed_for_the_session"
+      ]
+    },
+    "BrokerDenial": {
+      "description": "The shape of the one denial the broker makes ([spec §6.4]).\n\n[spec §6.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#64-broker-denial",
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "header": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "header",
+        "code"
+      ]
+    }
+  }
+}

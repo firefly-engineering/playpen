@@ -193,6 +193,11 @@ pub fn environment(
             value: Value::Written(name.into()),
             from: BUILT_IN.into(),
         },
+        Var {
+            name: crate::manifest::ENV.into(),
+            value: Value::Written(layout.manifest().into_os_string()),
+            from: provision::FROM_SCRATCH.into(),
+        },
     ];
     // The suppression table only ever *sets*: a guest that ignores it breaks, and does not escape
     // ([ADR 0005]).

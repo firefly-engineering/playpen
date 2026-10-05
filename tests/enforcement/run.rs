@@ -60,6 +60,7 @@ pub fn run(rows: &[Row], home: &Path) -> Vec<Outcome> {
             Fixture::DescendantDenied => members.iter().map(|row| descendant_denied(row)).collect(),
             Fixture::Toolchain => members.iter().map(|row| toolchain(row)).collect(),
             Fixture::Excluded => members.iter().map(|row| excluded(row)).collect(),
+            Fixture::Manifest => members.iter().map(|row| manifest_is_true(row)).collect(),
         };
         for (i, verdict) in batch.into_iter().zip(verdicts) {
             outcomes[i] = Some(Outcome::Runs(verdict));
@@ -203,6 +204,205 @@ fn excluded(row: &Row) -> Verdict {
         }),
     );
     beside(row, &fixture, &policy, &neighbour, &[decoy])
+}
+
+/// `P-manifest`, filesystem half: every path the manifest states is reachable at its stated mode
+/// from inside the run it describes, and a decoy outside every grant is not ([spec §13]).
+///
+/// Two launches of one policy. The first learns the run-scoped paths from the environment, writes
+/// into each of them, and copies the manifest out; the paths it printed are then checked against
+/// what the manifest said they were, so a manifest naming the wrong scratch or the wrong area
+/// fails here rather than misleading an agent. The second probes the paths that outlive a run —
+/// the two roots at their two modes, and the persistent area — and the decoy beside them.
+///
+/// [spec §13]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#13-the-manifest
+fn manifest_is_true(row: &Row) -> Verdict {
+    if row.action != Action::ManifestIsTrue {
+        return Verdict::Setup(format!("{:?} is not the manifest's own check", row.action));
+    }
+    let fixture = common::Fixture::new();
+    let (read_only, elsewhere) = match (TempDir::new(), TempDir::new()) {
+        (Ok(read_only), Ok(elsewhere)) => (read_only, elsewhere),
+        _ => return Verdict::Setup("a directory for the row's roots".into()),
+    };
+    let readable = |dir: &Path| dir.join("readable");
+    let decoy = elsewhere.path().join("credentials");
+    let seeded = fs::write(readable(read_only.path()), DECOY)
+        .and_then(|()| fs::write(readable(fixture.root()), DECOY))
+        .and_then(|()| fs::write(&decoy, DECOY));
+    if let Err(e) = seeded {
+        return Verdict::Setup(format!("seeding the row's roots: {e}"));
+    }
+    let policy = fixture.policy_named(
+        "manifest.json",
+        &serde_json::json!({
+            "version": 1,
+            "workspaces": {"w": {
+                "roots": [
+                    {"path": fixture.root(), "mode": "readwrite"},
+                    {"path": read_only.path(), "mode": "read"},
+                ],
+                "areas": {
+                    "landing": {"lifetime": "persistent", "concurrency": "shared"},
+                    "target": {"lifetime": "ephemeral"},
+                },
+                "forge": {"org": "firefly-engineering"},
+            }},
+            "profiles": {"p": {
+                "workspaces": ["w"],
+                "toolchain": [],
+                // So the run can name its own areas without reading the manifest to find them:
+                // what the manifest says they are is then an independent statement to check.
+                "env": {"set": {
+                    "AREA_LANDING": {"area": "w/landing"},
+                    "AREA_TARGET": {"area": "w/target"},
+                }},
+            }},
+        }),
+    );
+    let copied = fixture.root().join("manifest-copy.json");
+    let script = format!(
+        "set -e\n\
+         for d in \"$TMPDIR\" \"$CLAUDE_CONFIG_DIR\" \"$AREA_LANDING\" \"$AREA_TARGET\"; do\n\
+         \techo \"$d\"\n\
+         \techo written > \"$d/playpen-suite-written\"\n\
+         done\n\
+         cp \"$PLAYPEN_MANIFEST\" {}\n",
+        match utf8(&copied) {
+            Ok(path) => path,
+            Err(why) => return Verdict::Setup(why),
+        }
+    );
+    let launched = fixture
+        .run_under(&policy, &[&common::os_bin("sh"), "-c", &script])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run playpen");
+    if !launched.status.success() {
+        return Verdict::Fail(format!(
+            "the run could not write every path the manifest states: {}, stderr {:?}",
+            launched.status,
+            String::from_utf8_lossy(&launched.stderr)
+        ));
+    }
+    let stated: Vec<String> = String::from_utf8_lossy(&launched.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    let [scratch, agent_state, landing, target] = match <[String; 4]>::try_from(stated) {
+        Ok(four) => four,
+        Err(stated) => {
+            return Verdict::Fail(format!("the run named {} paths, not 4", stated.len()));
+        }
+    };
+    let manifest: playpen::manifest::Manifest = match fs::read_to_string(&copied)
+        .map_err(|e| format!("{e}"))
+        .and_then(|text| serde_json::from_str(&text).map_err(|e| format!("{e}")))
+    {
+        Ok(manifest) => manifest,
+        Err(why) => return Verdict::Fail(format!("the manifest the run was given: {why}")),
+    };
+    // What the manifest said the run-scoped paths were, against what the run found them to be.
+    let area = |name: &str| {
+        manifest
+            .workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.areas)
+            .find(|area| area.name == name)
+            .map(|area| area.path.display().to_string())
+    };
+    for (what, stated, found) in [
+        (
+            "the run scratch",
+            Some(manifest.run_scratch.display().to_string()),
+            scratch,
+        ),
+        (
+            "the agent state directory",
+            Some(manifest.agent_state.display().to_string()),
+            agent_state,
+        ),
+        ("the persistent area", area("landing"), landing),
+        ("the ephemeral area", area("target"), target),
+    ] {
+        if stated.as_deref() != Some(found.as_str()) {
+            return Verdict::Fail(format!(
+                "the manifest states {what} at {stated:?}, and the run had it at {found:?}"
+            ));
+        }
+    }
+    // The paths that outlive a run, probed at the modes the manifest states them at, with the
+    // decoy beside them: what is stated is reachable, and what is not stated is not.
+    let mut ops: Vec<(String, &str, Expected)> = Vec::new();
+    for workspace in &manifest.workspaces {
+        for root in &workspace.roots {
+            match utf8(&readable(&root.path)) {
+                Ok(path) => ops.push((path, "read", Expected::Succeeds)),
+                Err(why) => return Verdict::Setup(why),
+            }
+            // A `read` root grants read and execute, never write: the stated mode is the whole
+            // statement, so a writable `read` root is a false manifest.
+            let created = root.path.join("playpen-suite-created");
+            let expected = match root.mode {
+                playpen::manifest::Mode::Readwrite => Expected::Succeeds,
+                playpen::manifest::Mode::Read => Expected::Denial,
+            };
+            match utf8(&created) {
+                Ok(path) => ops.push((path, "write", expected)),
+                Err(why) => return Verdict::Setup(why),
+            }
+        }
+    }
+    match area("landing").map(|path| Path::new(&path).join("playpen-suite-created")) {
+        Some(path) => match utf8(&path) {
+            Ok(path) => ops.push((path, "write", Expected::Succeeds)),
+            Err(why) => return Verdict::Setup(why),
+        },
+        None => return Verdict::Fail("the manifest states no persistent area".into()),
+    }
+    match utf8(&decoy) {
+        Ok(path) => ops.push((path, "read", Expected::Denial)),
+        Err(why) => return Verdict::Setup(why),
+    }
+    let argv: Vec<&str> = ops
+        .iter()
+        .flat_map(|(path, verb, _)| [*verb, path.as_str()])
+        .collect();
+    let outside = Command::new(PROBE)
+        .args(&argv)
+        .output()
+        .expect("run the probe");
+    // Every op must succeed outside, whatever it is asserted to do inside, or the inside proves
+    // nothing. The writes made outside are removed again, so each side creates its own.
+    let probe = fixture.probe();
+    let mut inside_argv = vec![probe.to_str().expect("a UTF-8 probe path")];
+    inside_argv.extend(&argv);
+    for (path, verb, _) in &ops {
+        if *verb == "write" {
+            let _ = fs::remove_file(path);
+        }
+    }
+    let inside = fixture
+        .run_under(&policy, &inside_argv)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run playpen");
+    let (outside, inside) = match (observe(outside, ops.len()), observe(inside, ops.len())) {
+        (Ok(outside), Ok(inside)) => (outside, inside),
+        (Err(why), _) => return Verdict::Setup(format!("outside: {why}")),
+        (_, Err(why)) => return Verdict::Fail(format!("inside: {why}")),
+    };
+    ops.iter()
+        .zip(outside.iter().zip(&inside))
+        .map(|((path, verb, expected), (outside, inside))| {
+            match judge(*expected, outside, inside) {
+                Verdict::Pass => Verdict::Pass,
+                Verdict::Fail(why) => Verdict::Fail(format!("{verb} {path}: {why}")),
+                Verdict::Setup(why) => Verdict::Setup(format!("{verb} {path}: {why}")),
+            }
+        })
+        .find(|verdict| *verdict != Verdict::Pass)
+        .unwrap_or(Verdict::Pass)
 }
 
 /// What a toolchain row made: the root its toolchain grants, a file under it, and the targets
@@ -899,6 +1099,11 @@ fn prepare(action: Action, home: &Path, root: &Path, made: &mut Made) -> Result<
         }
         Action::Refuse(_) | Action::CheckDocument => {
             return Err("a refusal has no boundary for the probe to run under".into());
+        }
+        Action::ManifestIsTrue => {
+            return Err(
+                "the manifest's own check builds its ops from the manifest it was given".into(),
+            );
         }
         Action::PullDenials => {
             return Err("pulling denials needs the probe forked, never launched directly".into());

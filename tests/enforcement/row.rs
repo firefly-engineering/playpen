@@ -210,6 +210,12 @@ pub enum Fixture {
     ///
     /// [spec §8.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#84-exclusions
     Excluded,
+    /// One launch per row, under a profile with a `readwrite` root, a `read` root, a persistent
+    /// area and an ephemeral one, and a decoy outside every grant: enough shape that the manifest
+    /// has something to be wrong about ([spec §13]).
+    ///
+    /// [spec §13]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#13-the-manifest
+    Manifest,
 }
 
 /// The closed set of checks.
@@ -251,6 +257,16 @@ pub enum Action {
     ///
     /// [spec §14.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#142-playpen-explain
     PullDenials,
+    /// "The manifest is true", filesystem half: every path the manifest states is reachable from
+    /// inside the run it describes, at the mode it states, and a decoy outside every grant is not
+    /// ([spec §13]). A manifest that described a boundary the kernel did not build would mislead
+    /// the agent silently, which is what makes this a positive worth having.
+    ///
+    /// The route half joins it with the route table
+    /// ([#90](https://github.com/firefly-engineering/playpen/issues/90)).
+    ///
+    /// [spec §13]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#13-the-manifest
+    ManifestIsTrue,
 }
 
 impl Action {
@@ -273,6 +289,7 @@ impl Action {
             | Action::Connect(_) => fixture == Fixture::ProbeRoot,
             Action::Refuse(_) | Action::CheckDocument => fixture == Fixture::Outside,
             Action::PullDenials => fixture == Fixture::DescendantDenied,
+            Action::ManifestIsTrue => fixture == Fixture::Manifest,
         }
     }
 }

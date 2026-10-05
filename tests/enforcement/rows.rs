@@ -18,6 +18,17 @@ const IN_HOME: Platform = Platform {
 };
 
 pub const ROWS: &[Row] = &[
+    // "The manifest is true", filesystem half: what the agent is told and what the kernel
+    // enforces are one resolution pass, and this is what holds them to it.
+    Row {
+        id: "P-manifest",
+        class: Class::Positive,
+        platform: BOTH,
+        fixture: Fixture::Manifest,
+        action: Action::ManifestIsTrue,
+        expected: Expected::Succeeds,
+        from: &[Decision::Adr(11), Decision::Adr(16), Decision::Issue(78)],
+    },
     Row {
         id: "P-canary",
         class: Class::Positive,

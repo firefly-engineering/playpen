@@ -34,10 +34,14 @@ fn each_run_gets_a_fresh_writable_scratch_as_tmpdir_removed_at_teardown() {
     let fx = Fixture::new();
     let script = r#"echo "$TMPDIR"; ls -A "$TMPDIR"; echo x > "$TMPDIR/f" && echo written"#;
     let first = sh(&fx, script);
+    // The scratch holds the run's manifest, which every run is written ([spec §13.1]), and
+    // nothing else of anyone's.
+    //
+    // [spec §13.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#131-form
     assert_eq!(
         first[1..],
-        ["written"],
-        "the scratch starts empty: {first:?}"
+        ["manifest.json", "written"],
+        "the scratch starts with the manifest alone: {first:?}"
     );
     let scratch = PathBuf::from(&first[0]);
     assert!(
