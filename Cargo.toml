@@ -14,6 +14,8 @@ publish = false
 nono = { git = "https://github.com/firefly-engineering/nono", rev = "5ee60f6fcebc1a006865d8f9a62e235a0f0ce1ed", default-features = false }
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
+# The policy's JSON Schema is generated from its serde types, never written beside them.
+schemars = "1"
 serde = { version = "1", features = ["derive"] }
 # Exact: the policy parser reads the kind of an error raised through an alias back from its message
 # (src/policy/syntax.rs), so a bump is a reviewed change whose tests show the wording held, until

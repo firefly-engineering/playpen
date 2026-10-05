@@ -17,6 +17,7 @@ pub use locate::SearchPath;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_saphyr::Spanned;
 
@@ -29,13 +30,15 @@ pub const VERSION: u32 = 1;
 
 /// The authored policy. Every table is optional except `version`, so the smallest policy is
 /// `version: 1`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
+    #[schemars(extend("const" = VERSION))]
     pub version: u32,
     /// Free-form, for holding anchors. Nothing reads it: what it holds counts only where an alias
     /// or merge key uses it, and is checked there.
     #[serde(default)]
+    #[schemars(with = "Option<serde_json::Value>")]
     pub definitions: Option<serde::de::IgnoredAny>,
     #[serde(default)]
     pub minters: BTreeMap<String, Minter>,
@@ -52,7 +55,7 @@ pub struct Policy {
 /// A command that produces one secret ([spec §7.2]). Argv, never a shell string.
 ///
 /// [spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Minter {
     pub command: Vec<String>,
@@ -64,7 +67,7 @@ pub struct Minter {
 }
 
 /// Named lists a profile or route refers to by name.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Fragments {
     /// Environment fragments: lists of variable names a profile allows together.
@@ -77,7 +80,7 @@ pub struct Fragments {
     pub endpoints: BTreeMap<String, Vec<EndpointRule>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EndpointRule {
     pub method: String,
@@ -87,7 +90,7 @@ pub struct EndpointRule {
 /// Everything a run may reach for one body of work ([spec §5.1]).
 ///
 /// [spec §5.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#51-workspace
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Workspace {
     pub roots: Vec<Root>,
@@ -100,7 +103,7 @@ pub struct Workspace {
 }
 
 /// A brought root: a path the workspace grants in place, at one mode.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Root {
     pub path: PathBuf,
@@ -109,7 +112,7 @@ pub struct Root {
     pub exclude: Vec<Exclusion>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     Read,
@@ -128,7 +131,7 @@ impl From<Mode> for Access {
 /// A literal subpath subtracted from a root ([spec §8.4]). Omitted `classes` subtract all three.
 ///
 /// [spec §8.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#84-exclusions
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Exclusion {
     pub path: PathBuf,
@@ -137,7 +140,7 @@ pub struct Exclusion {
 }
 
 /// An access class an exclusion subtracts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Class {
     Read,
@@ -149,7 +152,7 @@ pub enum Class {
 /// means something.
 ///
 /// [spec §5.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#54-provisioned-areas
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(tag = "lifetime", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Area {
     // A struct variant, not a unit one: serde lets a unit variant of an internally tagged enum
@@ -161,7 +164,7 @@ pub enum Area {
     },
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Concurrency {
     /// The default: a wrongly shared working area corrupts silently, a wrongly exclusive cache
@@ -174,7 +177,7 @@ pub enum Concurrency {
 /// Which remote repositories the work may reach: exactly one of `org` or `repos` ([spec §5.3]).
 ///
 /// [spec §5.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#53-forge-scope
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase", deny_unknown_fields)]
 pub enum Forge {
     Org(String),
@@ -184,7 +187,7 @@ pub enum Forge {
 /// A credential route ([spec §7.1]).
 ///
 /// [spec §7.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#71-credential-route
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Route {
     pub host: String,
@@ -195,7 +198,7 @@ pub struct Route {
     pub endpoints: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Delivery {
     pub env: String,
@@ -204,12 +207,13 @@ pub struct Delivery {
 /// The unit an invocation selects ([spec §5.5]).
 ///
 /// [spec §5.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#55-profile
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
     #[serde(default)]
     pub prefixes: Vec<PathBuf>,
     /// Spanned, so a name that matches no workspace is refused where it was written.
+    #[schemars(with = "Vec<String>")]
     pub workspaces: Vec<Spanned<String>>,
     pub toolchain: Vec<ToolchainRoot>,
     #[serde(default)]
@@ -224,7 +228,7 @@ pub struct Profile {
 /// A read-only root for what the agent works *with* ([spec §8.3]). Always read, so no `mode`.
 ///
 /// [spec §8.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#83-toolchain
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ToolchainRoot {
     pub path: PathBuf,
@@ -235,7 +239,7 @@ pub struct ToolchainRoot {
 /// A profile's environment ([spec §9]).
 ///
 /// [spec §9]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#9-the-environment
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Env {
     #[serde(default)]
@@ -248,14 +252,14 @@ pub struct Env {
 
 /// A literal `set:` value, or a provisioned area's path written `!area <workspace>/<area>` — in
 /// JSON, which has no tags, `{"area": "<workspace>/<area>"}`.
-#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum SetValue {
     Area(AreaRef),
     Literal(String),
 }
 
-#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase", deny_unknown_fields)]
 pub enum AreaRef {
     Area(String),
@@ -264,7 +268,7 @@ pub enum AreaRef {
 /// One kind's share list ([spec §5.6]). Default-deny: empty unless entries are named.
 ///
 /// [spec §5.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#56-agent-state-directory
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentState {
     #[serde(default)]
@@ -274,7 +278,7 @@ pub struct AgentState {
 /// A symlink to playpen, named for its key ([spec §11.3]).
 ///
 /// [spec §11.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#113-shims
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Shim {
     pub target: PathBuf,

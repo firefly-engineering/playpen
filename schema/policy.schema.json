@@ -1,0 +1,520 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Policy",
+  "description": "The authored policy. Every table is optional except `version`, so the smallest policy is\n`version: 1`.",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0,
+      "const": 1
+    },
+    "definitions": {
+      "description": "Free-form, for holding anchors. Nothing reads it: what it holds counts only where an alias\nor merge key uses it, and is checked there."
+    },
+    "minters": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/Minter"
+      }
+    },
+    "fragments": {
+      "$ref": "#/$defs/Fragments"
+    },
+    "workspaces": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/Workspace"
+      }
+    },
+    "profiles": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/Profile"
+      }
+    },
+    "shims": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/Shim"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "version"
+  ],
+  "$defs": {
+    "Minter": {
+      "description": "A command that produces one secret ([spec §7.2]). Argv, never a shell string.\n\n[spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters",
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "revoke": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "default": null
+        },
+        "timeout": {
+          "description": "Seconds.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "command"
+      ]
+    },
+    "Fragments": {
+      "description": "Named lists a profile or route refers to by name.",
+      "type": "object",
+      "properties": {
+        "env": {
+          "description": "Environment fragments: lists of variable names a profile allows together.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "default": {}
+        },
+        "endpoints": {
+          "description": "Endpoint rule sets ([spec §7.6]).\n\n[spec §7.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#76-endpoint-rule-sets",
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/EndpointRule"
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "EndpointRule": {
+      "type": "object",
+      "properties": {
+        "method": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "path"
+      ]
+    },
+    "Workspace": {
+      "description": "Everything a run may reach for one body of work ([spec §5.1]).\n\n[spec §5.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#51-workspace",
+      "type": "object",
+      "properties": {
+        "roots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Root"
+          }
+        },
+        "areas": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Area"
+          }
+        },
+        "forge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Forge"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "credentials": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Route"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "roots"
+      ]
+    },
+    "Root": {
+      "description": "A brought root: a path the workspace grants in place, at one mode.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "mode": {
+          "$ref": "#/$defs/Mode"
+        },
+        "exclude": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Exclusion"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "mode"
+      ]
+    },
+    "Mode": {
+      "type": "string",
+      "enum": [
+        "read",
+        "readwrite"
+      ]
+    },
+    "Exclusion": {
+      "description": "A literal subpath subtracted from a root ([spec §8.4]). Omitted `classes` subtract all three.\n\n[spec §8.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#84-exclusions",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "classes": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/Class"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ]
+    },
+    "Class": {
+      "description": "An access class an exclusion subtracts.",
+      "type": "string",
+      "enum": [
+        "read",
+        "execute",
+        "write"
+      ]
+    },
+    "Area": {
+      "description": "A provisioned area ([spec §5.4]). `lifetime` is the tag, so `concurrency` exists only where it\nmeans something.\n\n[spec §5.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#54-provisioned-areas",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "lifetime": {
+              "type": "string",
+              "const": "ephemeral"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "lifetime"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "concurrency": {
+              "$ref": "#/$defs/Concurrency"
+            },
+            "lifetime": {
+              "type": "string",
+              "const": "persistent"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "lifetime"
+          ]
+        }
+      ]
+    },
+    "Concurrency": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "shared"
+          ]
+        },
+        {
+          "description": "The default: a wrongly shared working area corrupts silently, a wrongly exclusive cache\nmerely refuses.",
+          "type": "string",
+          "const": "exclusive"
+        }
+      ]
+    },
+    "Forge": {
+      "description": "Which remote repositories the work may reach: exactly one of `org` or `repos` ([spec §5.3]).\n\n[spec §5.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#53-forge-scope",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "org": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "org"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "repos": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "repos"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "Route": {
+      "description": "A credential route ([spec §7.1]).\n\n[spec §7.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#71-credential-route",
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "path_prefix": {
+          "type": "string"
+        },
+        "minter": {
+          "type": "string"
+        },
+        "delivery": {
+          "$ref": "#/$defs/Delivery"
+        },
+        "endpoints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "path_prefix",
+        "minter",
+        "delivery"
+      ]
+    },
+    "Delivery": {
+      "type": "object",
+      "properties": {
+        "env": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "env"
+      ]
+    },
+    "Profile": {
+      "description": "The unit an invocation selects ([spec §5.5]).\n\n[spec §5.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#55-profile",
+      "type": "object",
+      "properties": {
+        "prefixes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "workspaces": {
+          "description": "Spanned, so a name that matches no workspace is refused where it was written.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "toolchain": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolchainRoot"
+          }
+        },
+        "env": {
+          "$ref": "#/$defs/Env"
+        },
+        "credentials": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Route"
+          }
+        },
+        "agent_state": {
+          "description": "Keyed by agent kind.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/AgentState"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "workspaces",
+        "toolchain"
+      ]
+    },
+    "ToolchainRoot": {
+      "description": "A read-only root for what the agent works *with* ([spec §8.3]). Always read, so no `mode`.\n\n[spec §8.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#83-toolchain",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "exclude": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Exclusion"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ]
+    },
+    "Env": {
+      "description": "A profile's environment ([spec §9]).\n\n[spec §9]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#9-the-environment",
+      "type": "object",
+      "properties": {
+        "fragments": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "allow": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "set": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/SetValue"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "SetValue": {
+      "description": "A literal `set:` value, or a provisioned area's path written `!area <workspace>/<area>` — in\nJSON, which has no tags, `{\"area\": \"<workspace>/<area>\"}`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AreaRef"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "AreaRef": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "area": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "area"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "AgentState": {
+      "description": "One kind's share list ([spec §5.6]). Default-deny: empty unless entries are named.\n\n[spec §5.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#56-agent-state-directory",
+      "type": "object",
+      "properties": {
+        "share": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": false
+    },
+    "Shim": {
+      "description": "A symlink to playpen, named for its key ([spec §11.3]).\n\n[spec §11.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#113-shims",
+      "type": "object",
+      "properties": {
+        "target": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "profile": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "flags": {
+          "description": "Literal argv tokens, prepended to the caller's. Never a shell string.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "kind"
+      ]
+    }
+  }
+}
