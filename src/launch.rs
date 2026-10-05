@@ -20,7 +20,7 @@ use crate::code::Code;
 use crate::explain;
 use crate::floor::floor;
 use crate::mechanism::{self, Mechanism};
-use crate::policy::Policy;
+use crate::policy::{Policy, Profile, coherence};
 use crate::record::{self, RunId, RunRecord};
 use crate::refusal::{EXIT_REFUSED, Refusal};
 use crate::self_test;
@@ -210,9 +210,22 @@ fn run(
         Ok(cwd) => record.policy(&cwd.join(policy_path)),
         Err(_) => record.policy(policy_path),
     }
-    let policy = Policy::load(policy_path)?.policy;
-    let roots = resolve_roots(&policy, profile)?;
+    let loaded = Policy::load(policy_path)?;
+    // Step 4. `run` takes its profile explicitly and resolves no context of its own.
+    let selected = loaded.policy.profiles.get(profile).ok_or_else(|| {
+        let known: Vec<_> = loaded.policy.profiles.keys().map(String::as_str).collect();
+        Refusal::new(
+            Code::SelectionUnknownProfile,
+            format!(
+                "profile {profile:?} is not in the policy; known profiles: {}",
+                known.join(", ")
+            ),
+        )
+    })?;
     record.profile(profile);
+    // Step 5.
+    coherence::check(&loaded)?;
+    let roots = resolve_roots(&loaded.policy, selected)?;
     check_cwd(cwd, &roots)?;
     // Step 7, on every launch, never from a cached verdict: the mechanism first, so a missing
     // capability is named as such rather than surfacing as a canary that could not be confined.
@@ -243,37 +256,16 @@ fn run(
     )
 }
 
-/// The selected profile's brought roots, canonicalised, as path grants with provenance.
-fn resolve_roots(policy: &Policy, profile: &str) -> Result<Vec<PathGrant>, Refusal> {
-    let selected = policy.profiles.get(profile).ok_or_else(|| {
-        let known: Vec<_> = policy.profiles.keys().map(String::as_str).collect();
-        Refusal::new(
-            Code::SelectionUnknownProfile,
-            format!(
-                "profile {profile:?} is not in the policy; known profiles: {}",
-                known.join(", ")
-            ),
-        )
-    })?;
+/// The selected profile's brought roots, canonicalised, as path grants with provenance. The
+/// coherence tier has already refused an undeclared workspace and a relative root.
+fn resolve_roots(policy: &Policy, selected: &Profile) -> Result<Vec<PathGrant>, Refusal> {
     let mut grants = Vec::new();
     for name in selected.workspaces.iter().map(|name| &name.value) {
-        let workspace = policy.workspaces.get(name).ok_or_else(|| {
-            Refusal::new(
-                Code::WorkspaceUnknown,
-                format!("profile {profile:?} names undeclared workspace {name:?}"),
-            )
-        })?;
+        let Some(workspace) = policy.workspaces.get(name) else {
+            continue;
+        };
         for (i, root) in workspace.roots.iter().enumerate() {
             let from = format!("workspace:{name}.roots[{i}]");
-            if !root.path.is_absolute() {
-                return Err(Refusal::new(
-                    Code::RootRelative,
-                    format!(
-                        "{from}: root {} is not an absolute path",
-                        root.path.display()
-                    ),
-                ));
-            }
             let path = root.path.canonicalize().map_err(|e| {
                 Refusal::new(
                     Code::RootMissing,

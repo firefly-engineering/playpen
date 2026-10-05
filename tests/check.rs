@@ -57,3 +57,30 @@ fn a_refusal_is_one_line_with_no_run() {
         "check opens no run record"
     );
 }
+
+/// Coherence is decidable from the document, so `--no-filesystem` runs it too.
+#[test]
+fn the_coherence_tier_runs_without_the_filesystem() {
+    let fx = Fixture::new();
+    let policy = fx.policy_dir.path().join("incoherent.json");
+    let document = serde_json::json!({
+        "version": 1,
+        "profiles": {"p": {"workspaces": ["nope"], "toolchain": []}},
+    });
+    std::fs::write(&policy, document.to_string()).expect("policy");
+    let output = fx
+        .playpen(&[
+            "check",
+            "--no-filesystem",
+            "--policy",
+            policy.to_str().unwrap(),
+        ])
+        .output()
+        .expect("playpen check");
+    assert_eq!(output.status.code(), Some(125));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.starts_with("playpen: refusal.workspace.unknown: "),
+        "{stderr}"
+    );
+}

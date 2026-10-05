@@ -1,8 +1,9 @@
 //! `playpen check` ([spec §10.5]): validate a policy without launching anything.
 //!
-//! The parser-contract tier always runs. The existence tier runs unless `--no-filesystem` is given,
-//! which is how a build validates a policy in a sandbox that has none of this host's paths: an
-//! existence check is a fact about this host at this moment, never about the document.
+//! The parser-contract and coherence tiers always run. The existence tier runs unless
+//! `--no-filesystem` is given, which is how a build validates a policy in a sandbox that has none
+//! of this host's paths: an existence check is a fact about this host at this moment, never about
+//! the document.
 //!
 //! `check` launches nothing, so like `explain` it opens no run record and its refusal line ends at
 //! the offending value. On success it writes nothing.
@@ -12,7 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::code::Code;
-use crate::policy::Policy;
+use crate::policy::{Policy, coherence};
 use crate::refusal::Refusal;
 
 #[derive(Debug, clap::Args)]
@@ -33,6 +34,7 @@ pub fn check(args: &Args) -> Result<(), Refusal> {
         )
     })?;
     let loaded = Policy::load(path)?;
+    coherence::check(&loaded)?;
     if args.no_filesystem {
         return Ok(());
     }
@@ -40,7 +42,8 @@ pub fn check(args: &Args) -> Result<(), Refusal> {
 }
 
 /// The existence tier over the whole document: every path a launch of any profile would need to
-/// find. A relative path is the coherence tier's to refuse, so it is not looked up here.
+/// find. Coherence has refused a relative root; a relative exclusion, toolchain root or shim target
+/// is not looked up against whatever directory `check` runs in.
 fn existence(policy: &Policy) -> Result<(), Refusal> {
     let exists = |path: &Path, code: Code, from: &str| {
         if !path.is_absolute() {

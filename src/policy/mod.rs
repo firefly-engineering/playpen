@@ -8,6 +8,7 @@
 //!
 //! [spec §10]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#10-the-policy-document
 
+pub mod coherence;
 mod syntax;
 
 use std::collections::BTreeMap;

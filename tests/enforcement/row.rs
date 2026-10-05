@@ -306,6 +306,11 @@ pub enum Invocation {
     ///
     /// [spec §10.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#102-syntax-and-strictness
     MergedTypo,
+    /// `playpen run` under a policy whose selected profile names a workspace the policy does not
+    /// declare: the coherence tier's, at launch step 5 ([spec §10.5]).
+    ///
+    /// [spec §10.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#105-validation-tiers
+    IncoherentWorkspace,
 }
 
 /// The policy [`Invocation::MergedTypo`] runs under, with `{root}` for its one root's path.

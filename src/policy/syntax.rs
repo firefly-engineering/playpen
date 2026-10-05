@@ -105,6 +105,31 @@ impl fmt::Display for Site<'_> {
     }
 }
 
+/// Where `value` was written in the policy read from `origin`: its use site, and its definition
+/// site too where an alias or a merge key brought it there.
+pub(super) fn written_at<T>(origin: &Path, value: &Spanned<T>) -> String {
+    let used = Pos::of_location(&value.referenced);
+    let defined = Pos::of_location(&value.defined);
+    match (used, defined) {
+        (Some(used), Some(defined)) if used != defined => format!(
+            "{} (defined at {})",
+            Site {
+                origin,
+                at: Some(used)
+            },
+            Site {
+                origin,
+                at: Some(defined)
+            },
+        ),
+        (used, defined) => Site {
+            origin,
+            at: used.or(defined),
+        }
+        .to_string(),
+    }
+}
+
 /// An anchored node: the half-open range of source it covers, and whether it was defined under
 /// `definitions:`.
 struct Anchor {

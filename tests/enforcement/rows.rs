@@ -202,4 +202,13 @@ pub const ROWS: &[Row] = &[
         expected: Expected::Unexamined(Code::RootMissing),
         from: &[Decision::Adr(9), Decision::Adr(16), Decision::Issue(56)],
     },
+    Row {
+        id: "R-incoherent-ws",
+        class: Class::Refusal,
+        platform: BOTH,
+        fixture: Fixture::Outside,
+        action: Action::Refuse(Invocation::IncoherentWorkspace),
+        expected: Expected::Recorded(Code::WorkspaceUnknown),
+        from: &[Decision::Adr(9), Decision::Adr(16), Decision::Issue(59)],
+    },
 ];

@@ -258,6 +258,19 @@ fn decline(invocation: Invocation) -> Declined {
             command.arg(&policy).arg("--").arg(canary_path());
             command
         }
+        Invocation::IncoherentWorkspace => {
+            let policy = fixture.policy_dir.path().join("incoherent.json");
+            let document = serde_json::json!({
+                "version": 1,
+                "workspaces": {"w": {"roots": [{"path": fixture.root(), "mode": "read"}]}},
+                "profiles": {"p": {"workspaces": ["w", "undeclared"], "toolchain": []}},
+            });
+            fs::write(&policy, document.to_string()).expect("write policy");
+            let mut command =
+                fixture.playpen(&["run", "--profile", "p", "--agent", "claude", "--policy"]);
+            command.arg(&policy).arg("--").arg(canary_path());
+            command
+        }
         Invocation::StateReachable => {
             let inside = fixture.root().join("state");
             runs = inside.join("playpen/runs");
