@@ -85,7 +85,9 @@
         {
           # On Darwin, no C toolchain from Nix: rustc links with the OS's own `cc`, so the
           # binaries the suite confines load only OS libraries. A Nix-linked one loads from
-          # /nix/store, which no boundary grants, and dies in dyld before it can run.
+          # /nix/store, which no boundary grants, and dies in dyld before it can run — unless the
+          # caller's DYLD_FALLBACK_LIBRARY_PATH sends dyld to an OS library of the same name, so
+          # the outcome would depend on the shell the suite was started from (#122).
           #
           # Linux gets stdenv's `cc`, because there is no OS `cc` to fall back on: on NixOS
           # the C toolchain only ever comes from /nix/store, so withholding it leaves rustc

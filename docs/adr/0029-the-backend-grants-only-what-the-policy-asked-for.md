@@ -65,6 +65,14 @@ profile" as one of two candidate causes; the rule is per-capability and restrict
 paths, with an upstream comment about blocking `DYLD_INSERT_LIBRARIES`, so that candidate is
 refuted and the dyld launch-closure cache is the live one.
 
+_Since resolved by [#122](https://github.com/firefly-engineering/playpen/issues/122): neither
+candidate. The ungranted library is never opened — dyld's `stat` of it is blocked by the sandbox
+every time — and when the caller's environment carries `DYLD_FALLBACK_LIBRARY_PATH`, dyld falls
+back by leaf name to the OS library of the same name in the shared cache. Read-and-map was never
+non-deterministic; the caller's environment was. No row maps an ungranted library: mapping one
+needs it opened first, which every read row already asserts is denied, and the backend emits
+`file-map-executable` only for readable paths._
+
 ## Consequences
 
 - **A new negative row, classified by the kernel's denial and not playpen's translation of it.**
