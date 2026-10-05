@@ -59,6 +59,7 @@ pub fn run(rows: &[Row], home: &Path) -> Vec<Outcome> {
             Fixture::NothingGranted => members.iter().map(|row| nothing_granted(row)).collect(),
             Fixture::DescendantDenied => members.iter().map(|row| descendant_denied(row)).collect(),
             Fixture::Toolchain => members.iter().map(|row| toolchain(row)).collect(),
+            Fixture::Excluded => members.iter().map(|row| excluded(row)).collect(),
         };
         for (i, verdict) in batch.into_iter().zip(verdicts) {
             outcomes[i] = Some(Outcome::Runs(verdict));
@@ -109,9 +110,25 @@ fn toolchain(row: &Row) -> Verdict {
         Ok(beside) => beside,
         Err(why) => return Verdict::Setup(why),
     };
-    let paths: Vec<String> = match std::iter::once(&neighbour)
-        .chain(&targets)
-        .map(|path| utf8(path))
+    let fixture = common::Fixture::with_toolchain("read", &[root.as_path()]);
+    let policy = fixture.policy.clone();
+    beside(row, &fixture, &policy, &neighbour, &targets)
+}
+
+/// The row's targets, read beside a neighbour the policy grants, outside and then confined under
+/// `policy`. The neighbour comes first on both sides: outside it shows the probe can read the kind
+/// of path at all, inside that the grant beside the targets was applied, without which a denial of
+/// a target would prove nothing.
+fn beside(
+    row: &Row,
+    fixture: &common::Fixture,
+    policy: &Path,
+    neighbour: &Path,
+    targets: &[PathBuf],
+) -> Verdict {
+    let paths: Vec<String> = match std::iter::once(neighbour)
+        .chain(targets.iter().map(PathBuf::as_path))
+        .map(utf8)
         .collect()
     {
         Ok(paths) => paths,
@@ -125,12 +142,11 @@ fn toolchain(row: &Row) -> Verdict {
         .args(&ops)
         .output()
         .expect("run the probe");
-    let fixture = common::Fixture::with_toolchain("read", &[root.as_path()]);
     let probe = fixture.probe();
     let mut argv = vec![probe.to_str().expect("a UTF-8 probe path")];
     argv.extend(&ops);
     let inside = fixture
-        .run(&argv)
+        .run_under(policy, &argv)
         .stdin(Stdio::null())
         .output()
         .expect("run playpen");
@@ -143,7 +159,7 @@ fn toolchain(row: &Row) -> Verdict {
         Verdict::Pass => {}
         Verdict::Fail(why) => {
             return Verdict::Fail(format!(
-                "the toolchain's own root is unreadable inside, so it was not applied: {why}"
+                "the grant beside the target is unreadable inside, so it was not applied: {why}"
             ));
         }
         setup => return setup,
@@ -154,6 +170,39 @@ fn toolchain(row: &Row) -> Verdict {
         .map(|(outside, inside)| judge(row.expected, outside, inside))
         .find(|verdict| *verdict != Verdict::Pass)
         .unwrap_or(Verdict::Pass)
+}
+
+/// A decoy in a subdirectory the policy excludes from the probe's own root, beside a file the
+/// root still grants ([spec §8.4]). Both live in the root's temp directory and go with it.
+///
+/// [spec §8.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#84-exclusions
+fn excluded(row: &Row) -> Verdict {
+    if row.action != Action::Read(Target::ExcludedDecoy) {
+        return Verdict::Setup(format!("{:?} is not read from an exclusion", row.action));
+    }
+    let fixture = common::Fixture::with_mode("read");
+    let (excluded, neighbour) = (
+        fixture.root().join("excluded"),
+        fixture.root().join("granted"),
+    );
+    let decoy = excluded.join("credentials");
+    let made = fs::create_dir(&excluded)
+        .and_then(|()| fs::write(&decoy, DECOY))
+        .and_then(|()| fs::write(&neighbour, DECOY));
+    if let Err(e) = made {
+        return Verdict::Setup(format!("decoy under {}: {e}", excluded.display()));
+    }
+    let policy = fixture.policy_named(
+        "excluded.json",
+        &serde_json::json!({
+            "version": 1,
+            "workspaces": {"w": {"roots": [
+                {"path": fixture.root(), "mode": "read", "exclude": [{"path": excluded}]},
+            ]}},
+            "profiles": {"p": {"workspaces": ["w"], "toolchain": []}},
+        }),
+    );
+    beside(row, &fixture, &policy, &neighbour, &[decoy])
 }
 
 /// What a toolchain row made: the root its toolchain grants, a file under it, and the targets
@@ -774,7 +823,7 @@ fn prepare(action: Action, home: &Path, root: &Path, made: &mut Made) -> Result<
                 let dir = TempDir::new().map_err(|e| format!("decoy directory: {e}"))?;
                 Ok(vec![decoy_dir.insert(dir).path().to_owned()])
             }
-            Target::StaleStorePath | Target::DecoyKeg => Err(format!(
+            Target::StaleStorePath | Target::DecoyKeg | Target::ExcludedDecoy => Err(format!(
                 "{target:?} stands beside a toolchain, and the probe's root has none"
             )),
             Target::LinkedCredentials => {

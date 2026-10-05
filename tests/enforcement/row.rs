@@ -109,6 +109,8 @@ ledger! {
     Keychain => "a mechanism-native Keychain",
     // Likewise: macOS has no abstract unix sockets, so `N-abstract-socket` is `n/a` there.
     AbstractSockets => "abstract unix sockets",
+    // Spec §15.4, item 8: Landlock cannot subtract a subpath from a grant (#127).
+    Exclusions => "subtracting a subpath from a grant",
 }
 
 /// A host precondition a row needs, each probed explicitly and skipping by its own stable name
@@ -202,6 +204,12 @@ pub enum Fixture {
     ///
     /// [spec §8.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#83-toolchain
     Toolchain,
+    /// One launch per row, under a profile whose one root is the probe's, with a subdirectory
+    /// excluded ([spec §8.4]). A file the root still grants must be readable inside, or the root
+    /// was not applied and the negative would prove nothing.
+    ///
+    /// [spec §8.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#84-exclusions
+    Excluded,
 }
 
 /// The closed set of checks.
@@ -255,6 +263,7 @@ impl Action {
             Action::Read(Target::StaleStorePath | Target::DecoyKeg) => {
                 fixture == Fixture::Toolchain
             }
+            Action::Read(Target::ExcludedDecoy) => fixture == Fixture::Excluded,
             Action::Read(_)
             | Action::Create(_)
             | Action::List(_)
@@ -300,6 +309,8 @@ pub enum Target {
     /// The marker of a manufactured keg in Homebrew's prefix, beside a manufactured keg the
     /// toolchain grants through its `opt` link.
     DecoyKeg,
+    /// A decoy in a subdirectory excluded from the probe's own granted root.
+    ExcludedDecoy,
 }
 
 /// Mach services, named by what they serve.

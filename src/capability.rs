@@ -50,9 +50,38 @@ pub struct PathGrant {
     pub state_derived: bool,
 }
 
+/// An access class an exclusion subtracts ([spec §8.4]).
+///
+/// [spec §8.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#84-exclusions
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Class {
+    Read,
+    Execute,
+    Write,
+}
+
+impl Class {
+    /// Every class, which is what an exclusion that names none subtracts.
+    pub const ALL: [Class; 3] = [Class::Read, Class::Execute, Class::Write];
+}
+
+/// A subtraction from the grants: `classes` are denied at `path` and everything beneath it,
+/// whatever grant would otherwise allow them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathDenial {
+    pub path: PathBuf,
+    pub classes: Vec<Class>,
+    /// The authored source (`workspace:playpen.roots[0].exclude[0]`, …).
+    pub from: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilitySet {
     pub paths: Vec<PathGrant>,
+    /// Subtracted from `paths`. Additive, so a record written before exclusions existed still reads.
+    #[serde(default)]
+    pub exclusions: Vec<PathDenial>,
     /// macOS Mach services the child may look up; every other service is denied.
     pub mach_services: Vec<String>,
 }

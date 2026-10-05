@@ -764,6 +764,7 @@ mod tests {
                 state_derived: false,
             }],
             mach_services: vec![],
+            exclusions: vec![],
         };
         record.launch(&caps, None).expect("launch");
         record.spawned(42);

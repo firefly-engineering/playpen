@@ -8,7 +8,7 @@ use std::path::Path;
 
 use nono::{AccessMode, FsCapability, IpcMode, NetworkMode, NonoError, Sandbox, SignalMode};
 
-use crate::capability::{Access, CapabilitySet, PathGrant, Scope};
+use crate::capability::{Access, CapabilitySet, PathDenial, PathGrant, Scope};
 use crate::code::Code;
 use crate::mechanism::{self, Capability};
 use crate::record::RunId;
@@ -44,6 +44,12 @@ pub fn apply(caps: &CapabilitySet, tag: Option<&str>) -> Result<(), Refusal> {
     Ok(())
 }
 
+/// Whether `caps` can be expressed on this platform's mechanism, decided without applying it: what
+/// `run` checks before it forks and `explain` before it reports, so both refuse alike.
+pub fn check(caps: &CapabilitySet) -> Result<(), Refusal> {
+    compile(caps).map(drop)
+}
+
 /// Translate playpen's capability set into nono's.
 fn compile(caps: &CapabilitySet) -> Result<nono::CapabilitySet, Refusal> {
     // playpen claims credential confinement only; the network is not a confined surface (ADR 0020).
@@ -55,6 +61,7 @@ fn compile(caps: &CapabilitySet) -> Result<nono::CapabilitySet, Refusal> {
         add_path(&mut set, grant)?;
     }
     add_mach_services(&mut set, &caps.mach_services)?;
+    add_exclusions(&mut set, &caps.exclusions)?;
     Ok(set)
 }
 
@@ -116,22 +123,78 @@ fn add_literal_dir(
     path: &Path,
     mode: AccessMode,
 ) -> Result<(), Refusal> {
-    let unsupported = || {
-        Refusal::new(
+    if mode != AccessMode::Read {
+        return Err(Refusal::new(
             Code::MechanismUnavailable,
             format!("a literal grant on {} cannot be expressed", path.display()),
-        )
-    };
-    let text = path.to_str().ok_or_else(unsupported)?;
-    if mode != AccessMode::Read
-        || text
-            .chars()
-            .any(|c| c == '"' || c == '\\' || c.is_control())
-    {
-        return Err(unsupported());
+        ));
     }
+    let text = profile_string(path)?;
     set.add_platform_rule(format!("(allow file-read* (literal \"{text}\"))"))
         .map_err(translate)
+}
+
+/// `path` as a string a Seatbelt rule can hold: UTF-8, with nothing that would end the string or
+/// the line.
+#[cfg(target_os = "macos")]
+fn profile_string(path: &Path) -> Result<&str, Refusal> {
+    path.to_str()
+        .filter(|text| {
+            !text
+                .chars()
+                .any(|c| c == '"' || c == '\\' || c.is_control())
+        })
+        .ok_or_else(|| {
+            Refusal::new(
+                Code::MechanismUnavailable,
+                format!(
+                    "the path {} cannot be expressed in a profile",
+                    path.display()
+                ),
+            )
+        })
+}
+
+/// One deny rule per class an exclusion subtracts. nono emits platform rules after its own allows,
+/// and Seatbelt's last matching rule wins, so each overrides whatever grant covers the path.
+/// Execute is both halves of running a binary from there: `exec` and mapping it executable.
+#[cfg(target_os = "macos")]
+fn add_exclusions(set: &mut nono::CapabilitySet, exclusions: &[PathDenial]) -> Result<(), Refusal> {
+    for exclusion in exclusions {
+        let path = profile_string(&exclusion.path)?;
+        for class in &exclusion.classes {
+            use crate::capability::Class;
+            let operations = match class {
+                Class::Read => "file-read*",
+                Class::Write => "file-write*",
+                Class::Execute => "process-exec* file-map-executable",
+            };
+            set.add_platform_rule(format!("(deny {operations} (subpath \"{path}\"))"))
+                .map_err(translate)?;
+        }
+    }
+    Ok(())
+}
+
+/// Landlock is allow-only, and a grant on a directory covers everything beneath it, so it cannot
+/// subtract a subpath ([#127]). An exclusion refuses rather than being dropped, which would grant
+/// what the policy took away.
+///
+/// [#127]: https://github.com/firefly-engineering/playpen/issues/127
+#[cfg(target_os = "linux")]
+fn add_exclusions(_: &mut nono::CapabilitySet, exclusions: &[PathDenial]) -> Result<(), Refusal> {
+    match exclusions.first() {
+        None => Ok(()),
+        Some(exclusion) => Err(Refusal::new(
+            Code::MechanismUnavailable,
+            format!(
+                "{}: Landlock cannot subtract {} from a grant, so exclusions are macOS-only \
+                 (https://github.com/firefly-engineering/playpen/issues/127)",
+                exclusion.from,
+                exclusion.path.display()
+            ),
+        )),
+    }
 }
 
 /// Seatbelt checks a path through a link against the link as well as its target, so the link
@@ -280,9 +343,78 @@ mod tests {
                 state_derived: false,
             }],
             mach_services: vec![],
+            exclusions: vec![],
         };
         let r = compile(&caps).unwrap_err();
         assert_eq!(r.code, Code::RootMissing);
         assert!(r.to_string().contains("workspace:w.roots[0]"));
+    }
+
+    fn excluding(classes: Vec<crate::capability::Class>) -> CapabilitySet {
+        let dir = std::env::temp_dir();
+        CapabilitySet {
+            paths: vec![PathGrant {
+                path: dir.clone(),
+                access: Access::ReadWrite,
+                scope: Scope::Subtree,
+                from: "workspace:w.roots[0]".into(),
+                state_derived: false,
+            }],
+            exclusions: vec![crate::capability::PathDenial {
+                path: dir.join("secrets"),
+                classes,
+                from: "workspace:w.roots[0].exclude[0]".into(),
+            }],
+            mach_services: vec![],
+        }
+    }
+
+    /// Seatbelt's last matching rule wins, and nono emits platform rules after its allows, so a
+    /// deny rule per class subtracts the exclusion from whatever grant covers it.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn an_exclusion_is_a_deny_rule_per_class() {
+        use crate::capability::Class;
+        let set = compile(&excluding(Class::ALL.to_vec())).expect("compiles");
+        let secrets = std::env::temp_dir().join("secrets");
+        let secrets = secrets.display();
+        for rule in [
+            format!("(deny file-read* (subpath \"{secrets}\"))"),
+            format!("(deny file-write* (subpath \"{secrets}\"))"),
+            format!("(deny process-exec* file-map-executable (subpath \"{secrets}\"))"),
+        ] {
+            assert!(
+                set.platform_rules().contains(&rule),
+                "{rule} in {:?}",
+                set.platform_rules()
+            );
+        }
+        let set = compile(&excluding(vec![Class::Write])).expect("compiles");
+        let denies: Vec<_> = set
+            .platform_rules()
+            .iter()
+            .filter(|rule| rule.contains("secrets"))
+            .collect();
+        assert_eq!(
+            denies,
+            [&format!("(deny file-write* (subpath \"{secrets}\"))")]
+        );
+    }
+
+    /// Landlock cannot subtract a subpath (#127), so an exclusion refuses rather than being
+    /// granted silently.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_exclusion_refuses_on_linux() {
+        let refusal =
+            compile(&excluding(crate::capability::Class::ALL.to_vec())).expect_err("refused");
+        assert_eq!(refusal.code, Code::MechanismUnavailable);
+        assert!(
+            refusal
+                .message()
+                .contains("workspace:w.roots[0].exclude[0]"),
+            "{refusal}"
+        );
+        assert!(refusal.message().contains("issues/127"), "{refusal}");
     }
 }

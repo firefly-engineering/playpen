@@ -152,6 +152,16 @@ pub enum Class {
     Write,
 }
 
+impl From<Class> for crate::capability::Class {
+    fn from(class: Class) -> Self {
+        match class {
+            Class::Read => Self::Read,
+            Class::Execute => Self::Execute,
+            Class::Write => Self::Write,
+        }
+    }
+}
+
 /// A provisioned area ([spec §5.4]). `lifetime` is the tag, so `concurrency` exists only where it
 /// means something.
 ///

@@ -235,6 +235,7 @@ pub fn floor() -> Result<CapabilitySet, Refusal> {
     }
     Ok(CapabilitySet {
         paths,
+        exclusions: Vec::new(),
         mach_services: MACH_SERVICES.iter().map(|s| s.to_string()).collect(),
     })
 }

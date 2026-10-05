@@ -205,3 +205,79 @@ fn a_binary_covered_by_a_toolchain_root_runs_and_an_uncovered_one_is_denied() {
     let planted = covered.path().join("planted");
     assert_denied(&fx.probe_under(&policy, &["write", planted.to_str().unwrap()]));
 }
+
+/// A policy granting the fixture's root read-write with `exclude` on it.
+fn excluding(fx: &Fixture, exclude: Value) -> std::path::PathBuf {
+    fx.policy_named(
+        "excluding.json",
+        &json!({
+            "version": 1,
+            "workspaces": {"w": {"roots": [
+                {"path": fx.root(), "mode": "readwrite", "exclude": exclude},
+            ]}},
+            "profiles": {"p": {"workspaces": ["w"], "toolchain": []}},
+        }),
+    )
+}
+
+/// An excluded subpath is denied for its classes and still allowed for the others; omitting
+/// `classes` subtracts all three ([spec §8.4]).
+///
+/// [spec §8.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#84-exclusions
+#[test]
+#[cfg(target_os = "macos")]
+fn an_excluded_subpath_is_denied_for_its_classes_only() {
+    let fx = Fixture::new();
+    let (hooks, secrets) = (fx.root().join("hooks"), fx.root().join("secrets"));
+    for dir in [&hooks, &secrets] {
+        std::fs::create_dir(dir).expect("mkdir");
+        std::fs::write(dir.join("file"), "content").expect("seed");
+    }
+    let binary = runnable(&secrets);
+    let policy = excluding(
+        &fx,
+        json!([
+            {"path": hooks, "classes": ["write"]},
+            {"path": secrets},
+        ]),
+    );
+    let path = |p: std::path::PathBuf| p.to_str().unwrap().to_owned();
+    let (hooks_file, hooks_new) = (path(hooks.join("file")), path(hooks.join("new")));
+    let (secrets_file, secrets_new) = (path(secrets.join("file")), path(secrets.join("new")));
+    // Write alone is subtracted from `hooks`.
+    assert_eq!(fx.probe_under(&policy, &["read", &hooks_file])["ok"], true);
+    assert_denied(&fx.probe_under(&policy, &["write", &hooks_new]));
+    // Everything is subtracted from `secrets`.
+    assert_denied(&fx.probe_under(&policy, &["read", &secrets_file]));
+    assert_denied(&fx.probe_under(&policy, &["write", &secrets_new]));
+    assert_denied(&fx.probe_under(&policy, &["exec", &binary]));
+    // The rest of the root is untouched.
+    let beside = path(fx.root().join("beside"));
+    assert_eq!(fx.probe_under(&policy, &["write", &beside])["ok"], true);
+}
+
+/// Landlock cannot subtract a subpath, so the launch refuses rather than grant it (#127).
+#[test]
+#[cfg(target_os = "linux")]
+fn an_exclusion_refuses_on_linux() {
+    let fx = Fixture::new();
+    let secrets = fx.root().join("secrets");
+    std::fs::create_dir(&secrets).expect("mkdir");
+    let policy = excluding(&fx, json!([{"path": secrets}]));
+    let output = fx
+        .run_under(&policy, &[&os_bin("true")])
+        .output()
+        .expect("playpen");
+    assert_refused(&output, "refusal.mechanism.unavailable");
+}
+
+#[test]
+fn a_missing_exclusion_is_refused() {
+    let fx = Fixture::new();
+    let policy = excluding(&fx, json!([{"path": fx.root().join("gone")}]));
+    let output = fx
+        .run_under(&policy, &[&os_bin("true")])
+        .output()
+        .expect("playpen");
+    assert_refused(&output, "refusal.exclusion.missing");
+}

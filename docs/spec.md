@@ -690,6 +690,12 @@ subtraction.
 - Exclusions apply to **mutable** trees only.
 - **Exclusions are never stated inward.** The manifest omits them, because an enumeration of
   carve-outs is a map of what is worth attacking.
+- **Exclusions are macOS-only for now.** Seatbelt subtracts one with a deny rule placed after the
+  allows. Landlock is allow-only, and a grant on a directory covers everything beneath it, so it
+  cannot express a subtraction. On Linux a launch whose profile carries an exclusion refuses with
+  `refusal.mechanism.unavailable`, naming it, rather than grant what the policy took away. A named
+  asymmetry ([§15.4](#154-named-asymmetries), item 8); whether Linux ever gets them is
+  [#127](https://github.com/firefly-engineering/playpen/issues/127).
 
 ### 8.5 Symlinks
 
@@ -1473,6 +1479,7 @@ asymmetry is *unassertable*, never that its row lives elsewhere.
 | 5 | user namespaces (Chromium's nested userns) are Linux's | — | `P-unshare` (`n/a` on macOS) |
 | 6 | the parent-death signal that stops an agent outliving its supervisor. Permanent: after `exec` only a kernel mechanism can do this, and macOS has none. Narrows [§18](#18-named-residuals) item 4 to macOS | Linux | `the_agent_does_not_outlive_a_killed_supervisor`, transparency (`n/a` on macOS) |
 | 7 | signal **origin** is readable: `sigwaitinfo`'s `si_code` is `SI_KERNEL` for a tty keypress and `SI_USER` for a `kill`, where macOS reports `0` for both with `si_pid` set in both. Two live consequences, both macOS-only: a direct `kill -INT` to a foreground playpen is silently dropped, and `SIGTTIN`/`SIGTTOU` reach the agent twice, because the foreground proxy macOS falls back to is *inverted* for exactly those two — a process receiving one is by definition in a background group | Linux | `a_signal_sent_straight_to_a_foreground_playpen_is_forwarded`, transparency (`n/a` on macOS) |
+| 8 | exclusions: Seatbelt subtracts a subpath from a grant with a deny rule, and Landlock, being allow-only and hierarchical, cannot ([#127](https://github.com/firefly-engineering/playpen/issues/127)), so an exclusion refuses on Linux | macOS | `N-exclusion` (`n/a` on Linux) |
 
 Linux's lack of a mechanism-native Keychain is recorded through `N-keychain` being `n/a` on
 Linux, and macOS's lack of abstract unix sockets through `N-abstract-socket` being `n/a` on
@@ -1580,6 +1587,7 @@ Row ids are provisional. The implementation owns the final ids.
 | `N-symlink` | negative | the above unreadable through a resolved symlink | both |
 | `N-store-stale` | negative | a store path outside the declared closure (decoy `…-home-manager-files/.ssh/config`) unreachable | both; skip `skip.host.no-nix` |
 | `N-keg-decoy` | negative | a manufactured decoy keg beside a granted keg is denied | both; skip `skip.host.no-homebrew` |
+| `N-exclusion` | negative | a decoy in a subdirectory excluded from a granted root is denied, while a file the root still grants is readable | macOS (`n/a` Linux) |
 | `N-hosttemp` | negative | the host temp is unreachable | both |
 | `N-keychain` | negative | Keychain Mach services unreachable | macOS (`n/a` Linux) |
 | `N-signal` | negative | signal 0 to a decoy process started outside is denied: process scoping is enforced, not only requested | both |

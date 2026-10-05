@@ -67,6 +67,7 @@ fn unappliable() -> CapabilitySet {
             state_derived: false,
         }],
         mach_services: vec![],
+        exclusions: vec![],
     }
 }
 

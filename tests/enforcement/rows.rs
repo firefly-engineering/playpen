@@ -113,6 +113,18 @@ pub const ROWS: &[Row] = &[
         from: &[Decision::Adr(19), Decision::Adr(16), Decision::Issue(65)],
     },
     Row {
+        id: "N-exclusion",
+        class: Class::Negative,
+        platform: Platform {
+            scope: Scope::Only(Os::MacOs, Asymmetry::Exclusions),
+            ..BOTH
+        },
+        fixture: Fixture::Excluded,
+        action: Action::Read(Target::ExcludedDecoy),
+        expected: Expected::Denial,
+        from: &[Decision::Adr(16), Decision::Issue(63), Decision::Issue(127)],
+    },
+    Row {
         id: "N-hosttemp",
         class: Class::Negative,
         platform: BOTH,

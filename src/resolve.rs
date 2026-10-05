@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::capability::{Access, CapabilitySet, PathGrant, Scope};
+use crate::capability::{Access, CapabilitySet, Class, PathDenial, PathGrant, Scope};
 use crate::code::Code;
 use crate::floor::floor;
 use crate::policy::{Policy, Profile};
@@ -127,7 +127,60 @@ pub fn capabilities(policy: &Policy, name: &str) -> Result<CapabilitySet, Refusa
     let mut caps = floor()?;
     caps.paths.extend(toolchain(name, selected)?);
     caps.paths.extend(roots(policy, selected)?);
+    caps.exclusions = exclusions(policy, name, selected)?;
     Ok(caps)
+}
+
+/// Every exclusion on the selected profile's roots, brought and toolchain alike, at its resolved
+/// path ([spec §8.4]). One that does not exist refuses: an exclusion whose path has gone is a leak
+/// that reopened silently.
+///
+/// [spec §8.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#84-exclusions
+pub fn exclusions(
+    policy: &Policy,
+    name: &str,
+    selected: &Profile,
+) -> Result<Vec<PathDenial>, Refusal> {
+    let brought = selected
+        .workspaces
+        .iter()
+        .filter_map(|w| policy.workspaces.get(&w.value).map(|ws| (&w.value, ws)))
+        .flat_map(|(w, workspace)| {
+            workspace.roots.iter().enumerate().map(move |(i, root)| {
+                (format!("workspace:{w}.roots[{i}]"), root.exclude.as_slice())
+            })
+        });
+    let toolchain = selected.toolchain.iter().enumerate().map(|(i, root)| {
+        (
+            format!("profile:{name}.toolchain[{i}]"),
+            root.exclude.as_slice(),
+        )
+    });
+    let mut denials = Vec::new();
+    for (root, exclude) in toolchain.chain(brought) {
+        for (j, exclusion) in exclude.iter().enumerate() {
+            let from = format!("{root}.exclude[{j}]");
+            let path = exclusion.path.canonicalize().map_err(|e| {
+                Refusal::new(
+                    Code::ExclusionMissing,
+                    format!(
+                        "{from}: exclusion {} is unavailable: {e}",
+                        exclusion.path.display()
+                    ),
+                )
+            })?;
+            let classes = match &exclusion.classes {
+                Some(classes) => classes.iter().map(|&class| class.into()).collect(),
+                None => Class::ALL.to_vec(),
+            };
+            denials.push(PathDenial {
+                path,
+                classes,
+                from,
+            });
+        }
+    }
+    Ok(denials)
 }
 
 /// The resolved form: what `explain --json` prints, and what its human form is rendered from.
@@ -139,6 +192,11 @@ pub struct Resolved {
     pub selection: Trace,
     pub profile: String,
     pub paths: Vec<ResolvedPath>,
+    /// Subtracted from `paths`: these classes are denied at and beneath each path. Stated here,
+    /// to the operator, and never inward ([spec §8.4]).
+    ///
+    /// [spec §8.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#84-exclusions
+    pub exclusions: Vec<ResolvedExclusion>,
     /// macOS Mach services the child may look up; every other service is denied.
     pub mach_services: Vec<ResolvedService>,
     pub network: ResolvedNetwork,
@@ -149,6 +207,13 @@ pub struct ResolvedPath {
     pub path: PathBuf,
     pub access: Access,
     pub scope: Scope,
+    pub from: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ResolvedExclusion {
+    pub path: PathBuf,
+    pub classes: Vec<Class>,
     pub from: String,
 }
 
@@ -192,6 +257,15 @@ impl Resolved {
                     access: grant.access,
                     scope: grant.scope,
                     from: grant.from.clone(),
+                })
+                .collect(),
+            exclusions: caps
+                .exclusions
+                .iter()
+                .map(|denial| ResolvedExclusion {
+                    path: denial.path.clone(),
+                    classes: denial.classes.clone(),
+                    from: denial.from.clone(),
                 })
                 .collect(),
             mach_services: caps
@@ -345,5 +419,83 @@ mod tests {
                 .iter()
                 .any(|g| g.from == "profile:p.toolchain[0]")
         );
+    }
+
+    fn excluding(root: &Path, exclude: serde_json::Value) -> Policy {
+        let text = serde_json::json!({
+            "version": 1,
+            "workspaces": {"w": {"roots": [{"path": root, "mode": "readwrite", "exclude": exclude}]}},
+            "profiles": {"p": {"workspaces": ["w"], "toolchain": []}},
+        });
+        Policy::parse(&text.to_string(), Path::new("/p.json")).expect("parses")
+    }
+
+    /// An exclusion is subtracted at its resolved path, for the classes it names; none named is
+    /// all three ([spec §8.4]).
+    ///
+    /// [spec §8.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#84-exclusions
+    #[test]
+    fn exclusions_are_subtracted_for_their_classes() {
+        let root = tempfile::TempDir::new().expect("root");
+        for dir in ["secrets", "hooks"] {
+            std::fs::create_dir(root.path().join(dir)).expect("mkdir");
+        }
+        let policy = excluding(
+            root.path(),
+            serde_json::json!([
+                {"path": root.path().join("secrets")},
+                {"path": root.path().join("hooks"), "classes": ["write"]},
+            ]),
+        );
+        let caps = capabilities(&policy, "p").expect("resolves");
+        let resolved = root.path().canonicalize().expect("canonical");
+        assert_eq!(
+            caps.exclusions,
+            [
+                PathDenial {
+                    path: resolved.join("secrets"),
+                    classes: Class::ALL.to_vec(),
+                    from: "workspace:w.roots[0].exclude[0]".into(),
+                },
+                PathDenial {
+                    path: resolved.join("hooks"),
+                    classes: vec![Class::Write],
+                    from: "workspace:w.roots[0].exclude[1]".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_missing_exclusion_is_refused() {
+        let root = tempfile::TempDir::new().expect("root");
+        let policy = excluding(
+            root.path(),
+            serde_json::json!([{"path": root.path().join("gone")}]),
+        );
+        let refusal = capabilities(&policy, "p").expect_err("refused");
+        assert_eq!(refusal.code, Code::ExclusionMissing);
+        assert!(
+            refusal
+                .message()
+                .contains("workspace:w.roots[0].exclude[0]"),
+            "{refusal}"
+        );
+    }
+
+    #[test]
+    fn a_toolchain_root_carries_its_exclusions() {
+        let tool = tempfile::TempDir::new().expect("tool");
+        std::fs::create_dir(tool.path().join("etc")).expect("mkdir");
+        let text = serde_json::json!({
+            "version": 1,
+            "profiles": {"p": {"workspaces": [], "toolchain": [
+                {"path": tool.path(), "exclude": [{"path": tool.path().join("etc")}]},
+            ]}},
+        });
+        let policy = Policy::parse(&text.to_string(), Path::new("/p.json")).expect("parses");
+        let caps = capabilities(&policy, "p").expect("resolves");
+        assert_eq!(caps.exclusions.len(), 1, "{:?}", caps.exclusions);
+        assert_eq!(caps.exclusions[0].from, "profile:p.toolchain[0].exclude[0]");
     }
 }

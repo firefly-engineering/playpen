@@ -259,6 +259,7 @@ fn run(
     //
     // [ADR 0027]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0027-the-state-directory-is-unreachable-by-refusal-because-a-carve-out-is-not-portable.md
     record::refuse_if_reachable(state, &caps.paths)?;
+    backend::check(&caps)?;
     record.launch(&caps, backend::denial_tag(record.id()))?;
     let run = record.id().clone();
     // Both callbacks write the record, and only one of them ever fires, but the borrow checker

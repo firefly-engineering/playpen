@@ -20,7 +20,7 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use crate::capability::{Access, Scope};
+use crate::capability::{Access, Class, Scope};
 use crate::code::Code;
 use crate::launch::Host;
 use crate::policy::{Policy, coherence};
@@ -114,6 +114,7 @@ fn resolve(args: &Args, host: &Host) -> Result<Resolved, Refusal> {
     coherence::check(&loaded)?;
     let caps = resolve::capabilities(&loaded.policy, &name)?;
     record::refuse_if_reachable(host.state.as_deref(), &caps.paths)?;
+    crate::backend::check(&caps)?;
     Ok(Resolved::new(absolute(&path), trace, name, &caps))
 }
 
@@ -129,6 +130,24 @@ fn render_resolved(resolved: &Resolved, out: &mut impl Write) -> io::Result<()> 
     writeln!(out, "paths")?;
     for path in &resolved.paths {
         render_grant(&path.path, path.access, path.scope, &path.from, out)?;
+    }
+    for exclusion in &resolved.exclusions {
+        let classes: Vec<_> = exclusion
+            .classes
+            .iter()
+            .map(|class| match class {
+                Class::Read => "read",
+                Class::Execute => "execute",
+                Class::Write => "write",
+            })
+            .collect();
+        writeln!(
+            out,
+            "  exclude {} {}  (from {})",
+            classes.join(","),
+            OneLine(&exclusion.path.display().to_string()),
+            OneLine(&exclusion.from)
+        )?;
     }
     for service in &resolved.mach_services {
         writeln!(

@@ -24,6 +24,13 @@
         "$ref": "#/$defs/ResolvedPath"
       }
     },
+    "exclusions": {
+      "description": "Subtracted from `paths`: these classes are denied at and beneath each path. Stated here,\nto the operator, and never inward ([spec §8.4]).\n\n[spec §8.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#84-exclusions",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ResolvedExclusion"
+      }
+    },
     "mach_services": {
       "description": "macOS Mach services the child may look up; every other service is denied.",
       "type": "array",
@@ -40,6 +47,7 @@
     "selection",
     "profile",
     "paths",
+    "exclusions",
     "mach_services",
     "network"
   ],
@@ -167,6 +175,37 @@
           "type": "string",
           "const": "literal"
         }
+      ]
+    },
+    "ResolvedExclusion": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "classes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Class"
+          }
+        },
+        "from": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "classes",
+        "from"
+      ]
+    },
+    "Class": {
+      "description": "An access class an exclusion subtracts ([spec §8.4]).\n\n[spec §8.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#84-exclusions",
+      "type": "string",
+      "enum": [
+        "read",
+        "execute",
+        "write"
       ]
     },
     "ResolvedService": {
