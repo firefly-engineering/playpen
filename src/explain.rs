@@ -132,7 +132,11 @@ fn resolve(args: &Args, host: &Host) -> Result<Resolved, Refusal> {
         .paths
         .retain(|grant| !grant.state_derived || grant.path.exists());
     crate::backend::check(&provisioned)?;
-    let env = resolve::environment(&loaded.policy, &name, selected, &host.env, &layout);
+    // `explain` of a profile names no kind, and a kind is never inferred ([spec §11.2]), so the
+    // kind table's entries are not among what it shows.
+    //
+    // [spec §11.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#112-kind
+    let env = resolve::environment(&loaded.policy, &name, selected, &host.env, &layout, None);
     Ok(Resolved::new(absolute(&path), trace, name, &caps, &env))
 }
 

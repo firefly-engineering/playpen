@@ -19,7 +19,7 @@ use crate::child;
 use crate::code::Code;
 use crate::explain;
 use crate::integrity;
-use crate::kind;
+use crate::kind::{self, Kind};
 use crate::mechanism::{self, Mechanism};
 use crate::policy::{Policy, SearchPath, coherence};
 use crate::provision::Layout;
@@ -171,23 +171,12 @@ fn invoke(
     // A kind is always stated, never inferred ([spec §11.2]).
     //
     // [spec §11.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#112-kind
-    if kind::get(&agent).is_none() {
-        return Err(Refusal::new(
-            Code::KindUnknown,
-            format!(
-                "unknown agent kind {agent:?}; known kinds: {}",
-                kind::KINDS
-                    .iter()
-                    .map(|kind| kind.name)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        ));
-    }
+    let kind = kind::require(&agent)?;
     record.kind(&agent);
     let policy = policies.locate(policy.as_deref())?;
     run(
         &profile,
+        kind,
         &policy,
         &argv,
         cwd,
@@ -226,6 +215,7 @@ fn usage_refusal(err: &clap::Error) -> Refusal {
 )]
 fn run(
     profile: &str,
+    kind: &Kind,
     policy_path: &Path,
     argv: &[OsString],
     cwd: std::io::Result<PathBuf>,
@@ -300,7 +290,7 @@ fn run(
     // Step 12: the capability set compiles on this mechanism.
     backend::check(&caps)?;
     // Step 14.
-    let env = resolve::environment(&loaded.policy, profile, selected, env, &layout);
+    let env = resolve::environment(&loaded.policy, profile, selected, env, &layout, Some(kind));
     record.launch(&caps, backend::denial_tag(record.id()))?;
     let run = record.id().clone();
     // Both callbacks write the record, and only one of them ever fires, but the borrow checker
@@ -438,6 +428,7 @@ mod tests {
         let mut record = RunRecord::open(&id, Some(state.path())).expect("record");
         let refusal = run(
             "p",
+            kind::require("claude").expect("a known kind"),
             &policy,
             &argv,
             Ok(root.path().into()),

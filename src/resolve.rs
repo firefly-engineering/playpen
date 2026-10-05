@@ -22,6 +22,7 @@ use crate::capability::{Access, CapabilitySet, Class, PathDenial, PathGrant, Sco
 use crate::code::Code;
 use crate::environment::{self, Value, Var};
 use crate::floor::floor;
+use crate::kind::Kind;
 use crate::policy::{Policy, Profile};
 use crate::provision::{self, Layout};
 use crate::refusal::Refusal;
@@ -165,16 +166,22 @@ pub fn capabilities(
 /// playpen's own entries are rendered from typed values — a path playpen provisions, the profile's
 /// name — and never by string formatting ([spec §9.2]).
 ///
+/// `kind` is the agent kind this launch states, whose suppression entries are written in every run
+/// of it ([spec §12]). `explain` without a shim names no kind, and so shows none of them: there is
+/// no kind to infer one from.
+///
 /// [spec §9]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#9-the-environment
 /// [spec §9.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#92-set-entries
+/// [spec §12]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#12-the-kind-table
 pub fn environment(
     policy: &Policy,
     name: &str,
     selected: &Profile,
     host: &[(OsString, OsString)],
     layout: &Layout,
+    kind: Option<&Kind>,
 ) -> Vec<Var> {
-    let written = vec![
+    let mut written = vec![
         Var {
             name: environment::TMPDIR.into(),
             value: Value::Written(layout.scratch().into_os_string()),
@@ -186,6 +193,17 @@ pub fn environment(
             from: BUILT_IN.into(),
         },
     ];
+    // The suppression table only ever *sets*: a guest that ignores it breaks, and does not escape
+    // ([ADR 0005]).
+    //
+    // [ADR 0005]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0005-guest-sandboxes-fail-closed-and-playpen-has-no-browser-mode.md
+    if let Some(kind) = kind {
+        written.extend(kind.suppression.iter().map(|&(name, value)| Var {
+            name: name.into(),
+            value: Value::Written(value.into()),
+            from: kind.from(),
+        }));
+    }
     environment::construct(policy, name, selected, host, written, |reference| {
         layout.area(reference)
     })

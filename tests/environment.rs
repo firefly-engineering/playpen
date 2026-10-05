@@ -53,12 +53,53 @@ fn nothing_reaches_the_child_that_playpen_did_not_put_there() {
     assert!(!env.contains_key("CARGO_PKG_NAME"), "{env:?}");
     assert!(!env.contains_key("PLAYPEN_TEST_SECRET"), "{env:?}");
     assert_eq!(env.get("TERM").map(String::as_str), Some("xterm"));
+    let suppression = playpen::kind::require("claude")
+        .expect("a known kind")
+        .suppression;
     let allowed: Vec<_> = env
         .keys()
         .filter(|name| !playpen::environment::FLOOR.contains(&name.as_str()))
         .filter(|name| !name.starts_with("PLAYPEN_") && *name != "TMPDIR")
+        .filter(|name| !suppression.iter().any(|(set, _)| set == name))
         .collect();
     assert!(allowed.is_empty(), "beyond the floor: {allowed:?}");
+}
+
+/// The stated kind's suppression entries are set in every run of it, whatever the policy says,
+/// so a guest's own sandbox stands down ([spec §12]).
+///
+/// [spec §12]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#12-the-kind-table
+#[test]
+fn the_kinds_suppression_entries_are_set_in_every_run() {
+    let fx = Fixture::new();
+    let policy = with_env(&fx, json!({}));
+    // The host sets the opposite value: the entry is playpen's, so the host's never crosses.
+    let env = environ(&fx, &policy, &[("CLAUDE_CODE_SANDBOXED", "0")]);
+    assert_eq!(
+        env.get("CLAUDE_CODE_SANDBOXED").map(String::as_str),
+        Some("1")
+    );
+    // `omp` suppresses nothing, so nothing of `claude`'s is set under it.
+    let mut command = fx.playpen(&["run", "--profile", "p", "--agent", "omp", "--policy"]);
+    command.arg(&policy).arg("--").arg(os_bin("env"));
+    let output = command.output().expect("playpen");
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8(output.stdout).expect("utf-8");
+    assert!(!text.contains("CLAUDE_CODE_SANDBOXED"), "{text}");
+}
+
+/// An unrecognised kind is a refusal: there is nowhere to put what playpen would need to know
+/// about it ([spec §11.2]).
+///
+/// [spec §11.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#112-kind
+#[test]
+fn an_unknown_kind_is_refused() {
+    let fx = Fixture::new();
+    let policy = with_env(&fx, json!({}));
+    let mut command = fx.playpen(&["run", "--profile", "p", "--agent", "codex", "--policy"]);
+    command.arg(&policy).arg("--").arg(os_bin("true"));
+    let output = command.output().expect("playpen");
+    assert_refused(&output, "refusal.kind.unknown");
 }
 
 #[test]

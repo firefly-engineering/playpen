@@ -4,7 +4,11 @@
 //! [spec §12]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#12-the-kind-table
 //! [spec §11.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#112-kind
 
+use crate::code::Code;
+use crate::refusal::Refusal;
+
 /// One agent kind.
+#[derive(Debug)]
 pub struct Kind {
     pub name: &'static str,
     /// The private variable that points the agent at its state directory.
@@ -27,7 +31,65 @@ pub const KINDS: &[Kind] = &[
     },
 ];
 
+impl Kind {
+    /// The provenance of everything this kind authors ([spec §10.4]), which is the only bridge
+    /// from a constructed entry back to the table that wrote it.
+    ///
+    /// [spec §10.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#104-the-resolved-form
+    pub fn from(&self) -> String {
+        format!("kind:{}", self.name)
+    }
+}
+
 /// The kind named `name`, if this playpen knows it.
 pub fn get(name: &str) -> Option<&'static Kind> {
     KINDS.iter().find(|kind| kind.name == name)
+}
+
+/// The kind named `name`, or the refusal that this playpen knows no such kind: there is nowhere to
+/// put what playpen would need to know about it ([spec §11.2]).
+///
+/// [spec §11.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#112-kind
+pub fn require(name: &str) -> Result<&'static Kind, Refusal> {
+    get(name).ok_or_else(|| {
+        Refusal::new(
+            Code::KindUnknown,
+            format!(
+                "unknown agent kind {name:?}; known kinds: {}",
+                KINDS
+                    .iter()
+                    .map(|kind| kind.name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A kind is always stated, never inferred, so an unrecognised one is a refusal that names
+    /// what this playpen does know.
+    #[test]
+    fn an_unrecognised_kind_refuses_naming_the_known_ones() {
+        let refusal = require("codex").expect_err("refused");
+        assert_eq!(refusal.code, Code::KindUnknown);
+        assert!(refusal.message().contains("\"codex\""), "{refusal}");
+        assert!(refusal.message().contains("claude, omp"), "{refusal}");
+    }
+
+    /// Every kind has a private state-dir redirect: a kind whose binary has none never gets an
+    /// `XDG_CONFIG_HOME` exception, so the table cannot hold one ([spec §12]).
+    ///
+    /// [spec §12]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#12-the-kind-table
+    #[test]
+    fn every_kind_redirects_its_own_state_directory() {
+        for kind in KINDS {
+            assert!(!kind.redirect.is_empty(), "{}", kind.name);
+            assert_ne!(kind.redirect, "XDG_CONFIG_HOME", "{}", kind.name);
+            assert_eq!(kind.from(), format!("kind:{}", kind.name));
+        }
+    }
 }
