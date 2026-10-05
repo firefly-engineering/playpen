@@ -439,6 +439,7 @@ pub fn as_playpen_offering_nothing(
         state,
         policies: playpen::policy::SearchPath::of(Vec::new()),
         profile: None,
+        executable: std::env::current_exe(),
     };
     playpen::launch::main(argv, host, || {
         Mechanism::new("a mechanism offering nothing", &[])
@@ -481,6 +482,19 @@ fn decline(invocation: Invocation) -> Declined {
                 "version": 1,
                 "workspaces": {"w": {"roots": [{"path": fixture.root(), "mode": "read"}]}},
                 "profiles": {"p": {"workspaces": ["w", "undeclared"], "toolchain": []}},
+            });
+            fs::write(&policy, document.to_string()).expect("write policy");
+            let mut command =
+                fixture.playpen(&["run", "--profile", "p", "--agent", "claude", "--policy"]);
+            command.arg(&policy).arg("--").arg(canary_path());
+            command
+        }
+        Invocation::WritablePolicy => {
+            let policy = fixture.root().join("policy.json");
+            let document = serde_json::json!({
+                "version": 1,
+                "workspaces": {"w": {"roots": [{"path": fixture.root(), "mode": "readwrite"}]}},
+                "profiles": {"p": {"workspaces": ["w"], "toolchain": []}},
             });
             fs::write(&policy, document.to_string()).expect("write policy");
             let mut command =

@@ -18,6 +18,7 @@ use crate::check;
 use crate::child;
 use crate::code::Code;
 use crate::explain;
+use crate::integrity;
 use crate::mechanism::{self, Mechanism};
 use crate::policy::{Policy, SearchPath, coherence};
 use crate::record::{self, RunId, RunRecord};
@@ -73,6 +74,8 @@ pub struct Host {
     pub policies: SearchPath,
     /// `PLAYPEN_PROFILE`, the selection chain's second step. `run` never reads it.
     pub profile: Option<OsString>,
+    /// The running playpen executable, which self-integrity requires the profile cannot write.
+    pub executable: std::io::Result<PathBuf>,
 }
 
 /// Run playpen with `args` (including `argv[0]`) on `host`. Returns the process exit status; on a
@@ -126,6 +129,7 @@ pub fn main(
         state,
         policies,
         profile: _,
+        executable,
     } = host;
     // Step 1, before anything that can refuse, so that every refusal leaves a record.
     let run = match RunId::allocate() {
@@ -136,7 +140,15 @@ pub fn main(
         Ok(record) => record,
         Err(refusal) => return refuse(&refusal, Some(&run)),
     };
-    match invoke(parsed, cwd, state.as_deref(), &policies, &mut record, probe) {
+    match invoke(
+        parsed,
+        cwd,
+        state.as_deref(),
+        &policies,
+        executable,
+        &mut record,
+        probe,
+    ) {
         Ok(status) => {
             record.finish(status);
             status
@@ -153,6 +165,7 @@ fn invoke(
     cwd: std::io::Result<PathBuf>,
     state: Option<&Path>,
     policies: &SearchPath,
+    executable: std::io::Result<PathBuf>,
     record: &mut RunRecord,
     probe: impl FnOnce() -> Mechanism,
 ) -> Result<i32, Refusal> {
@@ -180,10 +193,23 @@ fn invoke(
         &argv,
         cwd,
         state,
+        executable,
         record,
         probe,
         self_test::floor,
     )
+}
+
+/// The running executable, or the refusal that its integrity cannot be shown.
+pub fn executable_path(executable: &std::io::Result<PathBuf>) -> Result<PathBuf, Refusal> {
+    executable.as_ref().cloned().map_err(|e| {
+        Refusal::new(
+            Code::IntegrityWritable,
+            format!(
+                "the playpen executable cannot be found, so it cannot be shown unwritable: {e}"
+            ),
+        )
+    })
 }
 
 fn refuse(refusal: &Refusal, run: Option<&RunId>) -> i32 {
@@ -216,15 +242,17 @@ fn run(
     argv: &[OsString],
     cwd: std::io::Result<PathBuf>,
     state: Option<&Path>,
+    executable: std::io::Result<PathBuf>,
     record: &mut RunRecord,
     probe: impl FnOnce() -> Mechanism,
     floor_self_test: impl FnOnce() -> Result<(), Refusal>,
 ) -> Result<i32, Refusal> {
     // Absolute, so a stored record names the file whatever directory it is read from.
-    match &cwd {
-        Ok(cwd) => record.policy(&cwd.join(policy_path)),
-        Err(_) => record.policy(policy_path),
-    }
+    let policy_file = match &cwd {
+        Ok(cwd) => cwd.join(policy_path),
+        Err(_) => policy_path.to_owned(),
+    };
+    record.policy(&policy_file);
     let loaded = Policy::load(policy_path)?;
     // Step 4. `run` takes its profile explicitly and resolves no context of its own, so its chain
     // is the explicit step alone.
@@ -252,6 +280,8 @@ fn run(
     floor_self_test()?;
 
     let caps = resolve::capabilities(&loaded.policy, profile)?;
+    // Step 6: nothing that runs unconfined on the next launch is writable from inside this one.
+    integrity::check(&caps, &policy_file, &executable_path(&executable)?)?;
     // The existence-tier containment check, run once the capability set is complete because the
     // rule is about *every* granted path and the floor is a grant too: on a non-FHS host it is a
     // declared closure read from a `PLAYPEN_FLOOR`-selected directory, so it is neither
@@ -380,6 +410,9 @@ mod tests {
         std::fs::write(&policy, document.to_string()).expect("policy");
         let argv = [];
         let state = tempfile::TempDir::new().expect("state");
+        // Never writable: the profile's one root is read-only and holds no playpen.
+        let executable = state.path().join("playpen");
+        std::fs::write(&executable, "").expect("executable");
         let id = RunId::allocate().expect("id");
         let mut record = RunRecord::open(&id, Some(state.path())).expect("record");
         let refusal = run(
@@ -388,6 +421,7 @@ mod tests {
             &argv,
             Ok(root.path().into()),
             Some(state.path()),
+            Ok(executable),
             &mut record,
             probe,
             floor_self_test,

@@ -256,4 +256,13 @@ pub const ROWS: &[Row] = &[
         expected: Expected::Recorded(Code::WorkspaceUnknown),
         from: &[Decision::Adr(9), Decision::Adr(16), Decision::Issue(59)],
     },
+    Row {
+        id: "R-integrity",
+        class: Class::Refusal,
+        platform: BOTH,
+        fixture: Fixture::Outside,
+        action: Action::Refuse(Invocation::WritablePolicy),
+        expected: Expected::Recorded(Code::IntegrityWritable),
+        from: &[Decision::Adr(16), Decision::Issue(66)],
+    },
 ];

@@ -281,3 +281,73 @@ fn a_missing_exclusion_is_refused() {
         .expect("playpen");
     assert_refused(&output, "refusal.exclusion.missing");
 }
+
+/// The playpen executable runs unconfined on the next launch, so a profile that can write it is
+/// refused ([spec §11.7]).
+///
+/// [spec §11.7]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#117-self-integrity
+#[test]
+fn a_profile_that_can_write_the_playpen_executable_is_refused() {
+    let fx = Fixture::new();
+    let bin = std::path::Path::new(common::PLAYPEN)
+        .parent()
+        .expect("a directory");
+    let policy = fx.policy_named(
+        "writable-exe.json",
+        &json!({
+            "version": 1,
+            "workspaces": {
+                "w": {"roots": [{"path": fx.root(), "mode": "readwrite"}]},
+                "bin": {"roots": [{"path": bin, "mode": "readwrite"}]},
+            },
+            "profiles": {"p": {"workspaces": ["w", "bin"], "toolchain": []}},
+        }),
+    );
+    let output = fx
+        .run_under(&policy, &[&os_bin("true")])
+        .output()
+        .expect("playpen");
+    assert_refused(&output, "refusal.integrity.writable");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("playpen executable"), "{stderr}");
+}
+
+#[test]
+fn a_profile_that_can_write_its_policy_is_refused_and_explain_says_so() {
+    let fx = Fixture::new();
+    let policy = fx.root().join("policy.json");
+    std::fs::write(
+        &policy,
+        json!({
+            "version": 1,
+            "workspaces": {"w": {"roots": [{"path": fx.root(), "mode": "readwrite"}]}},
+            "profiles": {"p": {"workspaces": ["w"], "toolchain": []}},
+        })
+        .to_string(),
+    )
+    .expect("policy");
+    let output = fx
+        .run_under(&policy, &[&os_bin("true")])
+        .output()
+        .expect("playpen");
+    assert_refused(&output, "refusal.integrity.writable");
+    let explained = fx
+        .playpen(&["explain", "p", "--policy", policy.to_str().unwrap()])
+        .output()
+        .expect("playpen explain");
+    assert_eq!(explained.status.code(), Some(125), "{explained:?}");
+    assert!(
+        String::from_utf8_lossy(&explained.stderr)
+            .starts_with("playpen: refusal.integrity.writable: "),
+        "{explained:?}"
+    );
+}
+
+/// The agent binary is not checked: tampering with it lands inside the boundary on the next run.
+#[test]
+fn a_writable_agent_binary_is_not_refused() {
+    let fx = Fixture::new();
+    let agent = runnable(fx.root());
+    let output = fx.run(&[&agent]).output().expect("playpen");
+    assert!(output.status.success(), "{output:?}");
+}

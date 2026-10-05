@@ -374,6 +374,11 @@ pub enum Invocation {
     ///
     /// [spec §10.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#105-validation-tiers
     IncoherentWorkspace,
+    /// `playpen run` under a policy file that lies inside the profile's own read-write root, so the
+    /// confined tree could rewrite the boundary of the next launch ([spec §11.7]).
+    ///
+    /// [spec §11.7]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#117-self-integrity
+    WritablePolicy,
 }
 
 /// The policy [`Invocation::MergedTypo`] runs under, with `{root}` for its one root's path.

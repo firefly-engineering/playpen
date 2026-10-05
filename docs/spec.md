@@ -1610,6 +1610,7 @@ Row ids are provisional. The implementation owns the final ids.
 | `R-ceiling` | refusal | a policy over the compiled-profile ceiling → `125` + `refusal.budget.exceeded`; asserts the code, never a path count | macOS (`n/a` Linux) |
 | `R-record` | refusal | a run record exists **after** a refusal | both |
 | `R-state-reachable` | refusal | a root that is an ancestor of playpen's state directory → `125` + `refusal.state.reachable`, naming both paths. The state directory is **synthetic**, not the real `$HOME`: the check compares resolved paths and does not care whose home it is | both |
+| `R-integrity` | refusal | a policy file inside the profile's own read-write root → `125` + `refusal.integrity.writable` | both |
 | `R-code-coverage` | refusal | every `refusal.*` code in the registry has ≥ 1 producing row | both |
 | `R-policy-span` | refusal | a policy refusal names file, line and column, including through a merge key | both |
 | `R-no-filesystem` | refusal | `check --no-filesystem` performs no existence check | both |
