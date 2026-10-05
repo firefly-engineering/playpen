@@ -4,9 +4,8 @@
 //! in the ring. It is a report, so it writes to stdout; its refusals are lines on stderr, like a
 //! launch's.
 //!
-//! The human form is rendered from the same [`Record`] the `--json` form prints whole. The exact
-//! platform command that pulls a run's denials is not printed yet: the spec does not state it
-//! ([#52](https://github.com/firefly-engineering/playpen/issues/52#issuecomment-5979991420)).
+//! The human form is rendered from the same [`Record`] the `--json` form prints whole, beside the
+//! exact platform command that pulls the run's denials ([`denials`]).
 //!
 //! [spec §14.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#142-playpen-explain
 //! [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
@@ -45,10 +44,14 @@ pub fn explain(args: &Args, state: Option<&Path>, out: &mut impl Write) -> Resul
             let id = RunId::parse(id)
                 .ok_or_else(|| Refusal::new(Code::RunUnknown, format!("{id:?} is not a run id")))?;
             let record = record::read(state, &id)?;
+            let replay = Replay {
+                denials: denials(&record),
+                record: &record,
+            };
             if args.json {
-                json(&record, out)
+                json(&replay, out)
             } else {
-                render_run(&record, out)
+                render_run(&replay, out)
             }
         }
         None => {
@@ -64,6 +67,16 @@ pub fn explain(args: &Args, state: Option<&Path>, out: &mut impl Write) -> Resul
     Ok(())
 }
 
+/// What `explain --run` reports: the stored record whole, and the command that pulls its denials.
+#[derive(serde::Serialize)]
+struct Replay<'a> {
+    #[serde(flatten)]
+    record: &'a Record,
+    /// `null` where there is none: a run that never launched, or Linux, until its command is
+    /// settled.
+    denials: Option<String>,
+}
+
 fn json(value: &impl serde::Serialize, out: &mut impl Write) -> io::Result<()> {
     serde_json::to_writer_pretty(&mut *out, value)?;
     writeln!(out)
@@ -71,7 +84,8 @@ fn json(value: &impl serde::Serialize, out: &mut impl Write) -> io::Result<()> {
 
 /// One run, field by field. A field the launch never reached is `-`. Every value is shown on one
 /// line, whatever bytes it carries.
-fn render_run(record: &Record, out: &mut impl Write) -> io::Result<()> {
+fn render_run(replay: &Replay, out: &mut impl Write) -> io::Result<()> {
+    let record = replay.record;
     let known = |value: Option<String>| value.unwrap_or_else(|| "-".into());
     let fields = [
         ("run", record.run.clone()),
@@ -111,6 +125,7 @@ fn render_run(record: &Record, out: &mut impl Write) -> io::Result<()> {
                     .map(|f| format!("{}: {}", f.code, f.message)),
             ),
         ),
+        ("denials", known(replay.denials.clone())),
     ];
     for (name, value) in fields {
         writeln!(out, "{name:<9} {}", OneLine(&value))?;
@@ -142,6 +157,37 @@ fn render_run(record: &Record, out: &mut impl Write) -> io::Result<()> {
     Ok(())
 }
 
+/// The exact platform command that pulls the denials of the run `record` holds, or `None` for a run
+/// that never launched ([spec §14.2]).
+///
+/// On macOS the kernel logs each denial as `Sandbox: <name>(<pid>) deny(1) <operation> <path>`,
+/// so the query is the run's window, widened to the whole seconds `log show` takes, filtered to
+/// the child's pid. A denial by one of the child's own descendants carries another pid and is not
+/// matched ([#124](https://github.com/firefly-engineering/playpen/issues/124)). `/usr/bin/log` by
+/// path, because `log` alone is a zsh builtin.
+///
+/// [spec §14.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#142-playpen-explain
+#[cfg(target_os = "macos")]
+fn denials(record: &Record) -> Option<String> {
+    let pid = record.pid?;
+    let launched = record.launched_at_unix_ms?;
+    let mut command = format!("/usr/bin/log show --start '{}'", log_time(launched / 1000));
+    if let Some(ended) = record.ended_at_unix_ms {
+        command += &format!(" --end '{}'", log_time(ended.div_ceil(1000)));
+    }
+    command +=
+        &format!(" --predicate 'sender == \"Sandbox\" AND eventMessage CONTAINS \"({pid})\"'");
+    Some(command)
+}
+
+/// On Linux the query waits on the Landlock domain id, which covers the child's whole tree where a
+/// pid does not, and which the record does not hold yet
+/// ([#98](https://github.com/firefly-engineering/playpen/issues/98)).
+#[cfg(target_os = "linux")]
+fn denials(_record: &Record) -> Option<String> {
+    None
+}
+
 /// One line per run: its id, when it started, the kind and profile, and how it ended.
 fn render_summary(record: &Record, out: &mut impl Write) -> io::Result<()> {
     // A fault first: a run that both ran and crashed has a status that means nothing.
@@ -164,6 +210,31 @@ fn render_summary(record: &Record, out: &mut impl Write) -> io::Result<()> {
 
 /// `unix_ms` as an RFC 3339 UTC timestamp, to the millisecond.
 fn timestamp(unix_ms: u64) -> String {
+    let (year, month, day, ms) = civil(unix_ms);
+    let (hour, minute, second, milli) = clock(ms);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{milli:03}Z")
+}
+
+/// `unix_s` as `log show` reads a time, in UTC.
+#[cfg(target_os = "macos")]
+fn log_time(unix_s: u64) -> String {
+    let (year, month, day, ms) = civil(unix_s * 1000);
+    let (hour, minute, second, _) = clock(ms);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}+0000")
+}
+
+/// Milliseconds into a day as hours, minutes, seconds and milliseconds.
+fn clock(ms: u64) -> (u64, u64, u64, u64) {
+    (
+        ms / 3_600_000,
+        ms / 60_000 % 60,
+        ms / 1_000 % 60,
+        ms % 1_000,
+    )
+}
+
+/// `unix_ms` as a UTC calendar date and the milliseconds into that day.
+fn civil(unix_ms: u64) -> (i64, i64, i64, u64) {
     let (days, ms) = (unix_ms / 86_400_000, unix_ms % 86_400_000);
     // Days since 1970-01-01 to a proleptic Gregorian date, by Howard Hinnant's `civil_from_days`,
     // counting from 0000-03-01 so that the leap day ends each 400-year era.
@@ -181,18 +252,87 @@ fn timestamp(unix_ms: u64) -> String {
         month_from_march - 9
     };
     let year = era * 400 + year_of_era + i64::from(month <= 2);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
-        ms / 3_600_000,
-        ms / 60_000 % 60,
-        ms / 1_000 % 60,
-        ms % 1_000
-    )
+    (year, month, day, ms)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A record of a run launched at `launched` and, if it has, ended at `ended`, as child `pid`.
+    fn ran(pid: Option<i32>, launched: Option<u64>, ended: Option<u64>) -> Record {
+        serde_json::from_value(serde_json::json!({
+            "format": 1,
+            "run": "01M45GQTY3RF111ZQ8WPJ5SKTY",
+            "started_at_unix_ms": 1_791_186_693_000_u64,
+            "kind": "claude",
+            "policy": null,
+            "profile": "p",
+            "capabilities": null,
+            "launched_at_unix_ms": launched,
+            "pid": pid,
+            "ended_at_unix_ms": ended,
+            "status": null,
+            "refusal": null,
+        }))
+        .expect("a record")
+    }
+
+    /// The window is widened to whole seconds, the precision `log show` takes, and given in UTC so
+    /// that it means the same instant wherever the command is pasted. Measured on macOS 26: this
+    /// command returns that run's `deny(1)` lines.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_denials_command_names_the_runs_window_and_pid() {
+        let record = ran(
+            Some(82276),
+            Some(1_791_186_693_069),
+            Some(1_791_186_693_200),
+        );
+        assert_eq!(
+            denials(&record).as_deref(),
+            Some(
+                "/usr/bin/log show --start '2026-10-05 07:51:33+0000' \
+                 --end '2026-10-05 07:51:34+0000' \
+                 --predicate 'sender == \"Sandbox\" AND eventMessage CONTAINS \"(82276)\"'"
+            )
+        );
+    }
+
+    /// A run still going, or one that died of a fault, has no end: the query runs up to now.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_run_without_an_end_is_queried_up_to_now() {
+        let record = ran(Some(82276), Some(1_791_186_693_069), None);
+        let command = denials(&record).expect("a command");
+        assert!(!command.contains("--end"), "{command}");
+    }
+
+    /// `denials` sits beside the record's own fields in `--json`, so a field of that name in the
+    /// record would be silently shadowed.
+    #[test]
+    fn the_record_has_no_field_of_its_own_named_denials() {
+        let record = serde_json::to_value(ran(None, None, None)).expect("JSON");
+        assert!(record.get("denials").is_none(), "{record}");
+    }
+
+    /// Nothing ran confined, so there is nothing to pull.
+    #[test]
+    fn a_run_that_never_launched_has_no_denials_command() {
+        assert_eq!(denials(&ran(None, None, None)), None);
+    }
+
+    /// The Linux command waits on the Landlock domain id, which the record does not hold yet.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn linux_prints_no_denials_command_yet() {
+        let record = ran(
+            Some(82276),
+            Some(1_791_186_693_069),
+            Some(1_791_186_693_200),
+        );
+        assert_eq!(denials(&record), None);
+    }
 
     #[test]
     fn timestamps_are_rfc_3339_utc() {

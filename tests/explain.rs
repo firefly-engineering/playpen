@@ -51,8 +51,17 @@ fn explain_run_replays_a_stored_record_in_both_forms() {
     let pid = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     let id = fx.run_ids().pop().expect("a record");
 
-    let json: Value = serde_json::from_str(&explain(&fx, &["--run", &id, "--json"])).expect("JSON");
-    assert_eq!(json, fx.record(&id), "the JSON form is the stored record");
+    let mut json: Value =
+        serde_json::from_str(&explain(&fx, &["--run", &id, "--json"])).expect("JSON");
+    let denials = json
+        .as_object_mut()
+        .and_then(|fields| fields.remove("denials"))
+        .expect("the denials command, or null");
+    assert_eq!(
+        json,
+        fx.record(&id),
+        "the JSON form is the stored record, beside the command"
+    );
 
     let human = explain(&fx, &["--run", &id]);
     let field = |name: &str| {
@@ -70,6 +79,17 @@ fn explain_run_replays_a_stored_record_in_both_forms() {
     assert_eq!(field("kind"), "claude");
     assert_eq!(field("status"), "3");
     assert_eq!(field("refusal"), "-");
+    // The command is the same in both forms. On macOS it names the child's pid; on Linux it waits
+    // on the trace work, so it is absent.
+    match denials.as_str() {
+        Some(command) => {
+            assert_eq!(field("denials"), command);
+            assert!(command.starts_with("/usr/bin/log show "), "{command}");
+            assert!(command.contains(&format!("({pid})")), "{command}");
+        }
+        None => assert_eq!(field("denials"), "-"),
+    }
+    assert_eq!(denials.is_string(), cfg!(target_os = "macos"), "{denials}");
     let root = fx.root().canonicalize().expect("root");
     assert!(
         human

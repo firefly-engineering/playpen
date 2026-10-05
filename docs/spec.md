@@ -1272,9 +1272,21 @@ reads it back out, and a surface whose job is to state facts must not report a c
    unix-socket regime.
 
 `explain` launches nothing. `explain --run <id>` replays a stored record and prints the exact
-platform command that pulls that run's denials, with the pid filled in. The run id appears on
-every refusal line, and `explain --list` lists recent runs, most recent first. A run the ring
-does not hold, or an id that is not a run id, is `refusal.run.unknown`
+platform command that pulls that run's denials, with the pid filled in, in both forms (`denials`
+in `--json`, beside the record's own fields):
+
+- **macOS**: `/usr/bin/log show --start '<launched>' --end '<ended>' --predicate 'sender ==
+  "Sandbox" AND eventMessage CONTAINS "(<pid>)"'`, the window widened to whole seconds and
+  given in UTC, and `--end` omitted for a run with no end. `/usr/bin/log` by path, because `log`
+  is a zsh builtin. A denial by one of the child's descendants carries another pid and is not
+  matched ([#124](https://github.com/firefly-engineering/playpen/issues/124)).
+- **Linux**: none yet (`null`). The query filters by Landlock domain id, which covers the whole
+  tree, and the record does not hold it yet
+  ([#98](https://github.com/firefly-engineering/playpen/issues/98)).
+
+A run that never launched has no command. The run id appears on every refusal line, and
+`explain --list` lists recent runs, most recent first. A run the ring does not hold, or an id that
+is not a run id, is `refusal.run.unknown`
 ([#52](https://github.com/firefly-engineering/playpen/issues/52)).
 
 ### 14.3 The refusal line
