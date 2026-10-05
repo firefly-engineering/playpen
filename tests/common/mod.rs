@@ -13,19 +13,18 @@ use tempfile::TempDir;
 pub const PLAYPEN: &str = env!("CARGO_BIN_EXE_playpen");
 pub const PROBE: &str = env!("CARGO_BIN_EXE_playpen-probe");
 
-/// An OS-owned command binary by name, as the floor of this host spells it: inside the dedicated
-/// floor where there is one, else `/bin`. A test names the binary it needs and never a path, so a
-/// non-FHS host needs no special case of its own.
+/// An OS-owned command binary by name, resolved by the floor itself ([`playpen::floor::binary`]).
+/// A test names the binary it needs and never a path, so a non-FHS host needs no special case of
+/// its own.
 ///
 /// Every binary this returns is inside the floor, so a target that uses one is confined by the
-/// floor alone and needs no root of its own.
+/// floor alone and needs no root of its own. A name the floor does not hold is a broken fixture,
+/// and panics naming where it looked rather than surfacing later as `refusal.target.exec`.
 pub fn os_bin(name: &str) -> String {
-    let dir = playpen::floor::dedicated().unwrap_or_else(|| PathBuf::from("/"));
-    dir.join("bin")
-        .join(name)
-        .to_str()
-        .expect("utf-8 path")
-        .to_owned()
+    let path = playpen::floor::binary(name).unwrap_or_else(|searched| {
+        panic!("test setup: the floor holds no `{name}`; looked at {searched:?}")
+    });
+    path.to_str().expect("utf-8 path").to_owned()
 }
 
 /// The denial errnos of this platform ([spec §15.2]); `ENOENT` is never one.

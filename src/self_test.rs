@@ -22,24 +22,22 @@ use crate::child::{self, Started};
 use crate::code::Code;
 use crate::refusal::Refusal;
 
-/// The canary on an FHS host: an OS-owned binary, dynamically linked against the platform's C
-/// library, that needs no grant beyond the floor. The suite's bare-floor row admits OS-owned
-/// binaries only.
-#[cfg(target_os = "macos")]
-const FHS_CANARY: &str = "/usr/bin/true";
-/// `/bin/true` rather than `/usr/bin/true`: it is present with and without a merged `/usr`.
-#[cfg(target_os = "linux")]
-const FHS_CANARY: &str = "/bin/true";
+/// The canary: an OS-owned binary, dynamically linked against the platform's C library, that needs
+/// no grant beyond the floor. The suite's bare-floor row admits OS-owned binaries only.
+const CANARY: &str = "true";
 
-/// The canary this host's floor can run. A dedicated floor carries its own ([`floor::dedicated`]),
-/// because on such a host no path outside that floor is both OS-owned and runnable; otherwise it
-/// is the FHS one. Resolved per call rather than once, for the same reason the self-test's verdict
-/// is never cached: the answer is a property of the host as it is now.
+/// The canary this host's floor can run, found by name the way the floor finds any OS binary
+/// ([`floor::binary`]). A dedicated floor carries its own, because on such a host no path outside
+/// that floor is both OS-owned and runnable. Resolved per call rather than once, for the same
+/// reason the self-test's verdict is never cached: the answer is a property of the host as it is
+/// now.
+///
+/// Where no floor directory holds one, this is the first place looked, so the self-test's refusal
+/// names where the canary belongs.
+///
+/// [`floor::binary`]: crate::floor::binary
 pub fn canary_path() -> PathBuf {
-    match crate::floor::dedicated() {
-        Some(dir) => dir.join(crate::floor::DEDICATED_CANARY),
-        None => PathBuf::from(FHS_CANARY),
-    }
+    crate::floor::binary(CANARY).unwrap_or_else(|searched| searched[0].clone())
 }
 
 /// Run [`CANARY`] under the bare floor. A failure is `refusal.floor.self-test`.

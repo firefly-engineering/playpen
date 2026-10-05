@@ -110,8 +110,29 @@ pub fn dedicated() -> Option<PathBuf> {
     None
 }
 
-/// The canary a dedicated floor carries, relative to its root.
-pub const DEDICATED_CANARY: &str = "bin/true";
+/// Where an FHS host keeps its OS binaries, searched in order. `/bin` comes first because it holds
+/// them with and without a merged `/usr`; `/usr/bin` covers what `/bin` lacks, such as `true` on
+/// macOS. Both are floor paths on every platform, so whatever is found here runs under the floor.
+const FHS_BIN_DIRS: &[&str] = &["/bin", "/usr/bin"];
+
+/// The OS binary `name` as this host's floor holds it: inside the dedicated floor where there is
+/// one, else the first of the FHS binary directories that has it. Resolved per call, like
+/// [`dedicated`], since the answer is a property of the host as it is now.
+///
+/// When no directory holds it, the error lists every path looked at, in search order.
+pub fn binary(name: &str) -> Result<PathBuf, Vec<PathBuf>> {
+    let candidates: Vec<PathBuf> = match dedicated() {
+        Some(dir) => vec![dir.join("bin").join(name)],
+        None => FHS_BIN_DIRS
+            .iter()
+            .map(|dir| Path::new(dir).join(name))
+            .collect(),
+    };
+    match candidates.iter().find(|path| path.exists()) {
+        Some(found) => Ok(found.clone()),
+        None => Err(candidates),
+    }
+}
 
 /// One read-and-execute root per store path in `dir`'s declared closure, plus `dir` itself so the
 /// canary's own symlink is readable. The closure file is the generator's output and this is its
