@@ -2,13 +2,17 @@
 //! writes each name ([ADR 0012]). Nothing reaches the child that playpen did not put there, so
 //! there is no deny list and nothing to strip.
 //!
-//! Four layers, each one a set of names, later layers writing over earlier ones:
+//! Four layers, each one a set of names:
 //!
 //! 1. the floor, passed through from the host ([`FLOOR`]);
 //! 2. playpen's own set entries, which the caller hands in already rendered;
 //! 3. the profile's allow-list — `env.allow` and the names of each listed env fragment — passed
 //!    through from the host;
 //! 4. the profile's `set:` table, whose values win over floor pass-through.
+//!
+//! Layer 2 shares no name with 3 or 4, since the coherence tier refuses a policy entry naming a
+//! reserved one, so the order it is applied in decides nothing; [`construct`] applies it after the
+//! pass-through layers and before `set:`.
 //!
 //! Only names are matched, exactly; an inherited value is never inspected. An allow-listed name
 //! the host does not have is simply absent, which fails closed.
@@ -51,15 +55,22 @@ pub const FLOOR: &[&str] = &[
     "TZ",
 ];
 
+/// The run scratch ([spec §9.2]).
+///
+/// [spec §9.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#92-set-entries
+pub const TMPDIR: &str = "TMPDIR";
+/// The profile's name: what a nested invocation reads to know it is inside a boundary.
+pub const PLAYPEN_ACTIVE: &str = "PLAYPEN_ACTIVE";
+
 /// playpen's own set entries ([spec §9.2]), reserved in every run whether or not this one writes
 /// them. The kind table's entries ([`written_by_playpen`]) and every route's delivery name
 /// ([`deliveries`]) are reserved beside these.
 ///
 /// [spec §9.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#92-set-entries
 pub const SET_ENTRIES: &[&str] = &[
-    "TMPDIR",
+    TMPDIR,
     "PLAYPEN_MANIFEST",
-    "PLAYPEN_ACTIVE",
+    PLAYPEN_ACTIVE,
     "HTTPS_PROXY",
     "NO_PROXY",
     "no_proxy",

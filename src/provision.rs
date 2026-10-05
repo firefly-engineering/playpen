@@ -18,9 +18,8 @@
 //! [ADR 0027]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0027-the-state-directory-is-unreachable-by-refusal-because-a-carve-out-is-not-portable.md
 
 use std::fmt::Write as _;
-use std::fs::{DirBuilder, File};
+use std::fs::{DirBuilder, File, TryLockError};
 use std::io::{Read, Write};
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
@@ -185,23 +184,24 @@ impl Layout {
                 .mode(0o600)
                 .open(&path)
                 .map_err(io)?;
-            // SAFETY: flock acts on an open descriptor this process owns and touches no memory.
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-                let err = std::io::Error::last_os_error();
-                if err.raw_os_error() != Some(libc::EWOULDBLOCK) {
-                    return Err(io(err));
+            // `flock`, so a lock follows the open file and the kernel drops it with the process.
+            match file.try_lock() {
+                Ok(()) => {}
+                Err(TryLockError::WouldBlock) => {
+                    return Err(Refusal::new(
+                        Code::AreaBusy,
+                        format!(
+                            "area {} is held by {}, and its concurrency is exclusive",
+                            planned.from(),
+                            holder(&mut file)
+                        ),
+                    ));
                 }
-                return Err(Refusal::new(
-                    Code::AreaBusy,
-                    format!(
-                        "area {} is held by {}, and its concurrency is exclusive",
-                        planned.from(),
-                        holder(&mut file)
-                    ),
-                ));
+                Err(TryLockError::Error(e)) => return Err(io(e)),
             }
-            // The holder's id, for the next run to name. Written under the lock, so a reader that
-            // finds the lock held finds an id or, in the instant before this write, none.
+            // The holder's id, for the next run to name, written under the lock and cleared again
+            // at teardown. A holder killed before teardown leaves its id behind, which this write
+            // replaces: only in the instant between the lock and the write can a reader find it.
             file.set_len(0)
                 .and_then(|()| file.write_all(self.run.as_bytes()))
                 .map_err(io)?;
@@ -263,10 +263,6 @@ pub struct Provisioned {
     /// The lock file of every `exclusive` area, held for as long as this value exists. Opened
     /// close-on-exec, and the child closes every descriptor above 2 besides, so the lock stays
     /// the supervisor's.
-    #[expect(
-        dead_code,
-        reason = "an RAII guard: each claim is held for exactly as long as its descriptor is open"
-    )]
     claims: Vec<File>,
 }
 
@@ -277,6 +273,10 @@ impl Drop for Provisioned {
         // [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
         for path in &self.removed {
             let _ = std::fs::remove_dir_all(path);
+        }
+        // Cleared while still held, so a lock file never names a run that has ended in good order.
+        for claim in &self.claims {
+            let _ = claim.set_len(0);
         }
     }
 }
@@ -290,7 +290,7 @@ fn holder(file: &mut File) -> String {
         .and_then(|_| RunId::parse(id.trim()))
     {
         Some(id) => format!("run {id}"),
-        None => "a run whose id is not yet written".into(),
+        None => "a run whose id is not written yet".into(),
     }
 }
 
@@ -533,6 +533,19 @@ mod tests {
                 .provision()
                 .expect("released with its run");
         }
+    }
+
+    /// A lock file never names a run that ended in good order.
+    #[test]
+    fn a_released_claim_names_nobody() {
+        let state = tempfile::TempDir::new().expect("state");
+        let policy = persistent(None);
+        let layout = layout_of(state.path(), &policy);
+        let lock = layout.lock(&layout.areas[0]);
+        let held = layout.provision().expect("held");
+        assert_eq!(std::fs::read_to_string(&lock).expect("lock"), layout.run);
+        drop(held);
+        assert_eq!(std::fs::read_to_string(&lock).expect("lock"), "");
     }
 
     #[test]

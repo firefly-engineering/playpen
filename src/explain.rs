@@ -114,13 +114,10 @@ fn resolve(args: &Args, host: &Host) -> Result<Resolved, Refusal> {
     let name = selected?;
     coherence::check(&loaded)?;
     // `explain` launches nothing, so it states the paths any run would be provisioned.
-    let state = host.state.as_deref().ok_or_else(|| {
-        Refusal::new(
-            Code::StateIo,
-            "no state directory: neither XDG_STATE_HOME nor HOME is an absolute path",
-        )
-    })?;
+    let state = host.state.as_deref().ok_or_else(record::no_state)?;
     let selected = &loaded.policy.profiles[&name];
+    // Resolved as `run` resolves it. Before any run the directory may not exist, and the first run
+    // creates it where it is named, so the path as named is the one that run would resolve.
     let state = state.canonicalize().unwrap_or_else(|_| state.to_owned());
     let layout = Layout::unlaunched(&state, &loaded.policy, selected);
     let caps = resolve::capabilities(&loaded.policy, &name, &layout)?;
@@ -135,7 +132,7 @@ fn resolve(args: &Args, host: &Host) -> Result<Resolved, Refusal> {
         .paths
         .retain(|grant| !grant.state_derived || grant.path.exists());
     crate::backend::check(&provisioned)?;
-    let env = resolve::environment(&loaded.policy, &name, &host.env, &layout);
+    let env = resolve::environment(&loaded.policy, &name, selected, &host.env, &layout);
     Ok(Resolved::new(absolute(&path), trace, name, &caps, &env))
 }
 

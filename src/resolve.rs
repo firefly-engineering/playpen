@@ -159,8 +159,8 @@ pub fn capabilities(
     Ok(caps)
 }
 
-/// The environment a launch of profile `name` under `layout` constructs on a host whose own is
-/// `host` ([spec §9]). `run` hands it to the child and `explain` shows it.
+/// The environment a launch of profile `name`, `selected` from `policy`, under `layout` constructs
+/// on a host whose own is `host` ([spec §9]). `run` hands it to the child and `explain` shows it.
 ///
 /// playpen's own entries are rendered from typed values — a path playpen provisions, the profile's
 /// name — and never by string formatting ([spec §9.2]).
@@ -170,20 +170,18 @@ pub fn capabilities(
 pub fn environment(
     policy: &Policy,
     name: &str,
+    selected: &Profile,
     host: &[(OsString, OsString)],
     layout: &Layout,
 ) -> Vec<Var> {
-    let Some(selected) = policy.profiles.get(name) else {
-        return Vec::new();
-    };
     let written = vec![
         Var {
-            name: "TMPDIR".into(),
+            name: environment::TMPDIR.into(),
             value: Value::Written(layout.scratch().into_os_string()),
             from: provision::FROM_SCRATCH.into(),
         },
         Var {
-            name: "PLAYPEN_ACTIVE".into(),
+            name: environment::PLAYPEN_ACTIVE.into(),
             value: Value::Written(name.into()),
             from: BUILT_IN.into(),
         },

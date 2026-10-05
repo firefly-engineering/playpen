@@ -268,7 +268,7 @@ fn run(
     // The record is open, so the state directory exists; resolved, because the mechanism enforces
     // on real paths.
     let layout = state
-        .ok_or_else(|| Refusal::new(Code::StateIo, "no state directory"))
+        .ok_or_else(record::no_state)
         .and_then(|state| {
             state.canonicalize().map_err(|e| {
                 Refusal::new(
@@ -300,7 +300,7 @@ fn run(
     // Step 12: the capability set compiles on this mechanism.
     backend::check(&caps)?;
     // Step 14.
-    let env = resolve::environment(&loaded.policy, profile, env, &layout);
+    let env = resolve::environment(&loaded.policy, profile, selected, env, &layout);
     record.launch(&caps, backend::denial_tag(record.id()))?;
     let run = record.id().clone();
     // Both callbacks write the record, and only one of them ever fires, but the borrow checker

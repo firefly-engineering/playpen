@@ -615,13 +615,16 @@ fn run_of(path: &Path, extensions: &[&str]) -> Option<RunId> {
 }
 
 fn runs_dir(state: Option<&Path>) -> Result<PathBuf, Refusal> {
-    let state = state.ok_or_else(|| {
-        Refusal::new(
-            Code::StateIo,
-            "no state directory: neither XDG_STATE_HOME nor HOME is an absolute path",
-        )
-    })?;
+    let state = state.ok_or_else(no_state)?;
     Ok(state.join(RUNS))
+}
+
+/// The refusal of a host whose environment names no state directory.
+pub fn no_state() -> Refusal {
+    Refusal::new(
+        Code::StateIo,
+        "no state directory: neither XDG_STATE_HOME nor HOME is an absolute path",
+    )
 }
 
 fn record_path(runs: &Path, id: &RunId) -> PathBuf {

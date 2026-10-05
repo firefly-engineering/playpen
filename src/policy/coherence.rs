@@ -131,28 +131,37 @@ fn env_is_not_forbidden(loaded: &Loaded) -> Result<(), Refusal> {
 /// playpen's own names, and two routes delivering one name are one author.
 fn env_is_not_reserved(loaded: &Loaded) -> Result<(), Refusal> {
     let Loaded { path, policy } = loaded;
-    let playpens: Vec<(String, String)> = environment::written_by_playpen()
-        .into_iter()
-        .map(|(var, author)| (var.to_owned(), author))
-        .collect();
-    let reserved: Vec<(String, String)> = playpens
-        .iter()
-        .cloned()
-        .chain(environment::deliveries(policy))
-        .collect();
-    let authored =
-        environment::authored(policy).map(|(var, from)| (var.to_owned(), from, &reserved));
-    let deliveries = environment::deliveries(policy).map(|(var, from)| (var, from, &playpens));
-    for (var, from, against) in authored.chain(deliveries) {
-        if let Some((_, author)) = against.iter().find(|(name, _)| *name == var) {
-            return Err(Refusal::new(
-                Code::EnvReserved,
-                format!(
-                    "{}: {from} names {var:?}, which is reserved for {author}: one name has one \
-                     author",
-                    path.display()
-                ),
-            ));
+    let collision = |var: &str, from: &str, author: &str| {
+        Err(Refusal::new(
+            Code::EnvReserved,
+            format!(
+                "{}: {from} names {var:?}, which is reserved for {author}: one name has one author",
+                path.display()
+            ),
+        ))
+    };
+    let by_playpen = environment::written_by_playpen();
+    let by_playpen_of = |var: &str| {
+        by_playpen
+            .iter()
+            .find(|(name, _)| *name == var)
+            .map(|(_, author)| author.clone())
+    };
+    // A delivery name against playpen's own.
+    for (var, from) in environment::deliveries(policy) {
+        if let Some(author) = by_playpen_of(&var) {
+            return collision(&var, &from, &author);
+        }
+    }
+    // An allowed or set name against playpen's own, then against every delivery name.
+    for (var, from) in environment::authored(policy) {
+        let delivered = || {
+            environment::deliveries(policy)
+                .find(|(name, _)| name == var)
+                .map(|(_, route)| route)
+        };
+        if let Some(author) = by_playpen_of(var).or_else(delivered) {
+            return collision(var, &from, &author);
         }
     }
     Ok(())
