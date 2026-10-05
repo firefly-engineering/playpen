@@ -8,6 +8,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
+use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Duration;
@@ -117,18 +118,7 @@ fn verdict(action: &Action) -> String {
         Action::List(path) => io_verdict(
             std::fs::read_dir(path).and_then(|entries| entries.collect::<Result<Vec<_>, _>>()),
         ),
-        Action::Exec(path) => io_verdict(
-            Command::new(path)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .and_then(|status| match status.success() {
-                    true => Ok(()),
-                    // It ran, so whatever failed was not the `exec`: no errno to report.
-                    false => Err(std::io::Error::other(format!("{path}: {status}"))),
-                }),
-        ),
+        Action::Exec(path) => io_verdict(exec(path)),
         Action::ReadFd(fd) => io_verdict(read_fd(*fd)),
         #[cfg(target_os = "macos")]
         Action::LookUp(service) => look_up(service),
@@ -146,6 +136,25 @@ fn verdict(action: &Action) -> String {
             format!(r#"{{"stdio":[{}]}}"#, ids.join(","))
         }
         Action::WaitSignal => unreachable!("wait-signal writes its own verdicts"),
+    }
+}
+
+/// Run `path` with no arguments and wait for it. Forked and `execve`d rather than spawned: the
+/// macOS 15 `posix_spawn` reports an image the sandbox denies as `ENOENT` where `execve` reports
+/// `EPERM`, and a denial must never read as absence.
+fn exec(path: &str) -> std::io::Result<()> {
+    let mut command = Command::new(path);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: the closure does nothing; its presence alone makes std fork and `execve`.
+    unsafe { command.pre_exec(|| Ok(())) };
+    let status = command.status()?;
+    match status.success() {
+        true => Ok(()),
+        // It ran, so whatever failed was not the `exec`: no errno to report.
+        false => Err(std::io::Error::other(format!("{path}: {status}"))),
     }
 }
 
