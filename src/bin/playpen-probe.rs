@@ -8,7 +8,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Duration;
 
@@ -20,6 +20,8 @@ enum Action {
     Write(String),
     /// List the directory at the path.
     List(String),
+    /// Run the path with no arguments and wait for it: ok only if it was `exec`ed and exited 0.
+    Exec(String),
     /// Read an inherited descriptor to the end, without opening anything.
     ReadFd(libc::c_int),
     /// Look the Mach service up by name in the bootstrap namespace.
@@ -81,6 +83,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Option<Vec<Action>> {
             "read" => Action::Read(args.next()?),
             "write" => Action::Write(args.next()?),
             "list" => Action::List(args.next()?),
+            "exec" => Action::Exec(args.next()?),
             "read-fd" => Action::ReadFd(args.next()?.parse().ok()?),
             #[cfg(target_os = "macos")]
             "look-up" => Action::LookUp(args.next()?),
@@ -113,6 +116,18 @@ fn verdict(action: &Action) -> String {
         ),
         Action::List(path) => io_verdict(
             std::fs::read_dir(path).and_then(|entries| entries.collect::<Result<Vec<_>, _>>()),
+        ),
+        Action::Exec(path) => io_verdict(
+            Command::new(path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .and_then(|status| match status.success() {
+                    true => Ok(()),
+                    // It ran, so whatever failed was not the `exec`: no errno to report.
+                    false => Err(std::io::Error::other(format!("{path}: {status}"))),
+                }),
         ),
         Action::ReadFd(fd) => io_verdict(read_fd(*fd)),
         #[cfg(target_os = "macos")]

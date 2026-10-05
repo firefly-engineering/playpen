@@ -4,14 +4,17 @@
 //!
 //! [spec §17.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#171-form
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs::{self, File};
+use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use playpen::capability::CapabilitySet;
 use playpen::mechanism::Mechanism;
 use playpen::record::Record;
 use playpen::self_test::{self, canary_path};
@@ -51,6 +54,7 @@ pub fn run(rows: &[Row], home: &Path) -> Vec<Outcome> {
             Fixture::BareFloor => members.iter().map(|row| bare_floor(row)).collect(),
             Fixture::ProbeRoot => probe_root(&members, home),
             Fixture::Outside => members.iter().map(|row| refusal(row)).collect(),
+            Fixture::NothingGranted => members.iter().map(|row| nothing_granted(row)).collect(),
         };
         for (i, verdict) in batch.into_iter().zip(verdicts) {
             outcomes[i] = Some(Outcome::Runs(verdict));
@@ -67,6 +71,17 @@ fn bare_floor(row: &Row) -> Verdict {
         Action::Canary => judge(row.expected, &canary_outside(), &canary_inside()),
         action => Verdict::Setup(format!(
             "{action:?} needs the probe, and the bare floor admits no grant for it"
+        )),
+    }
+}
+
+/// A row under nothing granted: the canary outside, then `exec`ed by a child that applied an empty
+/// capability set.
+fn nothing_granted(row: &Row) -> Verdict {
+    match row.action {
+        Action::Canary => judge(row.expected, &canary_outside(), &canary_ungranted()),
+        action => Verdict::Setup(format!(
+            "{action:?} needs a grant, and nothing granted admits none"
         )),
     }
 }
@@ -187,6 +202,79 @@ fn canary_inside() -> Seen {
             detail: refusal.to_string(),
         },
     }
+}
+
+/// The canary `exec`ed under an empty capability set, by a throwaway child the suite forks
+/// itself. Not through the self-test, which reports a failed `exec` as playpen's refusal: this
+/// row is judged by the kernel's errno ([ADR 0029]).
+///
+/// Must be called on the process's only thread: the child allocates between `fork` and `exec`.
+///
+/// [ADR 0029]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0029-the-backend-grants-only-what-the-policy-asked-for.md
+fn canary_ungranted() -> Seen {
+    let canary = canary_path();
+    let named = canary.display().to_string();
+    let path = CString::new(canary.into_os_string().into_vec()).expect("no NUL in a path");
+    // Close-on-exec, so an `exec` that succeeds closes the child's end with nothing on it.
+    let (mut report, reporter) = std::io::pipe().expect("the report pipe");
+    // SAFETY: plain fork; the child only applies the backend and `exec`s, never returning.
+    let pid = match unsafe { libc::fork() } {
+        -1 => panic!("fork: {}", std::io::Error::last_os_error()),
+        0 => exec_ungranted(&path, reporter),
+        pid => pid,
+    };
+    drop(reporter);
+    let mut said = Vec::new();
+    // A pipe that fails mid-read is taken for what it delivered; the wait reports the rest.
+    let _ = report.read_to_end(&mut said);
+    let mut status = 0;
+    // SAFETY: `status` is a valid out-pointer for the duration of the call.
+    while unsafe { libc::waitpid(pid, &mut status, 0) } == -1 {
+        let err = std::io::Error::last_os_error();
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::Interrupted,
+            "waitpid: {err}"
+        );
+    }
+    match said.split_first() {
+        Some((b'E', errno)) => {
+            let errno = i32::from_le_bytes(errno.try_into().expect("an errno"));
+            Seen::Failed {
+                cause: Some(Cause::Errno(errno)),
+                detail: format!("exec {named}: {}", std::io::Error::from_raw_os_error(errno)),
+            }
+        }
+        Some((_, refused)) => Seen::Failed {
+            cause: None,
+            detail: format!(
+                "the backend refused an empty capability set: {}",
+                String::from_utf8_lossy(refused)
+            ),
+        },
+        None if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 => Seen::Succeeded,
+        None => Seen::Failed {
+            cause: None,
+            detail: format!("{named} ran, then ended with wait status {status:#x}"),
+        },
+    }
+}
+
+/// In the throwaway child: apply an empty capability set, `exec` the canary, and report why not.
+fn exec_ungranted(path: &CStr, mut reporter: std::io::PipeWriter) -> ! {
+    let report = match playpen::backend::apply(&CapabilitySet::default()) {
+        Ok(()) => {
+            let argv = [path.as_ptr(), std::ptr::null()];
+            // SAFETY: `path` and `argv` are NUL-terminated and outlive the call.
+            unsafe { libc::execv(path.as_ptr(), argv.as_ptr()) };
+            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            [&b"E"[..], &errno.to_le_bytes()].concat()
+        }
+        Err(refusal) => [&b"R"[..], refusal.to_string().as_bytes()].concat(),
+    };
+    let _ = reporter.write_all(&report);
+    // SAFETY: `_exit` skips the parent's atexit handlers, which must not run twice.
+    unsafe { libc::_exit(127) }
 }
 
 /// One row's action made concrete on this host, with whatever the fixture made for it.

@@ -1262,7 +1262,7 @@ checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
 [[package]]
 name = "nono"
 version = "0.79.0"
-source = "git+https://github.com/firefly-engineering/nono?rev=e5ff57f916b528c38ee00d20556d86902215e3d8#e5ff57f916b528c38ee00d20556d86902215e3d8"
+source = "git+https://github.com/firefly-engineering/nono?rev=614549fe4b0c995eae77767b3b09d40f455b037d#614549fe4b0c995eae77767b3b09d40f455b037d"
 dependencies = [
  "der 0.8.2",
  "getrandom 0.4.3",

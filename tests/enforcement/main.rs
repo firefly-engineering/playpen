@@ -116,7 +116,7 @@ fn every_expectation_belongs_to_its_rows_class() {
 
 fn every_action_runs_under_its_rows_fixture() {
     for row in ROWS {
-        assert_eq!(row.action.fixture(), row.fixture, "{}", row.id);
+        assert!(row.action.admits(row.fixture), "{}", row.id);
     }
 }
 

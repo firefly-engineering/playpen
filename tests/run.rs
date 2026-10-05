@@ -125,6 +125,53 @@ fn the_child_holds_no_descriptor_above_stderr_at_exec() {
     );
 }
 
+/// Exec is gated on the read-bearing grants, like every other access: a binary that runs outside
+/// is denied inside when no grant holds it, never reported as absent
+/// ([ADR 0029](https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0029-the-backend-grants-only-what-the-policy-asked-for.md)).
+#[test]
+fn execing_outside_the_root_and_the_floor_is_a_denial_never_enoent() {
+    let fx = Fixture::new();
+    let elsewhere = TempDir::new().expect("decoy dir");
+    let copy = elsewhere.path().join("true");
+    std::fs::copy(os_bin("true"), &copy).expect("copy true");
+    let copy = copy.to_str().unwrap();
+
+    assert_eq!(
+        probe_outside(&["exec", copy])["ok"],
+        true,
+        "runnable outside"
+    );
+    assert_denied(&fx.probe_inside(&["exec", copy]));
+}
+
+#[test]
+fn a_binary_inside_the_granted_root_execs() {
+    let fx = Fixture::new();
+    let copy = fx.root().join("true");
+    std::fs::copy(os_bin("true"), &copy).expect("copy true");
+
+    assert_eq!(
+        fx.probe_inside(&["exec", copy.to_str().unwrap()])["ok"],
+        true
+    );
+}
+
+/// A script's interpreter is `exec`ed by the kernel on the script's behalf, so gating exec must
+/// still admit one the floor holds.
+#[test]
+fn a_script_in_the_granted_root_runs_under_an_interpreter_the_floor_holds() {
+    let fx = Fixture::new();
+    let script = fx.root().join("script");
+    std::fs::write(&script, format!("#!{}\nexit 0\n", os_bin("sh"))).expect("script");
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("chmod");
+
+    assert_eq!(
+        fx.probe_inside(&["exec", script.to_str().unwrap()])["ok"],
+        true
+    );
+}
+
 #[test]
 fn a_cwd_outside_every_granted_root_refuses() {
     let fx = Fixture::new();

@@ -134,12 +134,20 @@ pub enum Fixture {
     /// No sandbox at all: playpen is invoked so that it declines to launch, under a state
     /// directory of the row's own.
     Outside,
+    /// No grant at all, not even the floor: the backend applied to an empty capability set, in a
+    /// throwaway child the suite forks itself. Only the canary is run here, to show it cannot
+    /// run ([ADR 0029]).
+    ///
+    /// [ADR 0029]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0029-the-backend-grants-only-what-the-policy-asked-for.md
+    NothingGranted,
 }
 
 /// The closed set of checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
-    /// The floor self-test's canary, through the self-test's own implementation ([spec §8.6]).
+    /// The floor self-test's canary: under the bare floor through the self-test's own
+    /// implementation ([spec §8.6]), and under nothing granted by an `exec` whose errno is the
+    /// kernel's, not playpen's translation of it.
     ///
     /// [spec §8.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#86-the-floor-self-test
     Canary,
@@ -161,17 +169,18 @@ pub enum Action {
 }
 
 impl Action {
-    /// The only fixture this action can run under: the canary admits no grant beside the floor,
-    /// a refusal admits no sandbox at all, and everything else needs the probe's root.
-    pub fn fixture(self) -> Fixture {
+    /// Whether this action can run under `fixture`: the canary admits no grant beside the floor,
+    /// and runs under nothing granted too; a refusal admits no sandbox at all; everything else
+    /// needs the probe's root.
+    pub fn admits(self, fixture: Fixture) -> bool {
         match self {
-            Action::Canary => Fixture::BareFloor,
+            Action::Canary => matches!(fixture, Fixture::BareFloor | Fixture::NothingGranted),
             Action::Read(_)
             | Action::Create(_)
             | Action::List(_)
             | Action::ReadInherited
-            | Action::LookUp(_) => Fixture::ProbeRoot,
-            Action::Refuse(_) => Fixture::Outside,
+            | Action::LookUp(_) => fixture == Fixture::ProbeRoot,
+            Action::Refuse(_) => fixture == Fixture::Outside,
         }
     }
 }

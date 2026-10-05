@@ -11,8 +11,6 @@ use crate::row::{
 };
 
 pub const ROWS: &[Row] = &[
-    // On macOS this cannot yet catch a floor whose content regressed:
-    // https://github.com/firefly-engineering/playpen/issues/114
     Row {
         id: "P-canary",
         class: Class::Positive,
@@ -26,6 +24,17 @@ pub const ROWS: &[Row] = &[
             Decision::Adr(16),
             Decision::Issue(50),
         ],
+    },
+    // What keeps `P-canary` from passing vacuously: if the canary ran with nothing granted, it
+    // would run whatever the floor held, and a tidied floor would go unnoticed.
+    Row {
+        id: "N-nothing-granted",
+        class: Class::Negative,
+        platform: BOTH,
+        fixture: Fixture::NothingGranted,
+        action: Action::Canary,
+        expected: Expected::Denial,
+        from: &[Decision::Adr(29), Decision::Adr(16), Decision::Issue(114)],
     },
     Row {
         id: "N-ssh-key",

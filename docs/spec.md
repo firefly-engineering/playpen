@@ -1362,6 +1362,11 @@ naming *which* precondition failed. That refusal is scoped to the flag, not to t
 - **A backend is defined by the enforcement tests it passes** ([§17](#17-the-enforcement-suite)).
   A version bump is a PR that stays red until the suite says otherwise; compiling is not the
   gate.
+- **A capability the policy did not grant is not granted by the backend**
+  ([ADR 0029](adr/0029-the-backend-grants-only-what-the-policy-asked-for.md)). A rule a backend
+  emits on its own initiative — a blanket exec, fork, socket or Mach-service allowance — is a
+  violation of this seam, not a property of the platform. `N-nothing-granted` asserts it at its
+  sharpest: under an empty capability set the canary cannot run.
 - **playpen refuses on its own authority.** It requests process scoping explicitly
   (`SignalMode::AllowSameSandbox`, never the quietly degrading default), so nono's fail-closed path
   fires. It also probes the ABI itself beforehand, so the refusal survives a change in nono's
@@ -1387,6 +1392,10 @@ sandbox-extension rules stay off.
    (`N-unix-socket` on a kernel ≥ 7.1).
 3. Linux: `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON` passed where ABI 7 is available
    (`R-trace-denials`).
+4. macOS: exec is gated on the read-bearing grants, the same path filters as
+   `file-map-executable`, rather than allowed unconditionally
+   ([ADR 0029](adr/0029-the-backend-grants-only-what-the-policy-asked-for.md);
+   `N-nothing-granted`).
 
 Every rebase of the fork, and every new revision, is a playpen PR that stays red until the
 enforcement suite passes.
@@ -1546,6 +1555,7 @@ Row ids are provisional. The implementation owns the final ids.
 | `N-fd` | negative | an inherited credential fd reads as `EBADF` | both |
 | `N-unix-socket` | negative | a decoy unix socket listening outside every grant is refused | both; skip `skip.host.landlock-below-abi-9` |
 | `N-errno-law` | negative | a denial errno is in the platform set, never `ENOENT` | both |
+| `N-nothing-granted` | negative | under an **empty** capability set — not even the floor — the canary's `exec` is denied with an errno in the platform set, never `ENOENT`. Judged by the kernel's errno, never by a refusal code | both |
 | `N-endpoint` | negative | a non-matching request to a credentialed host gets `403` + `broker.endpoint.denied` | both |
 | `N-endpoint-no-leg` | negative | for that request, **no upstream leg occurred** (instrumented upstream) | both |
 | `P-canary` | positive | a dynamically linked OS binary exits 0 under the bare floor | both |
