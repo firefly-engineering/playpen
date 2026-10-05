@@ -142,7 +142,7 @@ fn confine_and_exec(
     die_with_supervisor(supervisor);
     let confined = prepare()
         .and_then(|()| close_inherited_fds(reporter.as_raw_fd()))
-        .and_then(|()| backend::apply(caps));
+        .and_then(|()| backend::apply(caps, run.and_then(backend::denial_tag).as_deref()));
     let refusal = match confined {
         Ok(()) => {
             let err = command.exec();

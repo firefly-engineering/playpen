@@ -1272,14 +1272,19 @@ reads it back out, and a surface whose job is to state facts must not report a c
    unix-socket regime.
 
 `explain` launches nothing. `explain --run <id>` replays a stored record and prints the exact
-platform command that pulls that run's denials, with the pid filled in, in both forms (`denials`
+platform command that pulls that run's denials — every process in its tree, not only the child —
+in both forms (`denials`
 in `--json`, beside the record's own fields):
 
 - **macOS**: `/usr/bin/log show --start '<launched>' --end '<ended>' --predicate 'sender ==
-  "Sandbox" AND eventMessage CONTAINS "(<pid>)"'`, the window widened to whole seconds and
-  given in UTC, and `--end` omitted for a run with no end. `/usr/bin/log` by path, because `log`
-  is a zsh builtin. A denial by one of the child's descendants carries another pid and is not
-  matched ([#124](https://github.com/firefly-engineering/playpen/issues/124)).
+  "Sandbox" AND eventMessage CONTAINS "playpen-run-<run id>"'`, the window widened to whole
+  seconds and given in UTC, and `--end` omitted for a run with no end. The backend attaches the
+  run's **denial tag**, `playpen-run-<run id>`, to the profile's default deny, and the kernel logs
+  it with every denial in the confined tree, whatever the denied process's pid
+  ([#124](https://github.com/firefly-engineering/playpen/issues/124)); the record holds the tag
+  (`denial_tag`). A record written before runs were tagged holds none, and its command filters on
+  `"(<pid>)"` instead, which matches the child's own denials only. `/usr/bin/log` by path, because
+  `log` is a zsh builtin.
 - **Linux**: none yet (`null`). The query filters by Landlock domain id, which covers the whole
   tree, and the record does not hold it yet
   ([#98](https://github.com/firefly-engineering/playpen/issues/98)).
@@ -1411,6 +1416,9 @@ sandbox-extension rules stay off.
    `file-map-executable`, rather than allowed unconditionally
    ([ADR 0029](adr/0029-the-backend-grants-only-what-the-policy-asked-for.md);
    `N-nothing-granted`).
+5. macOS: an optional message on the default deny, `(deny default (with message "…"))`, which
+   the kernel logs with every denial in the sandboxed tree, so a run's denials are found by its
+   tag ([#124](https://github.com/firefly-engineering/playpen/issues/124); `P-denial-tree`).
 
 Every rebase of the fork, and every new revision, is a playpen PR that stays red until the
 enforcement suite passes.
@@ -1461,7 +1469,7 @@ asymmetry is *unassertable*, never that its row lives elsewhere.
 | 1 | unix-socket credential oracles: denied on every macOS version, on Linux only from Landlock ABI 9 | macOS | `N-unix-socket` (skipped by name on Linux below ABI 9) |
 | 2 | the mechanism's deprecation clock | Linux | — |
 | 3 | the compiled-profile ceiling | Linux | `R-ceiling` (`n/a` on Linux) |
-| 4 | denial visibility: zero preconditions on macOS, four on Linux. Partly permanent: macOS's channel is certifiable *a priori*, Linux's only *a posteriori* | macOS | `R-trace-denials` (`n/a` on macOS) |
+| 4 | denial visibility: zero preconditions on macOS, four on Linux. Partly permanent: macOS's channel is certifiable *a priori*, Linux's only *a posteriori* | macOS | `R-trace-denials` (`n/a` on macOS); `P-denial-tree` (`n/a` on Linux) |
 | 5 | user namespaces (Chromium's nested userns) are Linux's | — | `P-unshare` (`n/a` on macOS) |
 | 6 | the parent-death signal that stops an agent outliving its supervisor. Permanent: after `exec` only a kernel mechanism can do this, and macOS has none. Narrows [§18](#18-named-residuals) item 4 to macOS | Linux | `the_agent_does_not_outlive_a_killed_supervisor`, transparency (`n/a` on macOS) |
 | 7 | signal **origin** is readable: `sigwaitinfo`'s `si_code` is `SI_KERNEL` for a tty keypress and `SI_USER` for a `kill`, where macOS reports `0` for both with `si_pid` set in both. Two live consequences, both macOS-only: a direct `kill -INT` to a foreground playpen is silently dropped, and `SIGTTIN`/`SIGTTOU` reach the agent twice, because the foreground proxy macOS falls back to is *inverted* for exactly those two — a process receiving one is by definition in a background group | Linux | `a_signal_sent_straight_to_a_foreground_playpen_is_forwarded`, transparency (`n/a` on macOS) |
@@ -1583,6 +1591,7 @@ Row ids are provisional. The implementation owns the final ids.
 | `N-endpoint` | negative | a non-matching request to a credentialed host gets `403` + `broker.endpoint.denied` | both |
 | `N-endpoint-no-leg` | negative | for that request, **no upstream leg occurred** (instrumented upstream) | both |
 | `P-canary` | positive | a dynamically linked OS binary exits 0 under the bare floor | both |
+| `P-denial-tree` | positive | a denial by a process the confined child **forked** is returned by the command `explain --run` prints; checked outside first against the log, found by the decoy's path. A log slower than a deadline is a setup failure | macOS (`n/a` Linux) |
 | `P-unshare` | positive | the **nested** `CLONE_NEWUSER` → `CLONE_NEWPID\|CLONE_NEWNET` sequence succeeds inside; checked outside first, else `skip.host.userns-restricted` | Linux (`n/a` macOS) |
 | `P-open-bypass` | positive | a request that bypasses the proxy arrives **unauthenticated** | both |
 | `P-manifest` | positive | "the manifest is true": every stated route authenticates through the proxy, every path is accessible at its stated mode, and nothing outside them is; skip `skip.host.no-egress` | both |

@@ -213,6 +213,11 @@ pub struct Record {
     #[serde(default)]
     pub supervisor_pid: Option<libc::pid_t>,
     pub ended_at_unix_ms: Option<u64>,
+    /// The tag the child's tree logs its denials with, where the platform logs one
+    /// ([`crate::backend::denial_tag`]). Additive, so a record written before runs were tagged
+    /// still reads: it holds none, and its denials are found by the child's pid alone.
+    #[serde(default)]
+    pub denial_tag: Option<String>,
     /// The status playpen exited with after the child ran.
     pub status: Option<i32>,
     pub refusal: Option<RecordedRefusal>,
@@ -340,6 +345,7 @@ impl RunRecord {
             // SAFETY: getpid has no preconditions.
             supervisor_pid: Some(unsafe { libc::getpid() }),
             ended_at_unix_ms: None,
+            denial_tag: None,
             status: None,
             refusal: None,
             fault: None,
@@ -396,8 +402,13 @@ impl RunRecord {
     /// launch time. A failure is `refusal.state.io`, and nothing has been forked.
     ///
     /// [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
-    pub fn launch(&mut self, caps: &CapabilitySet) -> Result<(), Refusal> {
+    pub fn launch(
+        &mut self,
+        caps: &CapabilitySet,
+        denial_tag: Option<String>,
+    ) -> Result<(), Refusal> {
         self.record.capabilities = Some(caps.clone());
+        self.record.denial_tag = denial_tag;
         self.record.launched_at_unix_ms = Some(now_unix_ms());
         self.write()
     }
@@ -740,7 +751,7 @@ mod tests {
             }],
             mach_services: vec![],
         };
-        record.launch(&caps).expect("launch");
+        record.launch(&caps, None).expect("launch");
         record.spawned(42);
         record.finish(3);
         let stored = read_back(&record);

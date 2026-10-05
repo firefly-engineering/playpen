@@ -160,11 +160,12 @@ fn render_run(replay: &Replay, out: &mut impl Write) -> io::Result<()> {
 /// The exact platform command that pulls the denials of the run `record` holds, or `None` for a run
 /// that never launched ([spec §14.2]).
 ///
-/// On macOS the kernel logs each denial as `Sandbox: <name>(<pid>) deny(1) <operation> <path>`,
-/// so the query is the run's window, widened to the whole seconds `log show` takes, filtered to
-/// the child's pid. A denial by one of the child's own descendants carries another pid and is not
-/// matched ([#124](https://github.com/firefly-engineering/playpen/issues/124)). `/usr/bin/log` by
-/// path, because `log` alone is a zsh builtin.
+/// On macOS the query is the run's window, widened to the whole seconds `log show` takes, filtered
+/// to the run's denial tag, which the kernel logs with every denial in the confined tree
+/// ([`crate::backend::denial_tag`]). A record written before runs were tagged holds none, and is
+/// filtered to the child's pid instead, which misses its descendants' denials
+/// ([#124](https://github.com/firefly-engineering/playpen/issues/124)). `/usr/bin/log` by path,
+/// because `log` alone is a zsh builtin.
 ///
 /// [spec §14.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#142-playpen-explain
 #[cfg(target_os = "macos")]
@@ -175,8 +176,16 @@ fn denials(record: &Record) -> Option<String> {
     if let Some(ended) = record.ended_at_unix_ms {
         command += &format!(" --end '{}'", log_time(ended.div_ceil(1000)));
     }
+    // A tagged run is found by its tag, which its whole tree logs; an older one by the child's pid.
+    // The stored tag is printed into a shell command, so it is used only when it is the one this
+    // run's id makes: an edited or damaged record falls back to the pid rather than injecting.
+    let made = RunId::parse(&record.run).and_then(|run| crate::backend::denial_tag(&run));
+    let mark = match (&record.denial_tag, made) {
+        (Some(stored), Some(made)) if *stored == made => made,
+        _ => format!("({pid})"),
+    };
     command +=
-        &format!(" --predicate 'sender == \"Sandbox\" AND eventMessage CONTAINS \"({pid})\"'");
+        &format!(" --predicate 'sender == \"Sandbox\" AND eventMessage CONTAINS \"{mark}\"'");
     Some(command)
 }
 
@@ -260,6 +269,7 @@ mod tests {
     use super::*;
 
     /// A record of a run launched at `launched` and, if it has, ended at `ended`, as child `pid`.
+    /// Written before denials were tagged, so it holds no tag.
     fn ran(pid: Option<i32>, launched: Option<u64>, ended: Option<u64>) -> Record {
         serde_json::from_value(serde_json::json!({
             "format": 1,
@@ -278,9 +288,48 @@ mod tests {
         .expect("a record")
     }
 
-    /// The window is widened to whole seconds, the precision `log show` takes, and given in UTC so
-    /// that it means the same instant wherever the command is pasted. Measured on macOS 26: this
-    /// command returns that run's `deny(1)` lines.
+    /// A tagged run is queried by its tag, which every process in its tree logs its denials with,
+    /// and not by the child's pid, which only the child does
+    /// ([#124](https://github.com/firefly-engineering/playpen/issues/124)).
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_tagged_runs_denials_are_queried_by_its_tag() {
+        let mut record = ran(
+            Some(82276),
+            Some(1_791_186_693_069),
+            Some(1_791_186_693_200),
+        );
+        record.denial_tag = Some("playpen-run-01M45GQTY3RF111ZQ8WPJ5SKTY".into());
+        assert_eq!(
+            denials(&record).as_deref(),
+            Some(
+                "/usr/bin/log show --start '2026-10-05 07:51:33+0000' \
+                 --end '2026-10-05 07:51:34+0000' \
+                 --predicate 'sender == \"Sandbox\" AND \
+                 eventMessage CONTAINS \"playpen-run-01M45GQTY3RF111ZQ8WPJ5SKTY\"'"
+            )
+        );
+    }
+
+    /// A tag that is not the one the run's id makes is never printed into the command: the record
+    /// is a file anyone with the user's rights can edit, and the command is meant to be pasted.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_tag_the_run_id_does_not_make_falls_back_to_the_pid() {
+        let mut record = ran(
+            Some(82276),
+            Some(1_791_186_693_069),
+            Some(1_791_186_693_200),
+        );
+        record.denial_tag = Some("x\"' ; rm -rf ~ ; '".into());
+        let command = denials(&record).expect("a command");
+        assert!(command.ends_with("CONTAINS \"(82276)\"'"), "{command}");
+        assert!(!command.contains("rm -rf"), "{command}");
+    }
+
+    /// A record written before denials were tagged is queried by the child's pid, the best it
+    /// holds. The window is widened to whole seconds, the precision `log show` takes, and given in
+    /// UTC so that it means the same instant wherever the command is pasted.
     #[test]
     #[cfg(target_os = "macos")]
     fn the_denials_command_names_the_runs_window_and_pid() {

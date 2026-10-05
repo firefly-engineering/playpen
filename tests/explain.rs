@@ -79,13 +79,16 @@ fn explain_run_replays_a_stored_record_in_both_forms() {
     assert_eq!(field("kind"), "claude");
     assert_eq!(field("status"), "3");
     assert_eq!(field("refusal"), "-");
-    // The command is the same in both forms. On macOS it names the child's pid; on Linux it waits
-    // on the trace work, so it is absent.
+    // The command is the same in both forms. On macOS it names the run's tag, which the record
+    // holds; on Linux it waits on the trace work, so it is absent.
     match denials.as_str() {
         Some(command) => {
             assert_eq!(field("denials"), command);
             assert!(command.starts_with("/usr/bin/log show "), "{command}");
-            assert!(command.contains(&format!("({pid})")), "{command}");
+            let tag = json["denial_tag"].as_str().expect("the run's tag");
+            // Spelled out rather than taken from the backend: this is the shape §14.2 states.
+            assert_eq!(tag, format!("playpen-run-{id}"));
+            assert!(command.contains(&format!("\"{tag}\"")), "{command}");
         }
         None => assert_eq!(field("denials"), "-"),
     }

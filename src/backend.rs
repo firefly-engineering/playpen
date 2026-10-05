@@ -11,11 +11,32 @@ use nono::{AccessMode, FsCapability, IpcMode, NetworkMode, NonoError, Sandbox, S
 use crate::capability::{Access, CapabilitySet, PathGrant, Scope};
 use crate::code::Code;
 use crate::mechanism::{self, Capability};
+use crate::record::RunId;
 use crate::refusal::Refusal;
 
-/// Apply `caps` to the calling process, irrevocably.
-pub fn apply(caps: &CapabilitySet) -> Result<(), Refusal> {
-    let set = compile(caps)?;
+/// The tag run `run`'s denials are logged with, so that every process in its tree can be found
+/// by it ([spec §14.2]). On macOS the backend attaches it to the profile's default deny, and the
+/// kernel logs it with each denial that produces, whatever the denied process's pid
+/// ([#124](https://github.com/firefly-engineering/playpen/issues/124)).
+///
+/// [spec §14.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#142-playpen-explain
+#[cfg(target_os = "macos")]
+pub fn denial_tag(run: &RunId) -> Option<String> {
+    Some(format!("playpen-run-{run}"))
+}
+
+/// Landlock has no message to attach to a denial. Linux finds a run's denials by the Landlock
+/// domain id instead ([#98](https://github.com/firefly-engineering/playpen/issues/98)).
+#[cfg(target_os = "linux")]
+pub fn denial_tag(_run: &RunId) -> Option<String> {
+    None
+}
+
+/// Apply `caps` to the calling process, irrevocably, tagging its denials with `tag` where the
+/// platform logs one ([`denial_tag`]).
+pub fn apply(caps: &CapabilitySet, tag: Option<&str>) -> Result<(), Refusal> {
+    let mut set = compile(caps)?;
+    set.set_seatbelt_deny_message(tag.map(str::to_owned));
     #[cfg(target_os = "macos")]
     Sandbox::apply_auto(&set).map_err(translate)?;
     #[cfg(target_os = "linux")]
@@ -179,6 +200,25 @@ fn translate(err: NonoError) -> Refusal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tag a run's denials are logged with: one shape, read by `explain` and applied here.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_runs_denials_are_tagged_with_its_run_id() {
+        let run = RunId::parse("01M45GQTY3RF111ZQ8WPJ5SKTY").expect("a run id");
+        assert_eq!(
+            denial_tag(&run).as_deref(),
+            Some("playpen-run-01M45GQTY3RF111ZQ8WPJ5SKTY")
+        );
+    }
+
+    /// Landlock has no message to attach; Linux finds a run's denials by its domain id (#98).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn linux_tags_no_denials() {
+        let run = RunId::parse("01M45GQTY3RF111ZQ8WPJ5SKTY").expect("a run id");
+        assert_eq!(denial_tag(&run), None);
+    }
 
     #[test]
     fn sandbox_init_failure_is_mechanism_unavailable() {

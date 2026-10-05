@@ -164,6 +164,9 @@ pub enum Fixture {
     ///
     /// [ADR 0029]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0029-the-backend-grants-only-what-the-policy-asked-for.md
     NothingGranted,
+    /// One confined launch of a shell that forks the probe, so that every denial is a
+    /// descendant's; then the run's denials, pulled from the platform's log outside.
+    DescendantDenied,
 }
 
 /// The closed set of checks.
@@ -194,6 +197,12 @@ pub enum Action {
     Connect(Listening),
     /// playpen is invoked so that it refuses, and leaves what it leaves behind.
     Refuse(Invocation),
+    /// The command `explain --run` prints is run, and must return the denial of a read the probe,
+    /// forked by the confined child rather than being it, made of a decoy outside every grant
+    /// ([spec §14.2]).
+    ///
+    /// [spec §14.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#142-playpen-explain
+    PullDenials,
 }
 
 impl Action {
@@ -211,6 +220,7 @@ impl Action {
             | Action::Signal(_)
             | Action::Connect(_) => fixture == Fixture::ProbeRoot,
             Action::Refuse(_) => fixture == Fixture::Outside,
+            Action::PullDenials => fixture == Fixture::DescendantDenied,
         }
     }
 }

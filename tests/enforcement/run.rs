@@ -55,6 +55,7 @@ pub fn run(rows: &[Row], home: &Path) -> Vec<Outcome> {
             Fixture::ProbeRoot => probe_root(&members, home),
             Fixture::Outside => members.iter().map(|row| refusal(row)).collect(),
             Fixture::NothingGranted => members.iter().map(|row| nothing_granted(row)).collect(),
+            Fixture::DescendantDenied => members.iter().map(|row| descendant_denied(row)).collect(),
         };
         for (i, verdict) in batch.into_iter().zip(verdicts) {
             outcomes[i] = Some(Outcome::Runs(verdict));
@@ -84,6 +85,117 @@ fn nothing_granted(row: &Row) -> Verdict {
             "{action:?} needs a grant, and nothing granted admits none"
         )),
     }
+}
+
+fn descendant_denied(row: &Row) -> Verdict {
+    match row.action {
+        Action::PullDenials => match pull_denials() {
+            Ok((outside, inside)) => judge(row.expected, &outside, &inside),
+            Err(why) => Verdict::Setup(why),
+        },
+        action => Verdict::Setup(format!(
+            "{action:?} does not pull denials, and this fixture only makes them"
+        )),
+    }
+}
+
+/// How long the platform's log may take to show a denial before the row is a setup failure: a
+/// log that slow says nothing about the command, and the row must end rather than hang.
+#[cfg(target_os = "macos")]
+const LOG_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A confined shell forks the probe, which is denied a read of a decoy outside every grant. The
+/// outside half is the platform's log showing that denial at all, found by the decoy's path; the
+/// inside half is the command `explain --run` prints returning it, from a process that is not the
+/// child ([#124](https://github.com/firefly-engineering/playpen/issues/124)). An error is a
+/// fixture that could not be made, before either half could be observed.
+#[cfg(target_os = "macos")]
+fn pull_denials() -> Result<(Seen, Seen), String> {
+    let failed = |detail: String| Seen::Failed {
+        cause: None,
+        detail,
+    };
+    let decoy = NamedTempFile::new()
+        .and_then(|mut decoy| {
+            std::io::Write::write_all(&mut decoy, DECOY.as_bytes())?;
+            Ok(decoy)
+        })
+        .map_err(|e| format!("decoy: {e}"))?;
+    // Logged as the kernel resolved it, through macOS's `/var` link.
+    let path = decoy
+        .path()
+        .canonicalize()
+        .map_err(|e| format!("the decoy's path: {e}"))?;
+    let path = utf8(&path)?;
+    let denied = format!("deny(1) file-read-data {path}");
+
+    let fixture = common::Fixture::with_mode("read");
+    let probe = fixture.probe();
+    // `; true` keeps the shell from replacing itself with the probe, so the probe is forked.
+    let script = format!("'{}' read '{path}'; true", probe.display());
+    let ran = fixture
+        .run(&[&common::os_bin("sh"), "-c", &script])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("run playpen: {e}"))?;
+    let run = fixture
+        .run_ids()
+        .pop()
+        .ok_or_else(|| format!("no record: {ran:?}"))?;
+    let replay = fixture
+        .playpen(&["explain", "--run", &run, "--json"])
+        .output()
+        .map_err(|e| format!("run playpen explain: {e}"))?;
+    let replay: Value =
+        serde_json::from_slice(&replay.stdout).map_err(|e| format!("explain --json: {e}"))?;
+    let (Some(command), Some(child)) = (replay["denials"].as_str(), replay["pid"].as_i64()) else {
+        return Err(format!("no denials command or pid: {replay}"));
+    };
+
+    // Outside: the same window, found by the decoy's path rather than by anything the run set.
+    let (window, _) = command
+        .split_once(" --predicate ")
+        .ok_or_else(|| format!("no predicate in {command}"))?;
+    let by_path = format!(
+        "{window} --predicate 'sender == \"Sandbox\" AND eventMessage CONTAINS \"{path}\"'"
+    );
+    let deadline = std::time::Instant::now() + LOG_DEADLINE;
+    while !shell(&by_path)?.contains(&denied) {
+        if std::time::Instant::now() > deadline {
+            let never = format!("the log never showed `{denied}` within {LOG_DEADLINE:?}");
+            return Ok((failed(never), failed(String::new())));
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+
+    // Inside: the command as printed, and the line it returns is a descendant's.
+    let pulled = shell(command)?;
+    let inside = match pulled.lines().find(|line| line.contains(&denied)) {
+        Some(line) if !line.contains(&format!("({child})")) => Seen::Succeeded,
+        Some(line) => failed(format!(
+            "the denial is the child's own, not a descendant's: {line}"
+        )),
+        None => failed(format!("`{command}` does not return `{denied}`")),
+    };
+    Ok((Seen::Succeeded, inside))
+}
+
+/// The row is `n/a` on Linux, which has no log tag to pull by yet
+/// ([#98](https://github.com/firefly-engineering/playpen/issues/98)).
+#[cfg(target_os = "linux")]
+fn pull_denials() -> Result<(Seen, Seen), String> {
+    unreachable!("P-denial-tree is n/a on Linux")
+}
+
+/// `command`'s stdout, run by the shell as a user pasting it would.
+#[cfg(target_os = "macos")]
+fn shell(command: &str) -> Result<String, String> {
+    let output = Command::new(common::os_bin("sh"))
+        .args(["-c", command])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("run the shell: {e}"))?;
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// A refusal row, under a fixture of its own so its state directory holds this run alone.
@@ -262,7 +374,7 @@ fn canary_ungranted() -> Seen {
 
 /// In the throwaway child: apply an empty capability set, `exec` the canary, and report why not.
 fn exec_ungranted(path: &CStr, mut reporter: std::io::PipeWriter) -> ! {
-    let report = match playpen::backend::apply(&CapabilitySet::default()) {
+    let report = match playpen::backend::apply(&CapabilitySet::default(), None) {
         Ok(()) => {
             let argv = [path.as_ptr(), std::ptr::null()];
             // SAFETY: `path` and `argv` are NUL-terminated and outlive the call.
@@ -444,6 +556,9 @@ fn prepare(action: Action, home: &Path, made: &mut Made) -> Result<Prepared, Str
         }
         Action::Refuse(_) => {
             return Err("a refusal has no boundary for the probe to run under".into());
+        }
+        Action::PullDenials => {
+            return Err("pulling denials needs the probe forked, never launched directly".into());
         }
         Action::Read(t) => each("read", target(t)?)?,
         Action::List(t) => each("list", target(t)?)?,

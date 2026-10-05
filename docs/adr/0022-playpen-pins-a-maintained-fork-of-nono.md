@@ -81,3 +81,10 @@ inside the backend, and it is the clean semantic fix if it is ever upstreamed.
   no new access class in nono. The bar held: the need was measured, and the asserting row is a new
   negative that fails if nothing is granted. An `Execute` access class, which #63's exclusions will
   want, is deferred as predicted rather than demonstrated._
+- _Amended by [#124](https://github.com/firefly-engineering/playpen/issues/124): **the set is
+  five.** The kernel logs a macOS denial under the denied process's pid, and the log record carries
+  nothing the sandboxed tree shares, so `explain --run` could find the child's denials but not its
+  descendants', which for an agent are most of them. A message on the default deny is logged with
+  every denial in the tree; the fifth change makes it an opt-in on nono's capability set, and
+  playpen sets it to the run's tag. The need was measured — a forked process's denial missing from
+  the printed command — and `P-denial-tree` asserts it._

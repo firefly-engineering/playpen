@@ -123,6 +123,20 @@ pub const ROWS: &[Row] = &[
         expected: Expected::Denial,
         from: &[Decision::Adr(16), Decision::Issue(55), Decision::Issue(121)],
     },
+    // A denial by any process in the run's tree is found by the command `explain --run` prints,
+    // not only the confined child's own.
+    Row {
+        id: "P-denial-tree",
+        class: Class::Positive,
+        platform: Platform {
+            scope: Scope::Only(Os::MacOs, Asymmetry::DenialVisibility),
+            ..BOTH
+        },
+        fixture: Fixture::DescendantDenied,
+        action: Action::PullDenials,
+        expected: Expected::Succeeds,
+        from: &[Decision::Adr(7), Decision::Adr(16), Decision::Issue(124)],
+    },
     Row {
         id: "N-fd",
         class: Class::Negative,

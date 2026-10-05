@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use clap::error::{ContextKind, ErrorKind};
 use clap::{Parser, Subcommand};
 
+use crate::backend;
 use crate::capability::{PathGrant, Scope};
 use crate::child;
 use crate::code::Code;
@@ -214,7 +215,7 @@ fn run(
     //
     // [ADR 0027]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0027-the-state-directory-is-unreachable-by-refusal-because-a-carve-out-is-not-portable.md
     record::refuse_if_reachable(state, &caps.paths)?;
-    record.launch(&caps)?;
+    record.launch(&caps, backend::denial_tag(record.id()))?;
     let run = record.id().clone();
     // Both callbacks write the record, and only one of them ever fires, but the borrow checker
     // cannot see that from two closures: a cell is cheaper than a seam for it.

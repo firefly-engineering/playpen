@@ -11,7 +11,7 @@ publish = false
 [dependencies]
 # The maintained fork, pinned by exact `rev` and never a branch or range (ADR 0022).
 # A bump is a PR that stays red until the enforcement suite passes.
-nono = { git = "https://github.com/firefly-engineering/nono", rev = "614549fe4b0c995eae77767b3b09d40f455b037d", default-features = false }
+nono = { git = "https://github.com/firefly-engineering/nono", rev = "5ee60f6fcebc1a006865d8f9a62e235a0f0ce1ed", default-features = false }
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
