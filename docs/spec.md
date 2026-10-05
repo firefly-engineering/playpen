@@ -1466,7 +1466,9 @@ near 6,300 subtree roots, and compiling a profile that large takes the kernel te
 before it fails. playpen reads that sentence word for word, and any other sentence keeps its
 own code (`refusal.mechanism.unavailable`, with the text). libsandbox also writes its own account
 of the failure to stderr, so the backend points stderr at `/dev/null` around `sandbox_init`, and
-the refusal stays one line. On a Nix host the
+the refusal stays one line. Only `sandbox_init` knows the compiled size, so the ceiling is found in the
+child at step 16, never at step 12, and `playpen explain`, which launches nothing, cannot report
+it. On a Nix host the
 module checks the closure's size at build time, and the launch-time refusal is the backstop.
 
 ### 15.4 Named asymmetries
@@ -1976,7 +1978,8 @@ Choices this spec made that no ticket decided. **Reviewed and accepted** in
   `refusal.state.io`.
 - **C8. Row ids.** These were taken from [#29](https://github.com/firefly-engineering/playpen/issues/29)'s
   report. The rows added by later tickets (`N-keg-decoy`, `N-endpoint`, `N-endpoint-no-leg`,
-  `P-argv`, `P-endpoint`, `R-policy-span`, `R-no-filesystem`) were named here.
+  `P-argv`, `P-endpoint`, `R-policy-span`, `R-no-filesystem`, `N-exclusion`, `R-integrity`) were
+  named here.
 - **C9. The agent binary is not granted implicitly.** ADRs 0014 and 0019 resolve a stable link
   and grant both link and target *for a toolchain root*. No ticket says whether a shim's
   `target` is granted on its own. The spec requires policy to cover it, so the floor stays the

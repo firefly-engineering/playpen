@@ -113,7 +113,7 @@ fn resolve(args: &Args, host: &Host) -> Result<Resolved, Refusal> {
     let name = selected?;
     coherence::check(&loaded)?;
     let caps = resolve::capabilities(&loaded.policy, &name)?;
-    let executable = crate::launch::executable_path(&host.executable)?;
+    let executable = crate::integrity::executable(&host.executable)?;
     crate::integrity::check(&caps, &absolute(&path), &executable)?;
     record::refuse_if_reachable(host.state.as_deref(), &caps.paths)?;
     crate::backend::check(&caps)?;

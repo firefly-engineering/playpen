@@ -200,18 +200,6 @@ fn invoke(
     )
 }
 
-/// The running executable, or the refusal that its integrity cannot be shown.
-pub fn executable_path(executable: &std::io::Result<PathBuf>) -> Result<PathBuf, Refusal> {
-    executable.as_ref().cloned().map_err(|e| {
-        Refusal::new(
-            Code::IntegrityWritable,
-            format!(
-                "the playpen executable cannot be found, so it cannot be shown unwritable: {e}"
-            ),
-        )
-    })
-}
-
 fn refuse(refusal: &Refusal, run: Option<&RunId>) -> i32 {
     refusal.emit(run);
     EXIT_REFUSED
@@ -272,16 +260,13 @@ fn run(
     })?;
     // Step 5.
     coherence::check(&loaded)?;
+    // Step 6: everything decidable from this host as it is now. The capability set resolves every
+    // root, link and exclusion, refusing any that is missing.
     let roots = resolve::roots(&loaded.policy, selected)?;
     check_cwd(cwd, &roots)?;
-    // Step 7, on every launch, never from a cached verdict: the mechanism first, so a missing
-    // capability is named as such rather than surfacing as a canary that could not be confined.
-    probe().require(mechanism::REQUIRED)?;
-    floor_self_test()?;
-
     let caps = resolve::capabilities(&loaded.policy, profile)?;
-    // Step 6: nothing that runs unconfined on the next launch is writable from inside this one.
-    integrity::check(&caps, &policy_file, &executable_path(&executable)?)?;
+    // Nothing that runs unconfined on the next launch is writable from inside this one.
+    integrity::check(&caps, &policy_file, &integrity::executable(&executable)?)?;
     // The existence-tier containment check, run once the capability set is complete because the
     // rule is about *every* granted path and the floor is a grant too: on a non-FHS host it is a
     // declared closure read from a `PLAYPEN_FLOOR`-selected directory, so it is neither
@@ -289,6 +274,11 @@ fn run(
     //
     // [ADR 0027]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0027-the-state-directory-is-unreachable-by-refusal-because-a-carve-out-is-not-portable.md
     record::refuse_if_reachable(state, &caps.paths)?;
+    // Step 7, on every launch, never from a cached verdict: the mechanism first, so a missing
+    // capability is named as such rather than surfacing as a canary that could not be confined.
+    probe().require(mechanism::REQUIRED)?;
+    floor_self_test()?;
+    // Step 12: the capability set compiles on this mechanism.
     backend::check(&caps)?;
     record.launch(&caps, backend::denial_tag(record.id()))?;
     let run = record.id().clone();
@@ -400,12 +390,21 @@ mod tests {
         probe: impl FnOnce() -> Mechanism,
         floor_self_test: impl FnOnce() -> Result<(), Refusal>,
     ) -> (Refusal, bool) {
+        refuse_with_toolchain(serde_json::json!([]), probe, floor_self_test)
+    }
+
+    /// As [`refuse_without_target`], with the profile's toolchain `toolchain`.
+    fn refuse_with_toolchain(
+        toolchain: serde_json::Value,
+        probe: impl FnOnce() -> Mechanism,
+        floor_self_test: impl FnOnce() -> Result<(), Refusal>,
+    ) -> (Refusal, bool) {
         let root = tempfile::TempDir::new().expect("root");
         let policy = root.path().join("policy.json");
         let document = serde_json::json!({
             "version": 1,
             "workspaces": {"w": {"roots": [{"path": root.path(), "mode": "read"}]}},
-            "profiles": {"p": {"workspaces": ["w"], "toolchain": []}},
+            "profiles": {"p": {"workspaces": ["w"], "toolchain": toolchain}},
         });
         std::fs::write(&policy, document.to_string()).expect("policy");
         let argv = [];
@@ -428,6 +427,27 @@ mod tests {
         )
         .expect_err("the launch refuses");
         (refusal, record.record().capabilities.is_some())
+    }
+
+    /// Existence and integrity are step 6, so a missing toolchain root refuses before the mechanism
+    /// is probed or the canary confined (spec §4.2).
+    #[test]
+    fn a_missing_toolchain_root_refuses_before_step_7() {
+        let (mut probed, mut self_tested) = (0, 0);
+        let (refusal, completed) = refuse_with_toolchain(
+            serde_json::json!([{"path": "/nonexistent/playpen-toolchain"}]),
+            || {
+                probed += 1;
+                offering_everything()
+            },
+            || {
+                self_tested += 1;
+                Ok(())
+            },
+        );
+        assert_eq!(refusal.code, Code::RootMissing);
+        assert_eq!((probed, self_tested), (0, 0), "step 7 ran before step 6");
+        assert!(!completed, "the record was not completed");
     }
 
     fn offering_everything() -> Mechanism {

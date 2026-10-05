@@ -485,3 +485,16 @@ fn a_glob_in_an_exclusion_or_a_toolchain_root_is_a_type_refusal() {
     );
     refused(&toolchain, Code::PolicyType);
 }
+
+/// The schema's pattern and the parser's refusal name the same characters.
+#[test]
+fn the_schema_pattern_is_the_glob_set() {
+    let class: String = GLOB
+        .iter()
+        .map(|c| match c {
+            '[' => "\\[".to_owned(),
+            c => c.to_string(),
+        })
+        .collect();
+    assert_eq!(LITERAL_PATTERN, format!("^[^{class}]*$"));
+}

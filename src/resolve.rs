@@ -55,32 +55,51 @@ pub fn roots(policy: &Policy, selected: &Profile) -> Result<Vec<PathGrant>, Refu
     Ok(grants)
 }
 
-/// The grant on `named` itself, where it is a symlink: read-only, and the link alone ([spec §8.5]).
-/// The mechanism enforces on the resolved path, which the caller grants; this one is what lets a
-/// path through the link be followed. The link is located through its resolved parent, since an
-/// ancestor can be a link too and the mechanism sees the real path of the link itself.
+/// The kernel's own bound on links followed in one lookup (`MAXSYMLINKS` on macOS, Linux's is
+/// the same).
+const MAX_LINKS: usize = 40;
+
+/// The grants on `named` and every link after it, where `named` is a symlink: read-only, each link
+/// alone ([spec §8.5]). The mechanism enforces on the resolved path, which the caller grants, and
+/// Seatbelt checks a path against each link it passes on the way, so every link in a chain is
+/// granted. Each is located through its resolved parent, since an ancestor can be a link too and
+/// the mechanism sees the real path of the link itself.
 ///
 /// [spec §8.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#85-symlinks
-fn link(named: &Path, from: &str) -> Result<Option<PathGrant>, Refusal> {
-    let is_link = named
-        .symlink_metadata()
-        .is_ok_and(|meta| meta.file_type().is_symlink());
-    let (Some(parent), Some(name), true) = (named.parent(), named.file_name(), is_link) else {
-        return Ok(None);
-    };
-    let parent = parent.canonicalize().map_err(|e| {
+fn link(named: &Path, from: &str) -> Result<Vec<PathGrant>, Refusal> {
+    let unavailable = |e: std::io::Error| {
         Refusal::new(
             Code::RootMissing,
             format!("{from}: link {} is unavailable: {e}", named.display()),
         )
-    })?;
-    Ok(Some(PathGrant {
-        path: parent.join(name),
-        access: Access::Read,
-        scope: Scope::Literal,
-        from: from.to_owned(),
-        state_derived: false,
-    }))
+    };
+    let mut grants = Vec::new();
+    let mut current = named.to_owned();
+    while current
+        .symlink_metadata()
+        .is_ok_and(|meta| meta.file_type().is_symlink())
+    {
+        if grants.len() == MAX_LINKS {
+            return Err(unavailable(std::io::Error::other(
+                "too many levels of links",
+            )));
+        }
+        let (Some(parent), Some(name)) = (current.parent(), current.file_name()) else {
+            break;
+        };
+        let parent = parent.canonicalize().map_err(unavailable)?;
+        let next = std::fs::read_link(&current).map_err(unavailable)?;
+        grants.push(PathGrant {
+            path: parent.join(name),
+            access: Access::Read,
+            scope: Scope::Literal,
+            from: from.to_owned(),
+            state_derived: false,
+        });
+        // A relative target is relative to the link's own directory.
+        current = parent.join(next);
+    }
+    Ok(grants)
 }
 
 /// The toolchain of profile `name`: one read-only root per entry, the link too where an entry names
@@ -338,6 +357,25 @@ mod tests {
                 .any(|g| g.path == named && g.access == Access::Read && g.scope == Scope::Literal)
         );
         assert!(grants.iter().all(|g| g.from == "workspace:w.roots[0]"));
+    }
+
+    /// Seatbelt checks a path against every link it passes, so each link in a chain is granted.
+    #[test]
+    fn a_root_named_through_a_chain_of_links_grants_every_link() {
+        let target = tempfile::TempDir::new().expect("target");
+        let links = tempfile::TempDir::new().expect("links");
+        let (first, second) = (links.path().join("first"), links.path().join("second"));
+        std::os::unix::fs::symlink(target.path(), &second).expect("symlink");
+        std::os::unix::fs::symlink(&second, &first).expect("symlink");
+        let grants = roots_of(&first);
+        let dir = links.path().canonicalize().expect("canonical");
+        let literal: Vec<_> = grants
+            .iter()
+            .filter(|g| g.scope == Scope::Literal)
+            .map(|g| g.path.clone())
+            .collect();
+        assert_eq!(literal, [dir.join("first"), dir.join("second")]);
+        assert_eq!(grants.len(), 3, "{grants:?}");
     }
 
     fn with_toolchain(toolchain: &[&Path]) -> Policy {

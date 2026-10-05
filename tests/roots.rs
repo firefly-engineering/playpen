@@ -351,3 +351,30 @@ fn a_writable_agent_binary_is_not_refused() {
     let output = fx.run(&[&agent]).output().expect("playpen");
     assert!(output.status.success(), "{output:?}");
 }
+
+#[test]
+fn a_root_named_through_a_chain_of_links_is_usable_from_inside() {
+    let fx = Fixture::new();
+    let target = TempDir::new().expect("target");
+    let file = target.path().join("notes");
+    std::fs::write(&file, "content").expect("seed");
+    let links = TempDir::new().expect("links");
+    let (first, second) = (links.path().join("first"), links.path().join("second"));
+    std::os::unix::fs::symlink(target.path(), &second).expect("symlink");
+    std::os::unix::fs::symlink(&second, &first).expect("symlink");
+    let policy = fx.policy_named(
+        "chained.json",
+        &json!({
+            "version": 1,
+            "workspaces": {
+                "code": {"roots": [{"path": fx.root(), "mode": "readwrite"}]},
+                "notes": {"roots": [{"path": first, "mode": "read"}]},
+            },
+            "profiles": {"p": {"workspaces": ["code", "notes"], "toolchain": []}},
+        }),
+    );
+    let through = first.join("notes");
+    let through = through.to_str().unwrap();
+    assert_eq!(probe_outside(&["read", through])["ok"], true);
+    assert_eq!(fx.probe_under(&policy, &["read", through])["ok"], true);
+}

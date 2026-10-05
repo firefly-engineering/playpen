@@ -444,8 +444,9 @@ mod tests {
         assert!(r.to_string().contains("workspace:w.roots[0]"));
     }
 
-    fn excluding(classes: Vec<crate::capability::Class>) -> CapabilitySet {
-        let dir = std::env::temp_dir();
+    /// A read-write grant on `dir` with `secrets` beneath it excluded for `classes`.
+    fn excluding(dir: &Path, classes: Vec<crate::capability::Class>) -> CapabilitySet {
+        let dir = dir.to_owned();
         CapabilitySet {
             paths: vec![PathGrant {
                 path: dir.clone(),
@@ -469,8 +470,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn an_exclusion_is_a_deny_rule_per_class() {
         use crate::capability::Class;
-        let set = compile(&excluding(Class::ALL.to_vec())).expect("compiles");
-        let secrets = std::env::temp_dir().join("secrets");
+        let dir = tempfile::TempDir::new().expect("dir");
+        let set = compile(&excluding(dir.path(), Class::ALL.to_vec())).expect("compiles");
+        let secrets = dir.path().join("secrets");
         let secrets = secrets.display();
         for rule in [
             format!("(deny file-read* (subpath \"{secrets}\"))"),
@@ -483,7 +485,7 @@ mod tests {
                 set.platform_rules()
             );
         }
-        let set = compile(&excluding(vec![Class::Write])).expect("compiles");
+        let set = compile(&excluding(dir.path(), vec![Class::Write])).expect("compiles");
         let denies: Vec<_> = set
             .platform_rules()
             .iter()
@@ -495,13 +497,19 @@ mod tests {
         );
     }
 
-    /// Landlock cannot subtract a subpath (#127), so an exclusion refuses rather than being
+    /// Landlock cannot subtract a subpath ([#127]), so an exclusion refuses rather than being
     /// granted silently.
+    ///
+    /// [#127]: https://github.com/firefly-engineering/playpen/issues/127
     #[test]
     #[cfg(target_os = "linux")]
     fn an_exclusion_refuses_on_linux() {
-        let refusal =
-            compile(&excluding(crate::capability::Class::ALL.to_vec())).expect_err("refused");
+        let dir = tempfile::TempDir::new().expect("dir");
+        let refusal = compile(&excluding(
+            dir.path(),
+            crate::capability::Class::ALL.to_vec(),
+        ))
+        .expect_err("refused");
         assert_eq!(refusal.code, Code::MechanismUnavailable);
         assert!(
             refusal
