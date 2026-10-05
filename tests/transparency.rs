@@ -258,6 +258,7 @@ fn catchable_signals_sent_to_playpen_reach_the_child_once() {
 /// Whether `pid` still exists. The agent is playpen's child and not this process's, so once
 /// playpen is gone there is no zombie of it to confuse the answer: the kernel reaps the orphan,
 /// and signal 0 then fails with `ESRCH`.
+#[cfg(target_os = "linux")]
 fn alive(pid: libc::pid_t) -> bool {
     // SAFETY: signal 0 performs the permission and existence check and delivers nothing.
     unsafe { libc::kill(pid, 0) == 0 }

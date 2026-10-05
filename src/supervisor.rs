@@ -94,10 +94,12 @@ fn is_terminal_generated(sig: c_int) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Origin {
     /// The kernel generated this instance: a terminal keypress, or a per-process condition such
-    /// as `alarm()` expiring.
+    /// as `alarm()` expiring. Linux only, like [`Origin::Sent`]: no other platform can say.
+    #[cfg(target_os = "linux")]
     Kernel,
     /// Something called `kill`. Whether it addressed playpen or the whole job is **not** readable:
     /// `siginfo_t` reports a signal's sender and never its target.
+    #[cfg(target_os = "linux")]
     Sent,
     /// This platform cannot say. Absent from the Linux build, which can always say, so that the
     /// asymmetry is structural rather than a variant nothing reaches.
@@ -123,7 +125,9 @@ fn child_already_has(sig: c_int, origin: Origin) -> bool {
         return false;
     }
     match origin {
+        #[cfg(target_os = "linux")]
         Origin::Kernel => true,
+        #[cfg(target_os = "linux")]
         Origin::Sent => false,
         // No path to the origin, blocked or handled, so fall back to the structural proxy.
         #[cfg(not(target_os = "linux"))]
@@ -427,6 +431,7 @@ mod tests {
     /// A signal the kernel generated for a tty-generated signal reached the child already; one
     /// someone sent did not, whoever they addressed it to.
     #[test]
+    #[cfg(target_os = "linux")]
     fn origin_decides_the_forward_within_the_terminal_generated_set() {
         assert!(child_already_has(libc::SIGINT, Origin::Kernel));
         // The case the old predicate dropped: a direct `kill -INT` to a foreground playpen.
@@ -439,6 +444,7 @@ mod tests {
     ///
     /// [ADR 0026]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0026-signal-origin-is-readable-on-linux-and-the-kill-target-is-readable-nowhere.md
     #[test]
+    #[cfg(target_os = "linux")]
     fn a_kernel_generated_per_process_signal_is_still_forwarded() {
         for sig in [libc::SIGALRM, libc::SIGXCPU, libc::SIGXFSZ] {
             assert!(
