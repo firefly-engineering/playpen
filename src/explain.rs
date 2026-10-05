@@ -120,7 +120,9 @@ fn resolve(args: &Args, host: &Host) -> Result<Resolved, Refusal> {
             "no state directory: neither XDG_STATE_HOME nor HOME is an absolute path",
         )
     })?;
-    let layout = Layout::unlaunched(&state.canonicalize().unwrap_or_else(|_| state.to_owned()));
+    let selected = &loaded.policy.profiles[&name];
+    let state = state.canonicalize().unwrap_or_else(|_| state.to_owned());
+    let layout = Layout::unlaunched(&state, &loaded.policy, selected);
     let caps = resolve::capabilities(&loaded.policy, &name, &layout)?;
     let executable = crate::integrity::executable(&host.executable)?;
     crate::integrity::check(&caps, &absolute(&path), &executable)?;

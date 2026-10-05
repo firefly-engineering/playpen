@@ -524,8 +524,12 @@ mod tests {
     fn the_capability_set_holds_the_toolchain() {
         let tool = tempfile::TempDir::new().expect("tool");
         let policy = with_toolchain(&[tool.path()]);
-        let caps =
-            capabilities(&policy, "p", &Layout::unlaunched(Path::new("/state"))).expect("resolves");
+        let caps = capabilities(
+            &policy,
+            "p",
+            &Layout::unlaunched(Path::new("/state"), &policy, &policy.profiles["p"]),
+        )
+        .expect("resolves");
         assert!(caps.paths.iter().any(|g| g.from == "floor"));
         assert!(
             caps.paths
@@ -560,8 +564,12 @@ mod tests {
                 {"path": root.path().join("hooks"), "classes": ["write"]},
             ]),
         );
-        let caps =
-            capabilities(&policy, "p", &Layout::unlaunched(Path::new("/state"))).expect("resolves");
+        let caps = capabilities(
+            &policy,
+            "p",
+            &Layout::unlaunched(Path::new("/state"), &policy, &policy.profiles["p"]),
+        )
+        .expect("resolves");
         let resolved = root.path().canonicalize().expect("canonical");
         assert_eq!(
             caps.exclusions,
@@ -587,8 +595,12 @@ mod tests {
             root.path(),
             serde_json::json!([{"path": root.path().join("gone")}]),
         );
-        let refusal = capabilities(&policy, "p", &Layout::unlaunched(Path::new("/state")))
-            .expect_err("refused");
+        let refusal = capabilities(
+            &policy,
+            "p",
+            &Layout::unlaunched(Path::new("/state"), &policy, &policy.profiles["p"]),
+        )
+        .expect_err("refused");
         assert_eq!(refusal.code, Code::ExclusionMissing);
         assert!(
             refusal
@@ -609,8 +621,12 @@ mod tests {
             ]}},
         });
         let policy = Policy::parse(&text.to_string(), Path::new("/p.json")).expect("parses");
-        let caps =
-            capabilities(&policy, "p", &Layout::unlaunched(Path::new("/state"))).expect("resolves");
+        let caps = capabilities(
+            &policy,
+            "p",
+            &Layout::unlaunched(Path::new("/state"), &policy, &policy.profiles["p"]),
+        )
+        .expect("resolves");
         assert_eq!(caps.exclusions.len(), 1, "{:?}", caps.exclusions);
         assert_eq!(caps.exclusions[0].from, "profile:p.toolchain[0].exclude[0]");
     }

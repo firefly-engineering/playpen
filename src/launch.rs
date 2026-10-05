@@ -280,7 +280,7 @@ fn run(
                 )
             })
         })
-        .map(|state| Layout::new(&state, record.id()))?;
+        .map(|state| Layout::new(&state, record.id(), &loaded.policy, selected))?;
     let caps = resolve::capabilities(&loaded.policy, profile, &layout)?;
     // Nothing that runs unconfined on the next launch is writable from inside this one.
     integrity::check(&caps, &policy_file, &integrity::executable(&executable)?)?;

@@ -166,7 +166,7 @@ impl From<Class> for crate::capability::Class {
 /// means something.
 ///
 /// [spec §5.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#54-provisioned-areas
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(tag = "lifetime", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Area {
     // A struct variant, not a unit one: serde lets a unit variant of an internally tagged enum
