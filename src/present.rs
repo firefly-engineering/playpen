@@ -219,7 +219,12 @@ impl Rendered {
                 ),
             )
         };
-        let staging = self.at.with_extension("playpen-staging");
+        // This process's own: concurrent runs of one profile share the directory, and a staging
+        // name they shared would be renamed into place by one under the other, whose rename then
+        // fails `ENOENT`.
+        let staging = self
+            .at
+            .with_extension(format!("{}.playpen-staging", std::process::id()));
         std::fs::write(&staging, &self.text).map_err(io)?;
         std::fs::rename(&staging, &self.at).map_err(|e| {
             let _ = std::fs::remove_file(&staging);
