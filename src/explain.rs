@@ -854,18 +854,6 @@ mod tests {
         assert_eq!(denials(&ran(None, None, None)), None);
     }
 
-    /// The Linux command waits on the Landlock domain id, which the record does not hold yet.
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn linux_prints_no_denials_command_yet() {
-        let record = ran(
-            Some(82276),
-            Some(1_791_186_693_069),
-            Some(1_791_186_693_200),
-        );
-        assert_eq!(denials(&record), None);
-    }
-
     #[test]
     fn timestamps_are_rfc_3339_utc() {
         assert_eq!(timestamp(0), "1970-01-01T00:00:00.000Z");

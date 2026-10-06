@@ -1408,9 +1408,20 @@ naming *which* precondition failed. That refusal is scoped to the flag, not to t
   - It passes **only on `_TRANSPORT=audit`**. A record arriving via `_TRANSPORT=kernel` came
     through the shared print rate limit, so that path is refused as
     `refusal.trace.channel-lossy`. No record at all is `refusal.trace.channel-silent`. Both
-    print the remedy `systemctl enable systemd-journald-audit.socket`.
-  - It **brackets the run**. It re-runs after the agent exits, and if it fails, the trace is
-    marked **unverified** rather than presented as complete.
+    print the remedy, in **both halves**: `systemctl enable systemd-journald-audit.socket`, and
+    kernel auditing switched on (`auditctl -e 1`, or `audit=1` at boot). A host can have either
+    half without the other — NixOS ships `journald.conf` with `Audit=keep` and defaults
+    `security.audit.enable` to `false`, so the socket is active and `audit_enabled` is still 0 —
+    and naming only the socket sends that operator to fix what is already right
+    ([#98](https://github.com/firefly-engineering/playpen/issues/98)).
+  - It **brackets the run**. It re-runs after the agent exits and **before the tail is stopped**,
+    and if it fails, the trace is marked **unverified** rather than presented as complete. The
+    order is load-bearing: stopping the tail first lost the denials of a child that exited
+    immediately after one, giving a trace file that was empty while the kernel had logged the
+    denial. The self-test's own round trip is the window the tail reads them in — a window and
+    not yet a barrier
+    ([#98](https://github.com/firefly-engineering/playpen/issues/98),
+    [#152](https://github.com/firefly-engineering/playpen/issues/152)).
   - The self-test's own record is identified by its Landlock domain id and unique path, filtered
     with a key=value tokenizer, never a pattern. The self-test is never cached.
 

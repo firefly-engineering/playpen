@@ -36,8 +36,14 @@ use crate::refusal::Refusal;
 /// [spec §14.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#145---trace-denials
 pub const LOGGING_ABI: libc::c_long = 7;
 
-/// What both channel refusals print, because both are fixed the same way.
-const REMEDY: &str = "the remedy is `systemctl enable systemd-journald-audit.socket`";
+/// What both channel refusals print, because both are fixed the same way — and **both halves** of
+/// it, because a host can have either without the other. NixOS ships `journald.conf` with
+/// `Audit=keep` and defaults `security.audit.enable` to `false`, so the socket is active and
+/// `audit_enabled` is still 0; naming only the socket there sends the operator to fix what is
+/// already right ([#98](https://github.com/firefly-engineering/playpen/issues/98)). Which half is
+/// missing is exactly what playpen cannot read, so the line names both and ranks neither.
+const REMEDY: &str = "the remedy has two halves: `systemctl enable systemd-journald-audit.socket`, \
+                      and kernel auditing switched on (`auditctl -e 1`, or `audit=1` at boot)";
 
 /// The self-test's budget. Measured in a VM on kernel 7.0 with Landlock ABI 8
 /// ([#34](https://github.com/firefly-engineering/playpen/issues/34)): a delivered record is
@@ -332,39 +338,60 @@ impl Tracing {
         }
     }
 
-    /// Stop the tail and bracket the run with a second self-test ([spec §14.5], teardown step
-    /// 18.4). Returns why the trace is **unverified**, where it is: a failure here never changes
-    /// the run's exit status, and a trace that cannot be vouched for is said to be so rather than
-    /// presented as complete.
+    /// Bracket the run with a second self-test, then stop the tail — in that order ([spec §14.5],
+    /// teardown step 18.4). Returns why the trace is **unverified**, where it is: a failure here
+    /// never changes the run's exit status, and a trace that cannot be vouched for is said to be
+    /// so rather than presented as complete.
     ///
     /// [spec §14.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#145---trace-denials
     pub fn stop(&mut self) -> Option<String> {
+        // The bracketing self-test runs **before** the tail stops, and the delay it spends
+        // provoking and polling is what the tail reads the run's last denials in. Stopping the
+        // tail first lost them outright for a child that exited immediately after one: the kernel
+        // logged the denial and the trace file was empty, which is the "nothing was denied" trace
+        // the whole flag exists to prevent ([#98]).
+        //
+        // This is a **window, not a barrier**. The self-test polls a `journalctl` of its own, so
+        // what it observes is the journal's state and not how far the tail has read, and
+        // `Following::stop` then kills the tail outright — so a record journald has written but
+        // the tail has not reached is still lost. Closing it takes a barrier the tail itself
+        // reports ([#152]); what this does is widen the window from nothing to the self-test's
+        // own round trip, which on the measured host is the whole of it.
+        //
+        // Never cached, and never skipped because the first one passed: what this one looks for
+        // is a channel that stopped working *during* the run.
+        //
+        // [#98]: https://github.com/firefly-engineering/playpen/issues/98
+        // [#152]: https://github.com/firefly-engineering/playpen/issues/152
+        let bracketing = (self.self_test)(&self.workspace);
+        let mut tail = None;
         if let Some(following) = self.following.take() {
             let drained = following.stop();
             self.domain = drained.domain;
-            if let Some(failure) = drained.failure {
-                return Some(self.unverified(failure));
-            }
+            tail = drained.failure;
         }
-        // Never cached, and never skipped because the first one passed: what this one looks for
-        // is a channel that stopped working *during* the run.
-        match (self.self_test)(&self.workspace) {
+        let channel = match bracketing {
             Channel::Delivers { .. } => None,
-            Channel::Lossy => Some(self.unverified(format!(
+            Channel::Lossy => Some(format!(
                 "the channel self-test now finds its own denial only on _TRANSPORT=kernel, so \
                  records may have been dropped during the run; {REMEDY}"
-            ))),
-            Channel::Silent => Some(self.unverified(format!(
+            )),
+            Channel::Silent => Some(format!(
                 "the channel self-test now finds no record of its own denial at all, so the \
                  journal stopped carrying them during the run; {REMEDY}"
-            ))),
+            )),
             // Teardown refuses nothing, so a self-test that could not be run leaves the trace
             // unverified for the same reason a failing one does: nothing vouched for it.
-            Channel::Unprovoked(why) => Some(self.unverified(format!(
+            Channel::Unprovoked(why) => Some(format!(
                 "the channel self-test could not be run after the agent exited, so the trace is \
                  unvouched for rather than complete: {why}"
-            ))),
-        }
+            )),
+        };
+        // Both, where both failed. The self-test has already been paid for by the time the tail
+        // is stopped, so dropping its verdict for the tail's would hide a channel that died
+        // during the run behind a tail that could not be read to the end.
+        let why: Vec<String> = [tail, channel].into_iter().flatten().collect();
+        (!why.is_empty()).then(|| self.unverified(why.join("; and ")))
     }
 
     /// The Landlock domain this run was confined by, once the tail has read its allocation. What
@@ -939,6 +966,7 @@ mod tests {
         );
     }
 
+    /// Both halves of it, for the reason [`REMEDY`] gives.
     #[test]
     fn a_silent_channel_and_a_lossy_one_both_print_the_remedy() {
         for (channel, code) in [
@@ -949,7 +977,8 @@ mod tests {
                 .expect_err("refuses");
             assert_eq!(refusal.code, code);
             assert!(
-                refusal.message().contains("systemd-journald-audit.socket"),
+                refusal.message().contains("systemd-journald-audit.socket")
+                    && refusal.message().contains("auditctl -e 1"),
                 "{refusal}"
             );
         }
@@ -1077,6 +1106,52 @@ mod tests {
         assert!(written.contains("id_ed25519"), "{written}");
         assert!(!written.contains("/other"), "{written}");
         assert!(!written.contains("/self-test"), "{written}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The bracketing self-test runs **while the tail is still reading**, for the reason
+    /// [`Tracing::stop`] gives.
+    #[test]
+    fn the_bracketing_self_test_runs_before_the_tail_stops() {
+        // A stand-in tail that ends on what the self-test sends it, the way the real one ends on
+        // the last record the journal hands over. So it reports a domain only if the self-test
+        // ran while it was still reading — and nothing at all if the tail was stopped first.
+        let (provoked, records) = std::sync::mpsc::channel::<()>();
+        let draining = std::thread::spawn(move || Drained {
+            domain: records
+                .recv_timeout(BUDGET)
+                .ok()
+                .map(|()| "195ba459b".to_string()),
+            failure: None,
+        });
+        // A `Sender` is `Send` and not `Sync`, and a [`SelfTest`] is both.
+        let provoked = std::sync::Mutex::new(provoked);
+        let dir = tempdir();
+        let mut tracing = Tracing {
+            file: dir.join("trace"),
+            workspace: dir.clone(),
+            self_test: std::sync::Arc::new(move |_: &Path| {
+                let _ = provoked.lock().expect("the sender").send(());
+                delivers()
+            }),
+            self_test_domain: "5e1f".to_string(),
+            following: Some(Following {
+                // Nothing of this one is read; `stop` only has to reap it.
+                journal: std::process::Command::new("cat")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .spawn()
+                    .expect("a stand-in for the journal tail"),
+                draining,
+            }),
+            domain: None,
+        };
+        assert_eq!(tracing.stop(), None);
+        assert_eq!(
+            tracing.domain(),
+            Some("195ba459b"),
+            "the self-test ran after the tail had already stopped"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
