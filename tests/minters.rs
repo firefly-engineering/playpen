@@ -91,6 +91,8 @@ fn a_profile_route_is_minted_before_the_launch_and_recorded_without_its_token() 
             "path_prefix": "/",
             "minter": "anthropic",
             "expires_at": "2027-01-01T00:00:00Z",
+            // Nothing renewed it: the run was over before its own life was.
+            "renewals": [],
             "from": "profile:p.credentials[0]",
         }])
     );
@@ -644,6 +646,13 @@ fn a_short_lived_credential_is_re_minted_and_each_new_expiry_is_recorded() {
     assert_ne!(
         credentials[0]["expires_at"], answered[0],
         "the record kept the expiry the launch minted"
+    );
+    // **Each new** expiry, not only the latest: "renewed twice and then stopped" and "never
+    // renewed" are different answers to why a push failed.
+    assert_eq!(
+        credentials[0]["renewals"],
+        json!(answered[1..]),
+        "the record holds only the expiry in force"
     );
     // A renewal that worked is not a lapse, and renewal is never a refusal.
     assert_eq!(record["lapsed"], json!([]));

@@ -531,18 +531,52 @@ pub struct Provisioned {
     claims: Vec<File>,
 }
 
-impl Drop for Provisioned {
-    fn drop(&mut self) {
-        // No teardown failure changes the exit status ([spec §4.2]).
-        //
-        // [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
-        for path in &self.removed {
-            let _ = std::fs::remove_dir_all(path);
+impl Provisioned {
+    /// Remove the run's own — the ephemeral areas and the run scratch — and say what could not be
+    /// removed ([spec §4.2] step 18).
+    ///
+    /// Sentences rather than refusals, and a return value rather than silence: **no teardown
+    /// failure changes the exit status**, and *teardown failures go to the run record*. A scratch
+    /// that could not be removed is a directory the next run of this profile will find, so a
+    /// reader asking why disk is filling has to be able to see it.
+    ///
+    /// Called by teardown while the record is still open, so the record holds what it says. [`Drop`]
+    /// calls it too, which makes it the backstop for every path that returns without reaching
+    /// teardown — a refusal between provisioning and the fork — where there is no record to write
+    /// to anyway.
+    ///
+    /// [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
+    pub fn remove(&mut self) -> Vec<String> {
+        let mut failures = Vec::new();
+        // Drained, so a second call — teardown's, then `Drop`'s — removes nothing twice and
+        // reports nothing twice.
+        for path in std::mem::take(&mut self.removed) {
+            if let Err(e) = std::fs::remove_dir_all(&path) {
+                // An absent directory is removed, not a failure: the only way one is missing here
+                // is that something already removed it, which is the outcome asked for.
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    failures.push(format!("cannot remove {}: {e}", path.display()));
+                }
+            }
         }
         // Cleared while still held, so a lock file never names a run that has ended in good order.
-        for claim in &self.claims {
-            let _ = claim.set_len(0);
+        for claim in std::mem::take(&mut self.claims) {
+            if let Err(e) = claim.set_len(0) {
+                failures.push(format!("cannot release an area's lock file: {e}"));
+            }
         }
+        failures
+    }
+}
+
+impl Drop for Provisioned {
+    fn drop(&mut self) {
+        // Whatever teardown did not reach. Dropped rather than reported: there is no record to
+        // write to on the paths that get here, and no teardown failure changes the exit status
+        // ([spec §4.2]).
+        //
+        // [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
+        let _ = self.remove();
     }
 }
 
@@ -848,6 +882,46 @@ mod tests {
                 Err(refusal) => panic!("released with its run: {refusal}"),
             }
         }
+    }
+
+    /// Removing is **reported, not silent** ([spec §4.2] step 18): teardown writes what it could
+    /// not remove to the run record, so a scratch the next run of the profile will find is visible
+    /// to whoever asks why disk is filling.
+    ///
+    /// [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
+    #[test]
+    fn what_teardown_cannot_remove_is_a_sentence_and_not_silence() {
+        let state = tempfile::TempDir::new().expect("state");
+        let policy = persistent(None);
+        let layout = layout_of(state.path(), &policy);
+        let mut provisioned = layout.provision().expect("provisioned");
+        let scratch = layout.scratch();
+        assert!(scratch.exists());
+        // Nothing wrong: the run's own goes, and there is nothing to report.
+        assert_eq!(provisioned.remove(), Vec::<String>::new());
+        assert!(!scratch.exists(), "the run scratch outlived its run");
+        // Draining is what makes it idempotent: teardown calls it, then `Drop` does, and the
+        // second call must neither remove something else's nor report the same failure twice.
+        assert_eq!(provisioned.remove(), Vec::<String>::new());
+
+        // A scratch that cannot be removed names itself. The directory is made unremovable by
+        // taking write on its parent, which is what the kernel checks for an unlink.
+        let layout = layout_of(state.path(), &policy);
+        let mut provisioned = layout.provision().expect("provisioned");
+        let scratch = layout.scratch();
+        let parent = scratch.parent().expect("a parent").to_owned();
+        let mode = std::fs::metadata(&parent).expect("metadata").permissions();
+        let mut read_only = mode.clone();
+        read_only.set_mode(0o500);
+        std::fs::set_permissions(&parent, read_only).expect("made read-only");
+        let failures = provisioned.remove();
+        // Restored first, so the fixture can clean up whatever the assertions do.
+        std::fs::set_permissions(&parent, mode).expect("restored");
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(
+            failures[0].contains(&scratch.display().to_string()),
+            "{failures:?}"
+        );
     }
 
     /// A lock file never names a run that ended in good order.

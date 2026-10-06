@@ -590,7 +590,7 @@ fn run(
     probe().require(mechanism::REQUIRED)?;
     floor_self_test()?;
     // Step 9. Removed again when this returns: at teardown, or on any refusal from here on.
-    let _provisioned = layout.provision()?;
+    let mut provisioned = layout.provision()?;
     // Step 10: every credential this profile's routes resolve, minted unconfined on the host
     // before anything is confined ([spec §7.2]). A failure refuses the whole run: launching
     // without the credential would produce a run that works for ten minutes and then fails at the
@@ -726,6 +726,12 @@ fn run(
     minter::revoke_all(&loaded.policy, &credentials, &mut record.borrow_mut());
     if let Some(mut serving) = serving.into_inner() {
         serving.stop();
+    }
+    // Last: the ephemeral areas and the run scratch. Removed here rather than left to the drop at
+    // the end of this function, so what could not be removed reaches the record while it is still
+    // open — the drop stays as the backstop for every path that returns before teardown.
+    for failure in provisioned.remove() {
+        record.borrow_mut().torn_down(failure);
     }
     status
 }

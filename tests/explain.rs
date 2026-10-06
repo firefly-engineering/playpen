@@ -447,7 +447,9 @@ fn explain_states_the_resolved_route_table_with_provenance_and_no_token() {
     assert_eq!(routes[0]["host"], "api.github.com");
     assert_eq!(routes[0]["path_prefix"], "/repos/firefly-engineering/");
     assert_eq!(routes[0]["delivery_env"], "GH_TOKEN");
-    assert_eq!(routes[0]["minter"], "gh-app");
+    // §14.2 asks for the route table with fragment provenance, not for the minter: which keystore
+    // the operator reaches is the run record's business, and it holds it.
+    assert_eq!(routes[0]["minter"], Value::Null);
     assert_eq!(routes[0]["from"], "workspace:w.credentials[0]");
     let set = &routes[0]["endpoints"][0];
     assert_eq!(set["name"], "github-read-only");
@@ -466,7 +468,7 @@ fn explain_states_the_resolved_route_table_with_provenance_and_no_token() {
     let routes = human.split_once("\nroutes\n").expect("a routes section").1;
     assert!(
         routes.contains(
-            "  api.github.com/repos/firefly-engineering/  deliver GH_TOKEN  mint gh-app  \
+            "  api.github.com/repos/firefly-engineering/  deliver GH_TOKEN  \
              (from workspace:w.credentials[0])\n"
         ),
         "{routes}"

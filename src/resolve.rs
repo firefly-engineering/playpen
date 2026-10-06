@@ -307,7 +307,6 @@ pub fn routes(policy: &Policy, name: &str, selected: &Profile) -> Vec<ResolvedRo
         .map(|(from, route, _)| ResolvedRoute {
             host: route.host.clone(),
             path_prefix: route.path_prefix.clone(),
-            minter: route.minter.clone(),
             delivery_env: route.delivery.env.clone(),
             endpoints: route
                 .endpoints
@@ -355,9 +354,6 @@ pub const FROM_ENDPOINTS: &str = "fragment:endpoints.";
 pub struct ResolvedRoute {
     pub host: String,
     pub path_prefix: String,
-    /// The declared minter that makes this route's credential. Outward only: the manifest omits
-    /// it, because which keystore the operator reaches is not the agent's business.
-    pub minter: String,
     /// The variable the phantom is delivered in — never the phantom's value, which is this run's
     /// and is made after `explain` has already answered.
     pub delivery_env: String,

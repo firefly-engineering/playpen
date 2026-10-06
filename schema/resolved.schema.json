@@ -279,10 +279,6 @@
         "path_prefix": {
           "type": "string"
         },
-        "minter": {
-          "description": "The declared minter that makes this route's credential. Outward only: the manifest omits\nit, because which keystore the operator reaches is not the agent's business.",
-          "type": "string"
-        },
         "delivery_env": {
           "description": "The variable the phantom is delivered in — never the phantom's value, which is this run's\nand is made after `explain` has already answered.",
           "type": "string"
@@ -302,7 +298,6 @@
       "required": [
         "host",
         "path_prefix",
-        "minter",
         "delivery_env",
         "endpoints",
         "from"

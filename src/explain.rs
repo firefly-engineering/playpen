@@ -317,8 +317,8 @@ fn render_routes(routes: &[resolve::ResolvedRoute], out: &mut impl Write) -> io:
     }
     for route in routes {
         let line = format!(
-            "{}{}  deliver {}  mint {}",
-            route.host, route.path_prefix, route.delivery_env, route.minter
+            "{}{}  deliver {}",
+            route.host, route.path_prefix, route.delivery_env
         );
         writeln!(out, "  {}  (from {})", OneLine(&line), OneLine(&route.from))?;
         if route.endpoints.is_empty() {
@@ -457,6 +457,14 @@ fn render_run(replay: &Replay, out: &mut impl Write) -> io::Result<()> {
     // [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
     for failure in &record.teardown {
         writeln!(out, "teardown  {}", OneLine(failure))?;
+    }
+    // And every credential that lapsed mid-run ([spec §7.2]). A separate line from `teardown`,
+    // because a credential that stopped authenticating at minute ten is not a cleanup that
+    // stumbled at the end, and the two send a reader to different places.
+    //
+    // [spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters
+    for lapsed in &record.lapsed {
+        writeln!(out, "lapsed    {}", OneLine(lapsed))?;
     }
     // A record written before selection was traced holds none.
     if let Some(trace) = &record.selection {

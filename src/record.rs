@@ -273,7 +273,17 @@ pub struct RecordedCredential {
     pub host: String,
     pub path_prefix: String,
     pub minter: String,
+    /// The expiry **in force**: the launch's own, or the last renewal's where one landed.
     pub expires_at: String,
+    /// Every expiry a renewal gave this credential after the launch's, in order ([spec §7.2]).
+    /// The record holds each new one rather than only the latest, because "it was renewed twice
+    /// and then stopped" and "it was never renewed" are different answers to why a push failed.
+    ///
+    /// Additive, so a record written before renewal existed still reads.
+    ///
+    /// [spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters
+    #[serde(default)]
+    pub renewals: Vec<String>,
     /// Where the route was written, the bridge back to the policy.
     pub from: String,
 }
