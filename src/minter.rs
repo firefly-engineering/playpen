@@ -1104,16 +1104,65 @@ mod tests {
             .trim()
             .parse()
             .expect("a pid");
-        // Reaped by whoever inherited it, which takes a moment after the kill.
+        // Gone, or a zombie awaiting a reaper, either of which takes a moment after the kill.
         let deadline = Instant::now() + Duration::from_secs(5);
-        // SAFETY: signal 0 delivers nothing; it only asks whether `pid` exists.
-        while unsafe { libc::kill(pid, 0) } == 0 {
+        while running(pid) {
             assert!(
                 Instant::now() < deadline,
                 "the minter's descendant {pid} outlived it"
             );
             std::thread::sleep(POLL);
         }
+    }
+
+    /// Whether `pid` is still *running*. A process that has been killed and not yet reaped is a
+    /// zombie: `kill(pid, 0)` still succeeds on it, but the kill has landed and it holds nothing.
+    /// Whoever inherits an orphan normally reaps it at once; a container whose PID 1 is not an
+    /// init never does, and there the zombie is as dead as the test can ask for.
+    fn running(pid: libc::pid_t) -> bool {
+        // SAFETY: signal 0 delivers nothing; it only asks whether `pid` exists.
+        let exists = unsafe { libc::kill(pid, 0) } == 0;
+        exists && !zombie(pid)
+    }
+
+    /// Linux keeps a killed process in state `Z` until someone reaps it, and `/proc/<pid>/stat` is
+    /// the only place that state is readable — `kill(pid, 0)` cannot tell a zombie from a running
+    /// process. A container whose PID 1 is not an init reaps nothing, so there the zombie stays.
+    #[cfg(target_os = "linux")]
+    fn zombie(pid: libc::pid_t) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| state_of(&stat))
+            // No readable `stat` is a pid that went between the two calls: gone, not running.
+            .is_none_or(|state| state == 'Z')
+    }
+
+    /// macOS reparents orphans to launchd, which reaps them, and has no `/proc` to consult.
+    #[cfg(not(target_os = "linux"))]
+    fn zombie(_: libc::pid_t) -> bool {
+        false
+    }
+
+    /// The process state out of a `/proc/<pid>/stat` line. The second field is the process's
+    /// `comm` in parentheses, and `comm` may itself hold spaces and parentheses, so the state is
+    /// the first field after the **last** `)` and never the third whitespace-separated token.
+    #[cfg(target_os = "linux")]
+    fn state_of(stat: &str) -> Option<char> {
+        stat.rsplit_once(')')?
+            .1
+            .split_whitespace()
+            .next()?
+            .chars()
+            .next()
+    }
+
+    /// The parse, against a `comm` built to break the naive one — no such process need exist.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_process_state_is_read_after_the_last_paren() {
+        assert_eq!(state_of("7 (sleep) S 1 7 7 0 -1 4194560"), Some('S'));
+        assert_eq!(state_of("42 (we (ird) name) Z 1 42 42"), Some('Z'));
+        assert_eq!(state_of("truncated before any paren"), None);
     }
 
     #[test]
