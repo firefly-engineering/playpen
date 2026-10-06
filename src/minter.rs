@@ -23,6 +23,7 @@
 
 use std::fmt;
 use std::io::{Read, Write};
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -170,10 +171,15 @@ pub fn mint(name: &str, minter: &Minter, request: &Request) -> Result<Minted, Re
             "declares an empty command, so there is nothing to run".into(),
         )
     })?;
+    // Its own process group, so a kill reaches everything it started and not just the command
+    // itself: a descendant left running holds the minter's stderr, which is playpen's, and whoever
+    // reads playpen's output waits on it. A shell does not always `exec` its last command — macOS's
+    // forks it — so this is the common case, not an exotic one.
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .process_group(0)
         .spawn()
         .map_err(|e| refusal(Code::MinterFailed, format!("cannot be run: {e}")))?;
     // One small write, then end of input: the request is far below a pipe's buffer, so this cannot
@@ -184,8 +190,7 @@ pub fn mint(name: &str, minter: &Minter, request: &Request) -> Result<Minted, Re
         .ok_or_else(|| std::io::Error::other("no stdin"))
         .and_then(|mut stdin| stdin.write_all(request.body().as_bytes()));
     if let Err(e) = written {
-        let _ = child.kill();
-        let _ = child.wait();
+        kill(&mut child);
         return Err(refusal(
             Code::MinterFailed,
             format!("cannot be given its request: {e}"),
@@ -196,8 +201,7 @@ pub fn mint(name: &str, minter: &Minter, request: &Request) -> Result<Minted, Re
         Some(status) => status,
         None => {
             // Killed, so a hung minter never outlives the launch it would have hung.
-            let _ = child.kill();
-            let _ = child.wait();
+            kill(&mut child);
             return Err(refusal(
                 Code::MinterTimeout,
                 format!("did not answer within {}s", timeout.as_secs()),
@@ -239,6 +243,17 @@ pub fn mint(name: &str, minter: &Minter, request: &Request) -> Result<Minted, Re
         ));
     }
     Ok(Minted { token, expires_at })
+}
+
+/// Kill `child`'s process group, which is everything the minter started, and reap the minter. A
+/// kill that fails is dropped: the refusal it accompanies is already the outcome.
+fn kill(child: &mut Child) {
+    // `process_group(0)` made the minter its group's leader, so the group's id is its pid.
+    let group = libc::pid_t::try_from(child.id()).expect("a pid fits pid_t");
+    // SAFETY: a plain syscall; the group is the minter's own, and the minter is not yet reaped,
+    // so its pid, and with it the group id, cannot have been reused.
+    unsafe { libc::killpg(group, libc::SIGKILL) };
+    let _ = child.wait();
 }
 
 /// Wait for `child` for at most `timeout`, or `None` if it is still running when that runs out.
@@ -588,6 +603,43 @@ mod tests {
             started.elapsed() < Duration::from_secs(30),
             "waited too long"
         );
+    }
+
+    /// Killed means the minter and everything it started: a descendant left running holds
+    /// whatever playpen handed the minter, its stderr among them, so whoever reads playpen's
+    /// output would wait on it — the hang the timeout exists to prevent.
+    #[test]
+    fn a_hanging_minter_is_killed_with_its_descendants() {
+        let dir = tempfile::tempdir().expect("a dir");
+        let pid_file = dir.path().join("descendant");
+        let refusal = mint(
+            "slow",
+            &minter(
+                &format!(
+                    "cat >/dev/null; sleep 60 & echo $! > {}; wait",
+                    pid_file.display()
+                ),
+                Some(1),
+            ),
+            &request(),
+        )
+        .expect_err("refused");
+        assert_eq!(refusal.code, Code::MinterTimeout);
+        let pid: libc::pid_t = std::fs::read_to_string(&pid_file)
+            .expect("the descendant's pid")
+            .trim()
+            .parse()
+            .expect("a pid");
+        // Reaped by whoever inherited it, which takes a moment after the kill.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        // SAFETY: signal 0 delivers nothing; it only asks whether `pid` exists.
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the minter's descendant {pid} outlived it"
+            );
+            std::thread::sleep(POLL);
+        }
     }
 
     #[test]
