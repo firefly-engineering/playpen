@@ -27,7 +27,6 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -426,13 +425,13 @@ impl Bound {
     pub fn serve(self, broker: Arc<Broker>, child: libc::pid_t) -> Serving {
         let stopping = Arc::new(AtomicBool::new(false));
         let accepting = Arc::clone(&stopping);
-        // A second descriptor on the same socket, kept here so teardown can shut the socket down
-        // from another thread and wake the accept loop out of `accept`.
+        // A second descriptor on the same socket, kept here so the socket stays listening at
+        // `addr` until teardown has woken the accept loop by connecting to it.
         //
-        // A *copy*, not the loop's own descriptor number: a number is only a name, and the moment
-        // the loop returns and drops its descriptor the kernel is free to hand that number to the
-        // next socket anyone opens. Shutting one down by number after the fact would reach into
-        // whatever had since taken it.
+        // Held, not just the address: the moment the loop returns and drops its descriptor the
+        // kernel is free to hand the port to the next socket anyone binds, and a wake-up connect
+        // after the fact would reach into whatever had since taken it.
+        let addr = self.addr;
         let (listener, served) = match self.listener.try_clone() {
             Ok(held) => {
                 let served = std::thread::Builder::new()
@@ -449,6 +448,7 @@ impl Bound {
         };
         Serving {
             stopping,
+            addr,
             listener,
             served,
         }
@@ -458,8 +458,10 @@ impl Bound {
 /// The proxy, for as long as the run lasts.
 pub struct Serving {
     stopping: Arc<AtomicBool>,
+    /// Where the listening socket is, which stopping connects to.
+    addr: SocketAddr,
     /// A descriptor on the listening socket, held for this value's whole life so that stopping
-    /// names a socket that still exists.
+    /// connects to a socket that still exists.
     listener: Option<TcpListener>,
     /// `None` where the thread could not be spawned, which has already torn the run down.
     served: Option<std::thread::JoinHandle<()>>,
@@ -472,12 +474,13 @@ impl Serving {
     /// [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
     pub fn stop(&mut self) {
         self.stopping.store(true, Ordering::SeqCst);
-        // Wakes the accept loop, which then sees the flag and returns. No teardown failure changes
-        // the exit status, so a shutdown that fails is dropped.
-        if let Some(listener) = &self.listener {
-            // SAFETY: the descriptor belongs to a `TcpListener` this value owns, so it is open for
-            // the duration of the call.
-            unsafe { libc::shutdown(listener.as_raw_fd(), libc::SHUT_RDWR) };
+        // Wakes the accept loop with a connection of its own, which it accepts, sees the flag, and
+        // returns. Not `shutdown` on the listener: Linux wakes a blocked `accept` for that, but
+        // Darwin refuses it with `ENOTCONN` and leaves `accept` blocked. Where the loop has already
+        // returned the connection waits in the backlog of the socket held here, unread. No teardown
+        // failure changes the exit status, so a connect that fails is dropped.
+        if self.listener.is_some() {
+            let _ = TcpStream::connect(self.addr);
         }
         if let Some(served) = self.served.take() {
             let _ = served.join();
@@ -523,7 +526,7 @@ fn accept_loop(
                     });
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            // Shut down by teardown, or broken. Either way, stop; only the second tears down.
+            // Broken. Stop, and tear the run down unless teardown was already stopping the proxy.
             Err(_) => {
                 if !stopping.load(Ordering::SeqCst) {
                     tear_down(child);
@@ -1477,18 +1480,13 @@ mod tests {
     fn a_proxy_that_stops_serving_tears_the_run_down() {
         let mut child = sleeper();
         let pid = child.id() as libc::pid_t;
-        // A listener broken under the accept loop, with nobody having asked it to stop: exactly
-        // what "the proxy stopped serving" looks like from inside the loop.
+        // A listener whose `accept` fails, with nobody having asked it to stop: exactly what "the
+        // proxy stopped serving" looks like from inside the loop. Non-blocking with nothing
+        // pending fails with `WouldBlock` on every OS, where `shutdown` only breaks `accept` on
+        // Linux.
         let listener = TcpListener::bind((INTERFACE, 0)).expect("bound");
-        let fd = listener.as_raw_fd();
-        let broken = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            // SAFETY: `fd` is the listener's, which outlives this call — the accept loop below
-            // owns it until it returns, and this thread is joined before that.
-            unsafe { libc::shutdown(fd, libc::SHUT_RDWR) };
-        });
+        listener.set_nonblocking(true).expect("non-blocking");
         accept_loop(listener, &tunnelling(), &AtomicBool::new(false), pid);
-        broken.join().expect("the breaker");
         let status = child.wait().expect("reaped");
         assert_eq!(
             std::os::unix::process::ExitStatusExt::signal(&status),
