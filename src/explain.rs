@@ -171,7 +171,15 @@ fn resolve(args: &Args, host: &Host) -> Result<Resolved, Refusal> {
     // the kind table's entries show only where a shim named one.
     //
     // [spec §11.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#112-kind
-    let env = resolve::environment(&loaded.policy, &name, selected, &host.env, &layout, kind);
+    let env = resolve::environment(
+        &loaded.policy,
+        &name,
+        selected,
+        &host.env,
+        &layout,
+        kind,
+        None,
+    );
     // The injected argv, with provenance, shown outward only: it is never projected inward, and
     // the agent already holds its own argv ([spec §9.3]).
     //

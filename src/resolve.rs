@@ -181,6 +181,7 @@ pub fn environment(
     host: &[(OsString, OsString)],
     layout: &Layout,
     kind: Option<&Kind>,
+    broker: Option<&crate::proxy::Set>,
 ) -> Vec<Var> {
     let mut written = vec![
         Var {
@@ -220,6 +221,17 @@ pub fn environment(
                 from: kind.from(),
             });
         }
+    }
+    // The proxy's entries exist iff a credential route resolved, which is iff a proxy does: with
+    // no route there is no proxy and no proxy variable ([spec §6.2]).
+    //
+    // [spec §6.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#62-the-broker
+    if let Some(broker) = broker {
+        written.extend(broker.entries().into_iter().map(|(name, value)| Var {
+            name: name.into(),
+            value: Value::Written(value.into()),
+            from: crate::proxy::FROM.into(),
+        }));
     }
     environment::construct(policy, name, selected, host, written, |reference| {
         layout.area(reference)

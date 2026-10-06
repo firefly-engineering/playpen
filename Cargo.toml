@@ -25,6 +25,22 @@ serde_json = "1"
 # A minter's stdout is a secret channel: what comes off it is held in `Zeroizing` from the moment
 # it is read (spec §7.2).
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
+# The broker's own stack ([spec §6.2]). The proxy is the supervisor's, in-process, one thread per
+# connection: no async runtime, because nothing here needs to hold ten thousand sockets.
+#
+# `rustls` both terminates TLS for a routed host and speaks it upstream, and `rcgen` mints the
+# ephemeral session CA and its leaves. Both are built on `aws-lc-rs`, so one crypto provider
+# serves the whole proxy rather than two that could disagree.
+rustls = { version = "0.23", default-features = false, features = ["std", "aws-lc-rs", "tls12"] }
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
+# Upstream verification is the host's own trust store: playpen intercepts the agent's TLS and must
+# not weaken its own.
+rustls-native-certs = "0.8"
+# A real incremental HTTP/1.1 parser. The proxy reads a request head to find the header the phantom
+# came in; a pattern over bytes would be a parser with corner cases instead of a parser.
+httparse = "1"
+# The session phantom is random bytes and nothing more, so the smallest thing that gives them.
+getrandom = "0.3"
 
 # The probe's Mach lookups, and the bootstrap codes that tell a denial from an unknown service.
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -19,6 +19,7 @@ pub mod minter;
 pub mod policy;
 pub mod present;
 pub mod provision;
+pub mod proxy;
 pub mod record;
 pub mod refusal;
 pub mod resolve;

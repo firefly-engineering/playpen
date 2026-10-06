@@ -28,6 +28,7 @@ use crate::minter;
 use crate::policy::{Policy, SearchPath, coherence, known};
 use crate::present;
 use crate::provision::Layout;
+use crate::proxy;
 use crate::record::{self, RunId, RunRecord};
 use crate::refusal::{EXIT_REFUSED, Refusal};
 use crate::resolve;
@@ -603,6 +604,18 @@ fn run(
     // [spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters
     let credentials = minter::resolve(&loaded.policy, profile, selected)?;
     record.credentials(credentials.iter().map(minter::Minting::recorded).collect());
+    // Step 11: the proxy exists **iff at least one credential route resolves** ([spec §6.2]). It
+    // binds here, before the fork, so the port the child's environment names is one that already
+    // exists; it starts serving once there is a child to tear down if it dies.
+    //
+    // [spec §6.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#62-the-broker
+    let bound = match credentials.is_empty() {
+        true => None,
+        false => Some(proxy::bind()?),
+    };
+    let broker = bound
+        .as_ref()
+        .map(|bound| proxy::Set { addr: bound.addr() });
     // Step 12: the capability set compiles on this mechanism.
     backend::check(&caps)?;
     // Step 13: the manifest, written on every run even when nothing is provisioned
@@ -630,21 +643,46 @@ fn run(
         rendered.write()?;
     }
     // Step 14.
-    let env = resolve::environment(&loaded.policy, profile, selected, env, &layout, Some(kind));
+    let env = resolve::environment(
+        &loaded.policy,
+        profile,
+        selected,
+        env,
+        &layout,
+        Some(kind),
+        broker.as_ref(),
+    );
     record.launch(&caps, backend::denial_tag(record.id()))?;
     let run = record.id().clone();
     // Both callbacks write the record, and only one of them ever fires, but the borrow checker
     // cannot see that from two closures: a cell is cheaper than a seam for it.
     let record = std::cell::RefCell::new(record);
-    child::run_confined(
+    // The proxy serves from the moment the child exists, which is also the moment there is
+    // something to tear down if it stops ([spec §6.2]). Held here, so teardown's own order holds:
+    // the proxy stops before the scratch and the ephemeral areas go with `_provisioned`.
+    //
+    // [spec §6.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#62-the-broker
+    let serving = std::cell::RefCell::new(None);
+    let status = child::run_confined(
         &caps,
         argv,
         &env,
         &run,
         || Ok(()),
-        |pid| record.borrow_mut().spawned(pid),
+        |pid| {
+            record.borrow_mut().spawned(pid);
+            if let Some(bound) = bound {
+                *serving.borrow_mut() = Some(bound.serve(pid));
+            }
+        },
         |fault| record.borrow_mut().fault(fault),
-    )
+    );
+    // Step 18, in order: the revokers run while the proxy is still up (#92), then the proxy stops,
+    // then the scratch and the ephemeral areas go.
+    if let Some(mut serving) = serving.into_inner() {
+        serving.stop();
+    }
+    status
 }
 
 /// The child starts in the caller's CWD, which must lie inside a granted root ([spec §11.5]).
