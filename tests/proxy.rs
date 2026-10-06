@@ -126,8 +126,15 @@ impl Live {
 }
 
 impl Drop for Live {
+    /// Ended by `SIGTERM`, which playpen forwards, not `SIGKILL`, which it cannot: macOS has no
+    /// parent-death signal (named asymmetry #6), so a killed playpen leaves its agent running there.
+    /// The scripts `exec` their wait for the same reason — the forwarded signal reaches the shell
+    /// alone, and a shell that forks its last command would leave that behind.
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        let pid = libc::pid_t::try_from(self.child.id()).expect("a pid fits pid_t");
+        // SAFETY: a plain syscall to a child of this process that has not been reaped yet, so the
+        // pid is still its.
+        unsafe { libc::kill(pid, libc::SIGTERM) };
         let _ = self.child.wait();
     }
 }
@@ -158,7 +165,7 @@ fn a_non_routed_host_gets_an_opaque_tunnel() {
         }]),
     );
     // The child prints where it was pointed, then waits, so the proxy is up while this runs.
-    let live = Live::start(&fx, &policy, r#"echo "$HTTPS_PROXY"; sleep 30"#);
+    let live = Live::start(&fx, &policy, r#"echo "$HTTPS_PROXY"; exec sleep 30"#);
     let proxy = live
         .line
         .strip_prefix("http://")
@@ -201,7 +208,7 @@ fn the_proxy_stops_with_the_run() {
         }]),
     );
     let proxy = {
-        let live = Live::start(&fx, &policy, r#"echo "$HTTPS_PROXY"; sleep 30"#);
+        let live = Live::start(&fx, &policy, r#"echo "$HTTPS_PROXY"; exec sleep 30"#);
         let proxy = live
             .line
             .strip_prefix("http://")
