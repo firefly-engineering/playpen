@@ -1358,7 +1358,7 @@ dependencies = [
 [[package]]
 name = "nono"
 version = "0.79.0"
-source = "git+https://github.com/firefly-engineering/nono?rev=20aba96035506472328362dadcb33d0b8b8c7235#20aba96035506472328362dadcb33d0b8b8c7235"
+source = "git+https://github.com/firefly-engineering/nono?rev=73b267f78451dc5bdb2bcbb6a8a78a31cbeb976e#73b267f78451dc5bdb2bcbb6a8a78a31cbeb976e"
 dependencies = [
  "der 0.8.2",
  "getrandom 0.4.3",
