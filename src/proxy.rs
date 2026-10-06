@@ -368,9 +368,9 @@ impl Broker {
         self.routes
             .iter()
             .filter(|route| route.host == host && path.starts_with(&route.path_prefix))
-            // The longest prefix among those that match. Two routes on one host where neither
-            // prefix strictly extends the other are refused before the run ever starts (#89), so
-            // among what is left there is exactly one longest.
+            // The longest prefix among those that match. The coherence tier has already refused a
+            // profile with two routes on one host whose prefixes are not ordered by strict
+            // extension, so among what is left there is exactly one longest and no tie to break.
             .max_by_key(|route| route.path_prefix.len())
     }
 }
@@ -1091,6 +1091,77 @@ mod tests {
         assert!(!rewritten.contains("the-real-secret"), "{rewritten}");
         assert!(
             rewritten.contains("Authorization: Bearer \r\n"),
+            "{rewritten}"
+        );
+    }
+
+    /// A request is authenticated with the route whose prefix matches it, and where two prefixes on
+    /// one host both match, with the longer. The coherence tier has refused every pair that is not
+    /// ordered by strict extension, so "the longer" is never a tie.
+    #[test]
+    fn the_route_whose_prefix_matches_is_the_one_that_authenticates() {
+        let broker = brokering(vec![
+            Route {
+                host: "localhost".into(),
+                path_prefix: "/".into(),
+                secret: Zeroizing::new("the-coarse-secret".into()),
+            },
+            Route {
+                host: "localhost".into(),
+                path_prefix: "/repos/op/".into(),
+                secret: Zeroizing::new("the-workspace-secret".into()),
+            },
+        ]);
+        let phantom = broker.phantom.as_str().to_owned();
+        let authenticated = |path: &str| {
+            let head = format!(
+                "GET {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {phantom}\r\n\r\n"
+            );
+            String::from_utf8(
+                rewrite(head.as_bytes(), "localhost", &broker)
+                    .expect("rewritten")
+                    .head,
+            )
+            .expect("utf-8")
+        };
+        // Only the coarse prefix matches.
+        let coarse = authenticated("/user");
+        assert!(
+            coarse.contains("Authorization: Bearer the-coarse-secret"),
+            "{coarse}"
+        );
+        // Both match, and the longer is the one that minimizes to a workspace.
+        let narrow = authenticated("/repos/op/notes/commits");
+        assert!(
+            narrow.contains("Authorization: Bearer the-workspace-secret"),
+            "{narrow}"
+        );
+        assert!(!narrow.contains("the-coarse-secret"), "{narrow}");
+        // Route order is not what decided it.
+        let reversed = brokering(vec![
+            Route {
+                host: "localhost".into(),
+                path_prefix: "/repos/op/".into(),
+                secret: Zeroizing::new("the-workspace-secret".into()),
+            },
+            Route {
+                host: "localhost".into(),
+                path_prefix: "/".into(),
+                secret: Zeroizing::new("the-coarse-secret".into()),
+            },
+        ]);
+        let head = format!(
+            "GET /repos/op/notes HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\n\r\n",
+            reversed.phantom.as_str()
+        );
+        let rewritten = String::from_utf8(
+            rewrite(head.as_bytes(), "localhost", &reversed)
+                .expect("rewritten")
+                .head,
+        )
+        .expect("utf-8");
+        assert!(
+            rewritten.contains("Authorization: Bearer the-workspace-secret"),
             "{rewritten}"
         );
     }

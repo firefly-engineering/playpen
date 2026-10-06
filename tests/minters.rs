@@ -141,6 +141,74 @@ fn a_route_naming_an_undeclared_minter_refuses() {
     assert_eq!(output.status.code(), Some(125), "{output:?}");
 }
 
+/// Two routes a run would resolve on one host, whose prefixes are not ordered by strict extension,
+/// are a coherence refusal: `path_prefix` selects the credential, and an unordered pair is a tie
+/// the proxy would break silently ([spec §7.1]). Like every coherence rule, `check` makes it without
+/// looking at this host, and no minter runs.
+#[test]
+fn two_routes_on_one_host_that_are_not_ordered_by_prefix_refuse() {
+    let fx = Fixture::new();
+    // A minter that would leave a trace if it ran at all.
+    let witness = fx.root().join("minted");
+    let policy = fx.policy_named(
+        "ambiguous.json",
+        &json!({
+            "version": 1,
+            "minters": {"m": {"command": [
+                os_bin("sh"), "-c",
+                format!("cat >/dev/null; echo ran > {}", witness.display()),
+            ]}},
+            "workspaces": {
+                "a": {
+                    "roots": [],
+                    "credentials": [{
+                        "host": "api.example",
+                        "path_prefix": "/repos/a/",
+                        "minter": "m",
+                        "delivery": {"env": "A_TOKEN"},
+                    }],
+                },
+                "b": {
+                    "roots": [],
+                    "credentials": [{
+                        "host": "api.example",
+                        "path_prefix": "/repos/b/",
+                        "minter": "m",
+                        "delivery": {"env": "B_TOKEN"},
+                    }],
+                },
+            },
+            "profiles": {"p": {
+                "workspaces": ["a", "b"],
+                "toolchain": [],
+            }},
+        }),
+    );
+    let output = fx
+        .run_under(&policy, &[&os_bin("true")])
+        .output()
+        .expect("playpen");
+    let run = assert_refused(&output, "refusal.route.ambiguous");
+    let message = fx.record(&run)["refusal"]["message"]
+        .as_str()
+        .expect("a message")
+        .to_owned();
+    assert!(message.contains("\"api.example\""), "{message}");
+    assert!(message.contains("workspace:a.credentials[0]"), "{message}");
+    assert!(message.contains("workspace:b.credentials[0]"), "{message}");
+    assert!(!witness.exists(), "a minter ran for a refused policy");
+    let output = fx
+        .playpen(&[
+            "check",
+            "--no-filesystem",
+            "--policy",
+            policy.to_str().expect("a UTF-8 path"),
+        ])
+        .output()
+        .expect("playpen check");
+    assert_eq!(output.status.code(), Some(125), "{output:?}");
+}
+
 /// Each way a minter can fail has its own code, and the agent never runs: launching without the
 /// credential would produce a run that works for ten minutes and then fails at the first push.
 #[test]

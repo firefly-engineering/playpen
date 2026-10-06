@@ -26,6 +26,7 @@ const CHECKS: &[Check] = &[
     env_is_not_reserved,
     areas_are_declared,
     minters_are_declared,
+    routes_are_unambiguous,
     shared_entry_points_can_be_imported,
 ];
 
@@ -277,6 +278,50 @@ fn minters_are_declared(loaded: &Loaded) -> Result<(), Refusal> {
         )),
         None => Ok(()),
     }
+}
+
+/// Every profile's routes on one host are ordered by strict prefix extension
+/// (`refusal.route.ambiguous`): `path_prefix` is the proxy's **selector**, so for the selection to
+/// be determinate one of any two prefixes on a host must strictly extend the other, and the longer
+/// wins ([spec §7.1]). Longest-prefix-wins over an unordered pair is a tie broken silently, which
+/// would authenticate a request with the wrong workspace's credential.
+///
+/// Held per profile over the set a launch would resolve — its workspaces' routes and its own
+/// ([`crate::minter::attached`]) — because two routes collide only where one run sees both.
+///
+/// [spec §7.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#71-credential-route
+fn routes_are_unambiguous(loaded: &Loaded) -> Result<(), Refusal> {
+    let Loaded { path, policy } = loaded;
+    for (profile, selected) in &policy.profiles {
+        let routes = crate::minter::attached(policy, profile, selected);
+        for (i, (from, route, _)) in routes.iter().enumerate() {
+            for (other, against, _) in &routes[i + 1..] {
+                if against.host != route.host || extends(&route.path_prefix, &against.path_prefix) {
+                    continue;
+                }
+                return Err(Refusal::new(
+                    Code::RouteAmbiguous,
+                    format!(
+                        "{}: profile {profile:?} has two routes on host {:?} where neither path \
+                         prefix extends the other: {from}.path_prefix is {:?} and \
+                         {other}.path_prefix is {:?}; which credential a request gets would be a \
+                         silent tie",
+                        path.display(),
+                        route.host,
+                        route.path_prefix,
+                        against.path_prefix,
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether one of `a` and `b` **strictly** extends the other: equal prefixes are not ordered, so
+/// they are as ambiguous as disjoint ones.
+fn extends(a: &str, b: &str) -> bool {
+    a != b && (a.starts_with(b) || b.starts_with(a))
 }
 
 /// `names`, comma-separated, or `none`. Every refusal that says "and here is what *is* declared"
@@ -568,5 +613,144 @@ workspaces:
             refusal.message().contains("workspace:w.roots[0]"),
             "{refusal}"
         );
+    }
+
+    /// Routes, as `host`/`path_prefix` pairs, written where `site` says: `workspace:<name>` puts
+    /// them on that workspace and `profile:p` on the profile. The profile selects every workspace.
+    ///
+    /// Every route gets a delivery name of its own, so what these tests show is the ambiguity rule
+    /// and never [`env_is_not_reserved`] firing first on a shared name.
+    fn routed(sites: &[(&str, &[(&str, &str)])]) -> String {
+        let mut text = String::from("version: 1\nminters:\n  m: { command: [/bin/true] }\n");
+        let mut delivered = 0;
+        let mut route = |(host, prefix): &(&str, &str)| {
+            delivered += 1;
+            format!(
+                "      - {{ host: {host}, path_prefix: {prefix}, minter: m, \
+                 delivery: {{ env: T{delivered} }} }}\n"
+            )
+        };
+        let mut workspaces = String::new();
+        let mut profile = String::new();
+        for (site, routes) in sites {
+            match site.strip_prefix("workspace:") {
+                Some(name) => {
+                    workspaces.push_str(&format!("  {name}:\n    roots: []\n    credentials:\n"));
+                    for r in *routes {
+                        workspaces.push_str(&route(r));
+                    }
+                }
+                None => {
+                    profile.push_str("    credentials:\n");
+                    for r in *routes {
+                        profile.push_str(&route(r));
+                    }
+                }
+            }
+        }
+        let selected: Vec<&str> = sites
+            .iter()
+            .filter_map(|(site, _)| site.strip_prefix("workspace:"))
+            .collect();
+        if !workspaces.is_empty() {
+            text.push_str(&format!("workspaces:\n{workspaces}"));
+        }
+        text.push_str(&format!(
+            "profiles:\n  p:\n    workspaces: [{}]\n    toolchain: []\n{profile}",
+            selected.join(", ")
+        ));
+        text
+    }
+
+    #[test]
+    fn routes_on_one_host_must_be_ordered_by_strict_prefix_extension() {
+        // The longer strictly extends the shorter: the proxy's selection is determinate.
+        assert_eq!(
+            checked(&routed(&[(
+                "workspace:w",
+                &[("api.example", "/"), ("api.example", "/repos/op/")],
+            )])),
+            Ok(())
+        );
+        // One host each: nothing to order.
+        assert_eq!(
+            checked(&routed(&[(
+                "workspace:w",
+                &[("a.example", "/one/"), ("b.example", "/two/")],
+            )])),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn two_disjoint_prefixes_on_one_host_are_ambiguous() {
+        let refusal = checked(&routed(&[(
+            "workspace:w",
+            &[("api.example", "/repos/a/"), ("api.example", "/repos/b/")],
+        )]))
+        .expect_err("refused");
+        assert_eq!(refusal.code, Code::RouteAmbiguous);
+        assert!(refusal.message().contains("\"api.example\""), "{refusal}");
+        assert!(
+            refusal.message().contains("workspace:w.credentials[0]")
+                && refusal.message().contains("workspace:w.credentials[1]"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.message().contains("\"/repos/a/\"")
+                && refusal.message().contains("\"/repos/b/\""),
+            "{refusal}"
+        );
+    }
+
+    /// Equal prefixes are the case longest-prefix-wins would break by arbitrary tie.
+    #[test]
+    fn two_equal_prefixes_on_one_host_are_ambiguous() {
+        let refusal = checked(&routed(&[(
+            "workspace:w",
+            &[("api.example", "/repos/"), ("api.example", "/repos/")],
+        )]))
+        .expect_err("refused");
+        assert_eq!(refusal.code, Code::RouteAmbiguous);
+    }
+
+    /// The pair that collides is the one a *run* sees: a workspace route and the profile's own.
+    #[test]
+    fn a_workspace_route_and_its_profiles_own_are_one_set() {
+        let refusal = checked(&routed(&[
+            ("workspace:w", &[("api.example", "/a/")]),
+            ("profile:p", &[("api.example", "/b/")]),
+        ]))
+        .expect_err("refused");
+        assert_eq!(refusal.code, Code::RouteAmbiguous);
+        assert!(
+            refusal.message().contains("workspace:w.credentials[0]")
+                && refusal.message().contains("profile:p.credentials[0]"),
+            "{refusal}"
+        );
+    }
+
+    /// Two workspaces no one profile selects together never meet, so neither pair is a tie anything
+    /// has to break.
+    #[test]
+    fn routes_of_workspaces_no_profile_shares_do_not_collide() {
+        let text = "\
+version: 1
+minters:
+  m: { command: [/bin/true] }
+workspaces:
+  a:
+    roots: []
+    credentials:
+      - { host: api.example, path_prefix: /a/, minter: m, delivery: { env: A } }
+  b:
+    roots: []
+    credentials:
+      - { host: api.example, path_prefix: /b/, minter: m, delivery: { env: B } }
+profiles:
+  only-a: { workspaces: [a], toolchain: [] }
+  only-b: { workspaces: [b], toolchain: [] }
+";
+        assert_eq!(checked(text), Ok(()));
     }
 }

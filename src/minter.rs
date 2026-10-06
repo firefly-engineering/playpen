@@ -395,8 +395,11 @@ pub fn resolve(
 /// is that its credential minimizes to that workspace, and a union would hand every workspace's
 /// minter the reach of all of them.
 ///
+/// The coherence tier reads the same list ([`crate::policy::coherence`]), so what a profile resolves
+/// is decided in one place: a rule about a profile's route *set* must see the set a launch will see.
+///
 /// [spec §7.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#74-attachment
-fn attached<'a>(
+pub(crate) fn attached<'a>(
     policy: &'a crate::policy::Policy,
     name: &str,
     selected: &'a crate::policy::Profile,
