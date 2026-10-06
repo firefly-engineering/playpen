@@ -256,6 +256,26 @@ fn an_excluded_subpath_is_denied_for_its_classes_only() {
     assert_eq!(fx.probe_under(&policy, &["write", &beside])["ok"], true);
 }
 
+/// A writable area's sockets are granted because it is writable, so subtracting write subtracts
+/// them too ([spec §6.3]).
+///
+/// [spec §6.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#63-credential-oracles
+#[test]
+#[cfg(target_os = "macos")]
+fn a_write_exclusion_subtracts_the_sockets_beneath_it() {
+    let fx = Fixture::new();
+    let hooks = fx.root().join("hooks");
+    std::fs::create_dir(&hooks).expect("mkdir");
+    let policy = excluding(&fx, json!([{"path": hooks, "classes": ["write"]}]));
+    let (inside, beside) = (hooks.join("s"), fx.root().join("s"));
+    let _listeners = [&inside, &beside]
+        .map(|path| std::os::unix::net::UnixListener::bind(path).expect("listen"));
+    let connect =
+        |path: &std::path::Path| fx.probe_under(&policy, &["connect-unix", path.to_str().unwrap()]);
+    assert_denied(&connect(&inside));
+    assert_eq!(connect(&beside)["ok"], true);
+}
+
 /// Landlock cannot subtract a subpath, so the launch refuses rather than grant it (#127).
 #[test]
 #[cfg(target_os = "linux")]

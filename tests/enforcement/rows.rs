@@ -242,22 +242,14 @@ pub const ROWS: &[Row] = &[
     // A unix-socket **credential oracle** performs a credentialed operation for whoever reaches
     // it, so the means escapes with no secret crossing the boundary ([spec §6.3]). On Linux this
     // is Landlock's `FS_RESOLVE_UNIX` right, which the fork's probe negotiates from ABI 9; below
-    // it the surface is unenforceable and the row is skipped by name.
-    //
-    // `both`, as spec §17.2 has it, and skipped on macOS by name until fork change 1 lands
-    // ([#95]). Not `Scope::Only(Os::Linux, …)`: asymmetry #1 favours macOS, where this surface is
-    // denied on every version, so `n/a` there would state the ledger backwards.
-    //
-    // [#95]: https://github.com/firefly-engineering/playpen/issues/95
+    // it the surface is unenforceable and the row is skipped by name. On macOS it is the fork's
+    // IP-only `AllowAll`, with a writable area's sockets granted explicitly.
     Row {
         id: "N-unix-socket",
         class: Class::Negative,
         platform: Platform {
             scope: Scope::Both,
-            requires: &[
-                Precondition::LandlockResolveUnix,
-                Precondition::BackendDeniesUnixSockets,
-            ],
+            requires: &[Precondition::LandlockResolveUnix],
         },
         fixture: Fixture::ProbeRoot,
         action: Action::Connect(Listening::DecoyUnixSocket),

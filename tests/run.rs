@@ -78,6 +78,51 @@ fn writing_outside_the_root_is_a_denial() {
     );
 }
 
+/// The agent's own sockets live where it can write, so they stay reachable ([spec §6.3]).
+///
+/// [spec §6.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#63-credential-oracles
+#[test]
+fn a_socket_under_a_writable_root_connects() {
+    let fx = Fixture::new();
+    let path = fx.root().join("s");
+    let _listener = std::os::unix::net::UnixListener::bind(&path).expect("listen");
+    let v = fx.probe_inside(&["connect-unix", path.to_str().unwrap()]);
+    assert_eq!(v["ok"], true, "{v}");
+}
+
+/// Reachable is not enough: only a writable grant reaches a socket ([spec §6.3]). Linux enforces
+/// this only from Landlock ABI 9, which `N-unix-socket` covers by name.
+///
+/// [spec §6.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#63-credential-oracles
+#[cfg(target_os = "macos")]
+#[test]
+fn a_socket_under_a_read_only_root_is_a_denial() {
+    let fx = Fixture::with_mode("read");
+    let path = fx.root().join("s");
+    let _listener = std::os::unix::net::UnixListener::bind(&path).expect("listen");
+    assert_eq!(
+        probe_outside(&["connect-unix", path.to_str().unwrap()])["ok"],
+        true,
+        "connectable outside"
+    );
+    assert_denied(&fx.probe_inside(&["connect-unix", path.to_str().unwrap()]));
+}
+
+/// macOS resolves names through `mDNSResponder`'s socket, which no root holds. Only a name the
+/// network answers goes there (`localhost` is read from `/etc/hosts`), so a host that cannot
+/// resolve it outside asserts nothing and returns.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_name_still_resolves_inside() {
+    let name = "example.com";
+    if probe_outside(&["resolve", name])["ok"] != true {
+        eprintln!("{name} does not resolve outside; nothing to assert");
+        return;
+    }
+    let v = Fixture::new().probe_inside(&["resolve", name]);
+    assert_eq!(v["ok"], true, "{v}");
+}
+
 /// Hand `file` to the spawned process as descriptor `fd`, without close-on-exec. When `file` is
 /// already `fd`, `dup2` changes nothing and its close-on-exec flag survives, so it is cleared.
 fn inherit_as(command: &mut Command, file: &File, fd: i32) {

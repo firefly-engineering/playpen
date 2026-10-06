@@ -135,23 +135,6 @@ pub enum Precondition {
     ///
     /// [spec §6.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#63-credential-oracles
     LandlockResolveUnix,
-    /// The pinned backend denies a unix-socket **credential oracle** on *this* platform at all.
-    ///
-    /// Not a property of the host but of the pin, and the only precondition here that is: the
-    /// macOS half is fork change 1 ([#95]), which is not built, so on macOS the row would fail
-    /// for a reason that is true — upstream nono's `AllowAll` grants every unix socket — and that
-    /// the row cannot fix.
-    ///
-    /// A **skip** and not a [`Scope::Only`]: asymmetry #1 favours macOS, where this surface is
-    /// denied on every version, so marking the row `n/a` there would state the ledger backwards.
-    /// An unimplemented half is not an asymmetry, and §17.1 is explicit that a `both` assertion
-    /// which proves inexpressible on one platform is a design bug to escalate rather than a skip —
-    /// this one is expressible and merely unwritten. The variant goes when #95 lands, and the row
-    /// is then `both` as [spec §17.2] has it.
-    ///
-    /// [#95]: https://github.com/firefly-engineering/playpen/issues/95
-    /// [spec §17.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#172-rows
-    BackendDeniesUnixSockets,
 }
 
 impl Precondition {
@@ -162,7 +145,6 @@ impl Precondition {
             Precondition::Nix => "skip.host.no-nix",
             Precondition::Homebrew => "skip.host.no-homebrew",
             Precondition::LandlockResolveUnix => "skip.host.landlock-below-abi-9",
-            Precondition::BackendDeniesUnixSockets => "skip.backend.unix-sockets-not-denied",
         }
     }
 
@@ -183,12 +165,10 @@ impl Precondition {
             Precondition::LandlockResolveUnix => {
                 playpen::mechanism::landlock_abi().is_ok_and(|abi| abi >= RESOLVE_UNIX_ABI)
             }
-            // Vacuous off Linux: there is no Landlock to be below an ABI of. What decides the row
-            // there is `BackendDeniesUnixSockets`, which is probed next and is the honest reason.
+            // Vacuous off Linux: there is no Landlock to be below an ABI of, and Seatbelt denies
+            // the surface on every macOS version.
             #[cfg(not(target_os = "linux"))]
             Precondition::LandlockResolveUnix => true,
-            // Linux's half is in the pin; macOS's is #95.
-            Precondition::BackendDeniesUnixSockets => cfg!(target_os = "linux"),
         }
     }
 }
@@ -609,6 +589,7 @@ pub enum Rung {
 
 impl Rung {
     /// Every rung, so that a new one is a row rather than a thing nothing exercises.
+    #[cfg(target_os = "linux")]
     pub const ALL: &[Rung] = &[
         Rung::KernelAbi,
         Rung::LandlockInactive,
@@ -633,6 +614,7 @@ impl Rung {
     }
 
     /// The rung of this name, or `None` where nothing goes by it.
+    #[cfg(target_os = "linux")]
     pub fn parse(name: &str) -> Option<Rung> {
         Rung::ALL.iter().copied().find(|rung| rung.name() == name)
     }

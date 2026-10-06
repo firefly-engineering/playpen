@@ -11,7 +11,7 @@ publish = false
 [dependencies]
 # The maintained fork, pinned by exact `rev` and never a branch or range (ADR 0022).
 # A bump is a PR that stays red until the enforcement suite passes.
-nono = { git = "https://github.com/firefly-engineering/nono", rev = "73b267f78451dc5bdb2bcbb6a8a78a31cbeb976e", default-features = false }
+nono = { git = "https://github.com/firefly-engineering/nono", rev = "db547f8c6744106a7bc42eb8f643447b5b5ef7af", default-features = false }
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
 # The policy's JSON Schema is generated from its serde types, never written beside them.

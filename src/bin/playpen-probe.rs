@@ -33,6 +33,8 @@ enum Action {
     ///
     /// [spec §6.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#63-credential-oracles
     ConnectUnix(String),
+    /// Resolve the host name through the system resolver, as any client does before it connects.
+    Resolve(String),
     /// Read an inherited descriptor to the end, without opening anything.
     ReadFd(libc::c_int),
     /// Look the Mach service up by name in the bootstrap namespace.
@@ -137,6 +139,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Option<Vec<Action>> {
             #[cfg(target_os = "linux")]
             "connect-abstract" => Action::ConnectAbstract(args.next()?),
             "connect-unix" => Action::ConnectUnix(args.next()?),
+            "resolve" => Action::Resolve(args.next()?),
             "read-fd" => Action::ReadFd(args.next()?.parse().ok()?),
             #[cfg(target_os = "macos")]
             "look-up" => Action::LookUp(args.next()?),
@@ -185,6 +188,10 @@ fn verdict(action: &Action) -> String {
                 .and_then(|addr| UnixStream::connect_addr(&addr))
         }),
         Action::ConnectUnix(path) => io_verdict(std::os::unix::net::UnixStream::connect(path)),
+        Action::Resolve(host) => io_verdict(std::net::ToSocketAddrs::to_socket_addrs(&(
+            host.as_str(),
+            443,
+        ))),
         Action::ReadFd(fd) => io_verdict(read_fd(*fd)),
         #[cfg(target_os = "macos")]
         Action::LookUp(service) => look_up(service),

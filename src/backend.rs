@@ -7,6 +7,8 @@
 use std::path::Path;
 
 use nono::{AccessMode, FsCapability, IpcMode, NetworkMode, NonoError, Sandbox, SignalMode};
+#[cfg(target_os = "macos")]
+use nono::{UnixSocketCapability, UnixSocketMode};
 
 use crate::capability::{Access, CapabilitySet, PathDenial, PathGrant, Scope};
 use crate::code::Code;
@@ -189,18 +191,54 @@ fn add_path(set: &mut nono::CapabilitySet, grant: &PathGrant) -> Result<(), Refu
     if grant.scope == Scope::Literal && meta.file_type().is_symlink() {
         return add_link(set, &grant.path, mode);
     }
-    let is_dir = grant
+    let target = grant
         .path
         .metadata()
-        .map_err(|e| missing(&grant.path, &grant.from, e))?
-        .is_dir();
-    match (grant.scope, is_dir) {
+        .map_err(|e| missing(&grant.path, &grant.from, e))?;
+    match (grant.scope, target.is_dir()) {
         (Scope::Subtree, true) => {
             set.add_fs(FsCapability::new_dir(&grant.path, mode).map_err(translate)?)
         }
         (_, false) => set.add_fs(FsCapability::new_file(&grant.path, mode).map_err(translate)?),
         (Scope::Literal, true) => add_literal_dir(set, &grant.path, mode)?,
     }
+    if mode == AccessMode::ReadWrite {
+        add_sockets(set, &grant.path, &target)?;
+    }
+    Ok(())
+}
+
+/// Seatbelt counts a unix-socket `connect()` as network, not file, access, and the pinned fork
+/// grants none under `AllowAll` but the resolver's. So a writable area is granted its sockets
+/// here, and every other socket on the host — a **credential oracle** among them — stays
+/// refused ([spec §6.3]). A writable file grant reaches a socket only if one is there at launch.
+///
+/// [spec §6.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#63-credential-oracles
+#[cfg(target_os = "macos")]
+fn add_sockets(
+    set: &mut nono::CapabilitySet,
+    path: &Path,
+    target: &std::fs::Metadata,
+) -> Result<(), Refusal> {
+    use std::os::unix::fs::FileTypeExt;
+    let socket = if target.is_dir() {
+        UnixSocketCapability::new_dir_subtree(path, UnixSocketMode::Connect)
+    } else if target.file_type().is_socket() {
+        UnixSocketCapability::new_file(path, UnixSocketMode::Connect)
+    } else {
+        return Ok(());
+    };
+    set.add_unix_socket(socket.map_err(translate)?);
+    Ok(())
+}
+
+/// Landlock gates a pathname-socket `connect()` by the filesystem grants themselves, from ABI 9.
+#[cfg(target_os = "linux")]
+fn add_sockets(
+    _: &mut nono::CapabilitySet,
+    _: &Path,
+    _: &std::fs::Metadata,
+) -> Result<(), Refusal> {
     Ok(())
 }
 
@@ -251,20 +289,24 @@ fn profile_string(path: &Path) -> Result<&str, Refusal> {
 
 /// One deny rule per class an exclusion subtracts. nono emits platform rules after its own allows,
 /// and Seatbelt's last matching rule wins, so each overrides whatever grant covers the path.
-/// Execute is both halves of running a binary from there: `exec` and mapping it executable.
+/// Execute is both halves of running a binary from there: `exec` and mapping it executable. Write
+/// takes the sockets beneath it too, which [`add_sockets`] grants for being writable; nono emits
+/// a network rule after its own network allows, so that deny is a rule of its own.
 #[cfg(target_os = "macos")]
 fn add_exclusions(set: &mut nono::CapabilitySet, exclusions: &[PathDenial]) -> Result<(), Refusal> {
     for exclusion in exclusions {
         let path = profile_string(&exclusion.path)?;
         for class in &exclusion.classes {
             use crate::capability::Class;
-            let operations = match class {
-                Class::Read => "file-read*",
-                Class::Write => "file-write*",
-                Class::Execute => "process-exec* file-map-executable",
+            let operations: &[&str] = match class {
+                Class::Read => &["file-read*"],
+                Class::Write => &["file-write*", "network-outbound"],
+                Class::Execute => &["process-exec* file-map-executable"],
             };
-            set.add_platform_rule(format!("(deny {operations} (subpath \"{path}\"))"))
-                .map_err(translate)?;
+            for operations in operations {
+                set.add_platform_rule(format!("(deny {operations} (subpath \"{path}\"))"))
+                    .map_err(translate)?;
+            }
         }
     }
     Ok(())
@@ -477,6 +519,7 @@ mod tests {
         for rule in [
             format!("(deny file-read* (subpath \"{secrets}\"))"),
             format!("(deny file-write* (subpath \"{secrets}\"))"),
+            format!("(deny network-outbound (subpath \"{secrets}\"))"),
             format!("(deny process-exec* file-map-executable (subpath \"{secrets}\"))"),
         ] {
             assert!(
@@ -493,7 +536,10 @@ mod tests {
             .collect();
         assert_eq!(
             denies,
-            [&format!("(deny file-write* (subpath \"{secrets}\"))")]
+            [
+                &format!("(deny file-write* (subpath \"{secrets}\"))"),
+                &format!("(deny network-outbound (subpath \"{secrets}\"))"),
+            ]
         );
     }
 

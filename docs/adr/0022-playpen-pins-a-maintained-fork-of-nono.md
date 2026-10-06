@@ -42,7 +42,7 @@ inside the backend, and it is the clean semantic fix if it is ever upstreamed.
 ## The fork's changes
 
 1. **macOS: unix sockets default-deny under `AllowAll`.** Outbound is rendered as IP-only
-   (`(remote ip "*:*")`). Unix sockets go through nono's existing explicit-grant path, which keeps
+   (`(remote ip)`). Unix sockets go through nono's existing explicit-grant path, which keeps
    the `mDNSResponder` rules every macOS DNS lookup needs. playpen grants the sockets under its
    writable areas. Asserted by `N-unix-socket`.
 2. **Linux: the ABI probe extends to V9, and pathname-socket `connect()` is gated** by
