@@ -450,6 +450,14 @@ fn render_run(replay: &Replay, out: &mut impl Write) -> io::Result<()> {
     for (name, value) in fields {
         writeln!(out, "{name:<9} {}", OneLine(&value))?;
     }
+    // What teardown could not do, one sentence a line ([spec §4.2] step 18). Shown because no
+    // teardown failure changes the exit status, so the record is the only place a revoker that
+    // did not run is reported — and a credential nobody revoked lives until its TTL.
+    //
+    // [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
+    for failure in &record.teardown {
+        writeln!(out, "teardown  {}", OneLine(failure))?;
+    }
     // A record written before selection was traced holds none.
     if let Some(trace) = &record.selection {
         render_selection(trace, out)?;

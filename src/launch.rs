@@ -697,8 +697,11 @@ fn run(
         },
         |fault| record.borrow_mut().fault(fault),
     );
-    // Step 18, in order: the revokers run while the proxy is still up (#92), then the proxy stops,
-    // then the scratch and the ephemeral areas go.
+    // Step 18, in order: the revokers run while the proxy is still up, then the proxy stops, then
+    // the scratch and the ephemeral areas go with `_provisioned`. **No teardown failure changes
+    // the exit status** — `status` is already decided, and every failure below goes to the record
+    // and nowhere else.
+    minter::revoke_all(&loaded.policy, &credentials, &mut record.borrow_mut());
     if let Some(mut serving) = serving.into_inner() {
         serving.stop();
     }

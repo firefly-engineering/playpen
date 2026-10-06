@@ -256,6 +256,69 @@ fn kill(child: &mut Child) {
     let _ = child.wait();
 }
 
+/// Run `minter`'s revoker — declared as `name` — for `request`, or say why it did not run
+/// ([spec §7.2]).
+///
+/// **Revocation is an optimization, and the TTL is the guarantee.** A design whose safety depends
+/// on a cleanup path running is unsafe under `SIGKILL`, so this is best-effort: it returns the
+/// sentence a failure is recorded with rather than a [`Refusal`], and **no teardown failure
+/// changes the exit status** ([spec §4.2]).
+///
+/// `Ok(())` where the minter declares no revoker: there was nothing to run, which is not a
+/// failure. A revoker receives the same stdin the minter did, so the two are one contract.
+///
+/// [spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters
+/// [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
+pub fn revoke(name: &str, minter: &Minter, request: &Request) -> Result<(), String> {
+    let Some(argv) = &minter.revoke else {
+        return Ok(());
+    };
+    let failed = |detail: String| {
+        Err(format!(
+            "the revoker of minter {name:?} for {}{} {detail}",
+            request.route.host, request.route.path_prefix,
+        ))
+    };
+    let Some((program, args)) = argv.split_first() else {
+        return failed("declares an empty command, so there was nothing to run".into());
+    };
+    // Stdout is closed rather than inherited: a revoker is not a minter, so whatever it prints is
+    // not an answer playpen wants — and it may be a token.
+    //
+    // Its own process group, for the same reason a minter gets one: a kill must reach everything
+    // it started, and teardown must not be held open by a descendant holding playpen's stderr.
+    let spawned = Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .process_group(0)
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(e) => return failed(format!("cannot be run: {e}")),
+    };
+    let written = child
+        .stdin
+        .take()
+        .ok_or_else(|| std::io::Error::other("no stdin"))
+        .and_then(|mut stdin| stdin.write_all(request.body().as_bytes()));
+    if let Err(e) = written {
+        kill(&mut child);
+        return failed(format!("cannot be given its request: {e}"));
+    }
+    // Bounded by the same `timeout` the minter is: a revoker that hangs would hold teardown open
+    // for as long as the provider felt like, and the credential expires on its own either way.
+    let timeout = minter.timeout.map_or(DEFAULT_TIMEOUT, Duration::from_secs);
+    match wait_bounded(&mut child, timeout) {
+        Some(status) if status.success() => Ok(()),
+        Some(status) => failed(format!("exited with {status}")),
+        None => {
+            kill(&mut child);
+            failed(format!("did not exit within {}s", timeout.as_secs()))
+        }
+    }
+}
+
 /// Wait for `child` for at most `timeout`, or `None` if it is still running when that runs out.
 fn wait_bounded(child: &mut Child, timeout: Duration) -> Option<std::process::ExitStatus> {
     let deadline = Instant::now() + timeout;
@@ -328,6 +391,12 @@ fn is_rfc_3339(text: &str) -> bool {
 /// [spec §7.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#74-attachment
 #[derive(Debug)]
 pub struct Minting {
+    /// What was put on the minter's stdin, kept because **a revoker receives the same**
+    /// ([spec §7.2]). Held rather than rebuilt at teardown, so the two can never be handed
+    /// different scopes for one credential.
+    ///
+    /// [spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters
+    pub request: Request,
     pub route: Destination,
     /// The declared minter's name, which every refusal about it names.
     pub minter: String,
@@ -399,6 +468,7 @@ pub fn resolve(
         let request = Request::new(destination.clone(), scope);
         let credential = mint(&route.minter, declared, &request)?;
         minted.push(Minting {
+            request,
             route: destination,
             minter: route.minter.clone(),
             delivery: route.delivery.env.clone(),
@@ -408,6 +478,39 @@ pub fn resolve(
         });
     }
     Ok(minted)
+}
+
+/// Run every declared revoker of `credentials`, writing each failure to `record`
+/// ([spec §4.2] step 18).
+///
+/// Called **while the proxy is still up**, because a revoker is an ordinary host process that may
+/// well reach the provider through it, and in order before anything else teardown removes.
+///
+/// Every revoker is attempted even after one fails: they are independent credentials, and
+/// stopping at the first would leave the rest live for no reason. Nothing here returns a
+/// `Result` — the run's status is already decided.
+///
+/// [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
+pub fn revoke_all(
+    policy: &crate::policy::Policy,
+    credentials: &[Minting],
+    record: &mut crate::record::RunRecord,
+) {
+    for minted in credentials {
+        let Some(declared) = policy.minters.get(&minted.minter) else {
+            // The coherence tier refused an undeclared minter, so this is a policy that changed
+            // under the run — recorded rather than passed over, because a credential nobody
+            // revoked is one that lives until its TTL.
+            record.torn_down(format!(
+                "minter {:?} is no longer declared, so its credential for {}{} was not revoked",
+                minted.minter, minted.route.host, minted.route.path_prefix,
+            ));
+            continue;
+        };
+        if let Err(why) = revoke(&minted.minter, declared, &minted.request) {
+            record.torn_down(why);
+        }
+    }
 }
 
 /// What `route` allows ([spec §7.6]): unrestricted where it names no rule set, and otherwise the
@@ -686,6 +789,81 @@ mod tests {
                 .expect("a minter");
         let refusal = mint("gone", &minter, &request()).expect_err("refused");
         assert_eq!(refusal.code, Code::MinterFailed);
+    }
+
+    /// A minter with `revoke` as a script run by the floor's shell, and no `command` worth
+    /// running: these tests revoke, and nothing mints.
+    fn revoker(script: &str, timeout: Option<u64>) -> Minter {
+        let sh = crate::floor::binary("sh")
+            .unwrap_or_else(|searched| panic!("the floor holds no `sh`; looked at {searched:?}"));
+        serde_json::from_value(serde_json::json!({
+            "command": ["/unused"],
+            "revoke": [sh, "-c", script],
+            "timeout": timeout,
+        }))
+        .expect("a minter")
+    }
+
+    /// A revoker **receives the same stdin the minter did** ([spec §7.2]), so the two are one
+    /// contract and a revoker can address the credential it is retiring.
+    ///
+    /// [spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters
+    #[test]
+    fn a_revoker_receives_the_minters_own_stdin() {
+        let seen = tempfile::NamedTempFile::new().expect("a file");
+        let script = format!("cat > {}", seen.path().display());
+        let request = Request::new(
+            Destination {
+                host: "github.com".into(),
+                path_prefix: "/firefly-engineering/".into(),
+            },
+            Some(ForgeScope::Org("firefly-engineering".into())),
+        );
+        revoke("gh-app", &revoker(&script, None), &request).expect("revoked");
+        let written = std::fs::read_to_string(seen.path()).expect("the stdin");
+        assert_eq!(written, request.body());
+    }
+
+    /// Revocation is best-effort: every way a revoker can fail is a sentence naming the minter
+    /// and the destination, never a refusal, because **no teardown failure changes the exit
+    /// status**.
+    #[test]
+    fn a_failing_revoker_is_a_sentence_and_never_a_refusal() {
+        for (script, timeout, said) in [
+            ("cat >/dev/null; exit 7", None, "exited with"),
+            ("cat >/dev/null; sleep 30", Some(0), "did not exit within"),
+        ] {
+            let why = revoke("gh-app", &revoker(script, timeout), &request())
+                .expect_err("the revoker failed");
+            assert!(why.contains(said), "{why}");
+            assert!(why.contains("\"gh-app\""), "{why}");
+            assert!(why.contains("api.github.com"), "{why}");
+        }
+        // A revoker that cannot be run at all is the same kind of answer.
+        let gone: Minter = serde_json::from_value(serde_json::json!({
+            "command": ["/unused"],
+            "revoke": ["/nonexistent/revoke"],
+        }))
+        .expect("a minter");
+        let why = revoke("gone", &gone, &request()).expect_err("cannot be run");
+        assert!(why.contains("cannot be run"), "{why}");
+    }
+
+    /// A minter that declares no revoker has nothing to run, which is not a failure: revocation
+    /// is an optimization and the TTL is the guarantee.
+    #[test]
+    fn a_minter_with_no_revoker_tears_down_cleanly() {
+        let minter = minter("cat >/dev/null", None);
+        assert_eq!(revoke("m", &minter, &request()), Ok(()));
+    }
+
+    /// A revoker's stdout is never read: it is not a minter, so what it prints is not an answer,
+    /// and it may be a token. Closing it means a revoker that writes a lot cannot block on a full
+    /// pipe either.
+    #[test]
+    fn a_revoker_that_writes_to_stdout_is_not_blocked_by_it() {
+        let loud = revoker("cat >/dev/null; yes playpen | head -c 200000", None);
+        assert_eq!(revoke("loud", &loud, &request()), Ok(()));
     }
 
     #[test]

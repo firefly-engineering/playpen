@@ -385,3 +385,201 @@ fn a_profile_with_no_route_mints_nothing() {
     let ids = fx.run_ids();
     assert_eq!(fx.record(&ids[0])["credentials"], json!([]));
 }
+
+/// A policy with one profile route whose minter answers at once and whose revoker is `revoke`.
+fn with_revoker(fx: &Fixture, revoke: &Value) -> PathBuf {
+    fx.policy_named(
+        "revoke.json",
+        &json!({
+            "version": 1,
+            "minters": {"gh-app": {
+                "command": [os_bin("sh"), "-c",
+                    r#"cat >/dev/null; printf '{"token":"s3cret","expires_at":"2027-01-01T00:00:00Z"}'"#],
+                "revoke": revoke,
+                "timeout": 2,
+            }},
+            "workspaces": {"w": {
+                "roots": [{"path": fx.root(), "mode": "readwrite"}],
+                "forge": {"org": "firefly-engineering"},
+                "credentials": [{
+                    "host": "api.github.com",
+                    "path_prefix": "/repos/firefly-engineering/",
+                    "minter": "gh-app",
+                    "delivery": {"env": "GH_TOKEN"},
+                }],
+            }},
+            "profiles": {"p": {"workspaces": ["w"], "toolchain": []}},
+        }),
+    )
+}
+
+/// **Each declared `revoke` runs with the minter's stdin** ([spec §4.2] step 18) — the same
+/// request, scope included, so a revoker can address the credential it is retiring.
+///
+/// That it runs *before the proxy stops* is the call site's order and is not asserted here: a
+/// revoker is an ordinary host process, so the only way a row could observe the listener is a
+/// TCP client, and neither runner is guaranteed one.
+///
+/// [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
+#[test]
+fn each_declared_revoker_runs_with_the_minters_own_stdin() {
+    let fx = Fixture::new();
+    let seen = fx.root().join("revoker-stdin.json");
+    let policy = with_revoker(
+        &fx,
+        &json!([os_bin("sh"), "-c", format!("cat > {}", seen.display())]),
+    );
+    let output = fx
+        .run_under(&policy, &[&os_bin("true")])
+        .output()
+        .expect("playpen");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdin = std::fs::read_to_string(&seen).expect("the revoker's stdin");
+    let request: Value = serde_json::from_str(&stdin).expect("JSON");
+    assert_eq!(request["version"], 1);
+    assert_eq!(request["route"]["host"], "api.github.com");
+    assert_eq!(
+        request["route"]["path_prefix"],
+        "/repos/firefly-engineering/"
+    );
+    // The same stdin the minter got: a workspace route carries that workspace's forge scope.
+    assert_eq!(request["scope"], json!({"org": "firefly-engineering"}));
+    // Nothing of the run's own teardown went wrong.
+    let id = fx.run_ids().pop().expect("a record");
+    assert_eq!(fx.record(&id)["teardown"], json!([]));
+}
+
+/// **A failing revoker is written to the run record and does not change the exit status**
+/// ([spec §4.2] step 18): the caller asked what the agent did, and a stumbled cleanup must not
+/// overwrite the answer.
+#[test]
+fn a_failing_revoker_goes_to_the_record_and_leaves_the_exit_status_alone() {
+    let fx = Fixture::new();
+    let policy = with_revoker(&fx, &json!([os_bin("sh"), "-c", "cat >/dev/null; exit 9"]));
+    let output = fx
+        .run_under(&policy, &[&os_bin("sh"), "-c", "exit 3"])
+        .output()
+        .expect("playpen");
+    // The child's status, not the revoker's, and not a refusal.
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    let id = fx.run_ids().pop().expect("a record");
+    let record = fx.record(&id);
+    assert_eq!(record["status"], 3);
+    assert_eq!(record["refusal"], Value::Null);
+    let teardown = record["teardown"].as_array().expect("a teardown list");
+    assert_eq!(teardown.len(), 1, "{teardown:?}");
+    let said = teardown[0].as_str().expect("a sentence");
+    assert!(said.contains("\"gh-app\""), "{said}");
+    assert!(said.contains("api.github.com"), "{said}");
+    assert!(said.contains("exited with"), "{said}");
+    // And `explain --run` replays it, which is the only place it is ever reported.
+    let human = fx
+        .playpen(&["explain", "--run", &id])
+        .output()
+        .expect("playpen explain");
+    let human = String::from_utf8(human.stdout).expect("utf-8");
+    assert!(
+        human
+            .lines()
+            .any(|line| line.starts_with("teardown ") && line.contains("exited with")),
+        "{human}"
+    );
+}
+
+/// A revoker that hangs does not hold teardown open for longer than the minter's own `timeout`,
+/// and the run still exits with the child's status.
+#[test]
+fn a_hanging_revoker_is_bounded_and_the_run_still_ends() {
+    let fx = Fixture::new();
+    let policy = with_revoker(
+        &fx,
+        &json!([os_bin("sh"), "-c", "cat >/dev/null; sleep 120"]),
+    );
+    let started = std::time::Instant::now();
+    let output = fx
+        .run_under(&policy, &[&os_bin("true")])
+        .output()
+        .expect("playpen");
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(60),
+        "teardown waited on the revoker for {:?}",
+        started.elapsed()
+    );
+    let id = fx.run_ids().pop().expect("a record");
+    let teardown = fx.record(&id)["teardown"]
+        .as_array()
+        .expect("a teardown list")
+        .clone();
+    assert_eq!(teardown.len(), 1, "{teardown:?}");
+    assert!(
+        teardown[0]
+            .as_str()
+            .expect("a sentence")
+            .contains("did not exit within 2s"),
+        "{teardown:?}"
+    );
+}
+
+/// **Ephemeral areas and the run scratch are gone after exit** ([spec §4.2] step 18), and a
+/// persistent area is not: that is the whole difference between the two lifetimes.
+#[test]
+fn the_run_scratch_and_every_ephemeral_area_are_gone_after_exit() {
+    let fx = Fixture::new();
+    let policy = fx.policy_named(
+        "lifetimes.json",
+        &json!({
+            "version": 1,
+            "workspaces": {"w": {
+                "roots": [{"path": fx.root(), "mode": "readwrite"}],
+                "areas": {"target": {"lifetime": "ephemeral"},
+                          "landing": {"lifetime": "persistent"}},
+            }},
+            "profiles": {"p": {
+                "workspaces": ["w"],
+                "toolchain": [],
+                "env": {"set": {"TARGET": {"area": "w/target"},
+                                "LANDING": {"area": "w/landing"}}},
+            }},
+        }),
+    );
+    // The child prints the three paths and writes a file into each, so nothing is removed merely
+    // for having been empty.
+    let output = fx
+        .run_under(
+            &policy,
+            &[
+                &os_bin("sh"),
+                "-c",
+                r#"for d in "$TMPDIR" "$TARGET" "$LANDING"; do echo "$d"; echo x > "$d/file"; done"#,
+            ],
+        )
+        .output()
+        .expect("playpen");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).expect("utf-8");
+    let paths: Vec<&str> = text.lines().collect();
+    let [scratch, ephemeral, persistent] = paths.as_slice() else {
+        panic!("three paths: {paths:?}");
+    };
+    assert!(
+        !std::path::Path::new(scratch).exists(),
+        "the run scratch outlived the run: {scratch}"
+    );
+    assert!(
+        !std::path::Path::new(ephemeral).exists(),
+        "an ephemeral area outlived the run: {ephemeral}"
+    );
+    assert!(
+        std::path::Path::new(persistent).join("file").exists(),
+        "a persistent area did not survive its run: {persistent}"
+    );
+}

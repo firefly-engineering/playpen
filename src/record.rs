@@ -241,6 +241,17 @@ pub struct Record {
     /// [spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters
     #[serde(default)]
     pub credentials: Vec<RecordedCredential>,
+    /// What went wrong during teardown, one sentence each ([spec §4.2] step 18). **No teardown
+    /// failure changes the exit status**, so this is the only place a revoker that did not run is
+    /// ever reported: the caller already has the child's status, and overwriting it to say the
+    /// cleanup stumbled would lose the answer it asked for.
+    ///
+    /// Additive, so a record written before teardown was reported still reads: it simply held
+    /// none.
+    ///
+    /// [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
+    #[serde(default)]
+    pub teardown: Vec<String>,
 }
 
 /// One minted credential as recorded: enough to answer "why did the push stop working" — the
@@ -375,6 +386,7 @@ impl RunRecord {
             refusal: None,
             fault: None,
             credentials: Vec::new(),
+            teardown: Vec::new(),
         };
         // Staged whole, then linked into place: a reader never sees half of one, and a link
         // that exists already is a collision, which refuses rather than overwrites another run.
@@ -422,6 +434,14 @@ impl RunRecord {
     /// What this run minted, by destination and expiry. The token is never among it.
     pub fn credentials(&mut self, credentials: Vec<RecordedCredential>) {
         self.record.credentials = credentials;
+    }
+
+    /// One thing that went wrong tearing the run down ([spec §4.2] step 18). It is written to the
+    /// record and nowhere else, and changes no exit status.
+    ///
+    /// [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
+    pub fn torn_down(&mut self, failure: String) {
+        self.record.teardown.push(failure);
     }
 
     /// The selection trace, and the profile it selected if it did.
