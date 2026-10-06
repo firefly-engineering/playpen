@@ -286,8 +286,51 @@ impl Ca {
 pub struct Route {
     pub host: String,
     pub path_prefix: String,
-    pub secret: Zeroizing<String>,
+    pub secret: Secret,
     pub allowed: Allowed,
+}
+
+/// One route's real secret, held so that **renewal can replace it in place** ([spec §7.2]): the
+/// proxy reads it on every request and the supervisor's renewal writes it between two of them,
+/// so it is behind a lock and shared rather than owned by either.
+///
+/// Zeroized on every write and on the last drop, so a token that has been renewed away does not
+/// stay in this process's memory behind the one that replaced it.
+///
+/// [spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters
+#[derive(Clone)]
+pub struct Secret(Arc<Mutex<Zeroizing<String>>>);
+
+impl Secret {
+    pub fn new(secret: String) -> Self {
+        Self(Arc::new(Mutex::new(Zeroizing::new(secret))))
+    }
+
+    /// Put `secret` in place of what this held, which is zeroized as it goes.
+    pub fn replace(&self, secret: String) {
+        *self.held() = Zeroizing::new(secret);
+    }
+
+    /// The secret as it stands, copied. A copy rather than a guard because the caller goes on to
+    /// talk to upstream, and a request must not hold this lock while it does: renewal would wait
+    /// on the slowest destination.
+    pub(crate) fn read(&self) -> Zeroizing<String> {
+        self.held().clone()
+    }
+
+    /// A poisoned lock is used anyway: what it guards is one string replaced whole, never left
+    /// half-written, and a panic in a proxy thread has already torn the run down.
+    fn held(&self) -> std::sync::MutexGuard<'_, Zeroizing<String>> {
+        self.0.lock().unwrap_or_else(|held| held.into_inner())
+    }
+}
+
+/// Never the secret: a `Debug` that printed it would put it in every log line that formatted a
+/// route.
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(<redacted>)")
+    }
 }
 
 /// What a credential route allows ([spec §7.6]).
@@ -924,7 +967,7 @@ fn decide(head: &[u8], host: &str, broker: &Broker) -> Option<Decision> {
     if route.is_some_and(|route| !route.allows(method, matched)) {
         return Some(Decision::Denied);
     }
-    let secret = route.map(|route| route.secret.as_str());
+    let secret = route.map(|route| route.secret.read());
     let mut body = Body::None;
     let mut out = Vec::with_capacity(head.len() + 64);
     out.extend_from_slice(format!("{method} {path} HTTP/1.1\r\n").as_bytes());
@@ -956,7 +999,7 @@ fn decide(head: &[u8], host: &str, broker: &Broker) -> Option<Decision> {
             // A value is UTF-8 here, because that is what carrying the phantom required.
             let value = std::str::from_utf8(value).unwrap_or_default();
             let replaced = match secret {
-                Some(secret) => value.replace(phantom, secret),
+                Some(ref secret) => value.replace(phantom, secret.as_str()),
                 // Stripped rather than forwarded: the phantom is not a secret, but it spends this
                 // run's credentials for anyone who learns it.
                 None => value.replace(phantom, ""),
@@ -1072,7 +1115,7 @@ mod tests {
         Route {
             host: "localhost".into(),
             path_prefix: prefix.into(),
-            secret: Zeroizing::new(secret.into()),
+            secret: Secret::new(secret.into()),
             allowed: Allowed::Everything,
         }
     }
@@ -1246,7 +1289,7 @@ mod tests {
                 vec![Route {
                     host: "localhost".into(),
                     path_prefix: "/".into(),
-                    secret: Zeroizing::new("the-real-secret".into()),
+                    secret: Secret::new("the-real-secret".into()),
                     allowed: Allowed::Only(vec![rule("POST", "/v1/messages")]),
                 }],
                 roots,
@@ -1405,7 +1448,7 @@ mod tests {
         let broker = brokering(vec![Route {
             host: "localhost".into(),
             path_prefix: "/".into(),
-            secret: Zeroizing::new("the-real-secret".into()),
+            secret: Secret::new("the-real-secret".into()),
             // A `GET`-only set cannot `clone`: a git fetch is `GET …/info/refs` then
             // `POST …/git-upload-pack` ([spec §7.6]).
             allowed: Allowed::Only(vec![
@@ -1482,7 +1525,7 @@ mod tests {
         assert!(request(&brokering(vec![Route {
             host: "localhost".into(),
             path_prefix: "/".into(),
-            secret: Zeroizing::new("s".into()),
+            secret: Secret::new("s".into()),
             allowed: Allowed::Only(Vec::new()),
         }])));
     }
@@ -1497,7 +1540,7 @@ mod tests {
         let broker = brokering(vec![Route {
             host: "localhost".into(),
             path_prefix: "/v1/".into(),
-            secret: Zeroizing::new("the-real-secret".into()),
+            secret: Secret::new("the-real-secret".into()),
             allowed: Allowed::Only(vec![rule("POST", "/v1/messages")]),
         }]);
         // `DELETE /other` matches neither the prefix nor the rule, so no route selects it.
@@ -1613,7 +1656,7 @@ mod tests {
         let broker = brokering(vec![Route {
             host: "api.anthropic.com".into(),
             path_prefix: "/".into(),
-            secret: Zeroizing::new("s".into()),
+            secret: Secret::new("s".into()),
             allowed: Allowed::Everything,
         }]);
         assert!(broker.routed("api.anthropic.com"));

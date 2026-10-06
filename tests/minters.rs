@@ -11,6 +11,13 @@ use serde_json::{Value, json};
 
 use common::{Fixture, assert_refused, os_bin};
 
+/// Two seconds from now as an RFC 3339 timestamp, in whichever `date` the runner has: GNU takes
+/// `-d`, BSD — which is macOS's — takes `-v`. A near expiry has to be computed rather than
+/// written, because renewal is due after a fraction of the credential's **own** life, so a
+/// literal timestamp years away would never come due inside a test.
+const SOON: &str = "TZ=UTC date -u -d '+2 seconds' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+                    || date -u -v+2S '+%Y-%m-%dT%H:%M:%SZ'";
+
 /// A policy with one profile route through a minter that is `script`.
 fn with_minter(fx: &Fixture, name: &str, script: &str, timeout: Option<u64>) -> PathBuf {
     let mut minter = json!({"command": [os_bin("sh"), "-c", script]});
@@ -582,4 +589,115 @@ fn the_run_scratch_and_every_ephemeral_area_are_gone_after_exit() {
         std::path::Path::new(persistent).join("file").exists(),
         "a persistent area did not survive its run: {persistent}"
     );
+}
+
+/// **A short-lived credential is re-minted before expiry, and the run record holds each new
+/// `expires_at`** ([spec §7.2]). The minter answers with a fresh expiry every time, so the one
+/// the record ends with is a renewal's and not the launch's.
+///
+/// [spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters
+#[test]
+fn a_short_lived_credential_is_re_minted_and_each_new_expiry_is_recorded() {
+    let fx = Fixture::new();
+    let mints = fx.root().join("mints");
+    // A two-second credential, so the first renewal is due one and a half seconds in. Every
+    // expiry it answers with is appended, so the last line is the one still in force.
+    let policy = with_minter(
+        &fx,
+        "short",
+        &format!(
+            r#"cat >/dev/null
+               expiry=$({soon})
+               echo "$expiry" >> {mints}
+               printf '{{"token":"s3cret","expires_at":"%s"}}' "$expiry""#,
+            soon = SOON,
+            mints = mints.display(),
+        ),
+        None,
+    );
+    // The child waits long enough for a renewal to land, then exits of its own accord.
+    let output = fx
+        .run_under(&policy, &[&os_bin("sh"), "-c", "exec sleep 3"])
+        .output()
+        .expect("playpen");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let answered = std::fs::read_to_string(&mints).expect("the expiries the minter answered with");
+    let answered: Vec<&str> = answered.lines().collect();
+    assert!(
+        answered.len() >= 2,
+        "the credential was never re-minted: {answered:?}"
+    );
+    let id = fx.run_ids().pop().expect("a record");
+    let record = fx.record(&id);
+    // The record holds the latest expiry, which is a renewal's and not the launch's.
+    let credentials = record["credentials"].as_array().expect("credentials");
+    assert_eq!(credentials.len(), 1, "{credentials:?}");
+    assert_eq!(
+        credentials[0]["expires_at"],
+        *answered.last().expect("an expiry"),
+        "the record kept an expiry a renewal had replaced"
+    );
+    assert_ne!(
+        credentials[0]["expires_at"], answered[0],
+        "the record kept the expiry the launch minted"
+    );
+    // A renewal that worked is not a lapse, and renewal is never a refusal.
+    assert_eq!(record["lapsed"], json!([]));
+    assert_eq!(record["refusal"], Value::Null);
+    // Never a token, in any of it.
+    assert!(!record.to_string().contains("s3cret"), "{record}");
+}
+
+/// **A failed re-mint leaves the run alive and the credential lapses** ([spec §7.2]): it is not a
+/// refusal, the child exits with its own status, and the record says why its requests stopped
+/// authenticating.
+///
+/// [spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters
+#[test]
+fn a_failed_re_mint_leaves_the_run_alive_and_records_the_lapse() {
+    let fx = Fixture::new();
+    let expiry = fx.root().join("expiry");
+    // The first mint answers with a two-second credential and every later one fails, so the
+    // launch succeeds and the renewal that comes due one and a half seconds in does not.
+    let policy = with_minter(
+        &fx,
+        "flaky",
+        &format!(
+            r#"cat >/dev/null
+               if [ -f {expiry} ]; then exit 4; fi
+               answered=$({soon})
+               echo "$answered" > {expiry}
+               printf '{{"token":"s3cret","expires_at":"%s"}}' "$answered""#,
+            soon = SOON,
+            expiry = expiry.display(),
+        ),
+        None,
+    );
+    let output = fx
+        .run_under(&policy, &[&os_bin("sh"), "-c", "exec sleep 3"])
+        .output()
+        .expect("playpen");
+    // The child's own status, and no refusal: a re-mint failure mid-run cannot be one.
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let id = fx.run_ids().pop().expect("a record");
+    let record = fx.record(&id);
+    assert_eq!(record["refusal"], Value::Null, "{record}");
+    assert_eq!(record["status"], 0);
+    let lapsed = record["lapsed"].as_array().expect("a lapse list");
+    assert_eq!(lapsed.len(), 1, "{lapsed:?}");
+    let said = lapsed[0].as_str().expect("a sentence");
+    assert!(said.contains("api.anthropic.com"), "{said}");
+    assert!(said.contains("lapses"), "{said}");
+    assert!(said.contains("401"), "{said}");
+    // The expiry stays the one that is still in force: nothing replaced it.
+    let minted = std::fs::read_to_string(&expiry).expect("the launch's expiry");
+    assert_eq!(record["credentials"][0]["expires_at"], minted.trim());
 }

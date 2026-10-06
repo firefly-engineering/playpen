@@ -236,7 +236,7 @@ pub fn mint(name: &str, minter: &Minter, request: &Request) -> Result<Minted, Re
             "returned an empty token".into(),
         ));
     }
-    if !is_rfc_3339(&expires_at) {
+    if instant(&expires_at).is_none() {
         return Err(refusal(
             Code::MinterMalformed,
             format!("returned {expires_at:?} as expires_at, which is not an RFC 3339 timestamp"),
@@ -337,51 +337,76 @@ fn wait_bounded(child: &mut Child, timeout: Duration) -> Option<std::process::Ex
     }
 }
 
-/// Whether `text` is shaped like an RFC 3339 timestamp: `YYYY-MM-DDTHH:MM:SS`, an optional
-/// fractional part, and `Z` or a `±HH:MM` offset. A scanner, not a pattern: the layout is fixed,
-/// so there is nothing for a grammar to do.
-fn is_rfc_3339(text: &str) -> bool {
+/// The instant `text` names, as whole seconds since the epoch, or `None` where it is not an
+/// RFC 3339 timestamp: `YYYY-MM-DDTHH:MM:SS`, an optional fractional part, and `Z` or a `±HH:MM`
+/// offset.
+///
+/// A scanner, not a pattern: the layout is fixed, so there is nothing for a grammar to do. It
+/// both validates — which is what `refusal.minter.malformed` rests on — and yields the instant,
+/// because a credential whose expiry playpen can read but cannot order is one renewal could never
+/// act on.
+///
+/// The fraction is dropped rather than rounded: a credential is never renewed on the strength of
+/// a millisecond. A timestamp before the epoch, which no expiry is, reads as `None`.
+fn instant(text: &str) -> Option<u64> {
     let bytes = text.as_bytes();
     let digits = |at: usize, count: usize| {
-        bytes.len() >= at + count && bytes[at..at + count].iter().all(u8::is_ascii_digit)
+        (bytes.len() >= at + count && bytes[at..at + count].iter().all(u8::is_ascii_digit))
+            .then(|| {
+                std::str::from_utf8(&bytes[at..at + count])
+                    .ok()?
+                    .parse::<i64>()
+                    .ok()
+            })
+            .flatten()
     };
     let at = |pos: usize, c: u8| bytes.get(pos) == Some(&c);
-    if !(digits(0, 4)
-        && at(4, b'-')
-        && digits(5, 2)
+    let (year, month, day) = (digits(0, 4)?, digits(5, 2)?, digits(8, 2)?);
+    let (hour, minute, second) = (digits(11, 2)?, digits(14, 2)?, digits(17, 2)?);
+    if !(at(4, b'-')
         && at(7, b'-')
-        && digits(8, 2)
         && (at(10, b'T') || at(10, b't') || at(10, b' '))
-        && digits(11, 2)
         && at(13, b':')
-        && digits(14, 2)
-        && at(16, b':')
-        && digits(17, 2))
+        && at(16, b':'))
     {
-        return false;
+        return None;
     }
     let mut rest = 19;
     if at(rest, b'.') {
         let start = rest + 1;
         let mut end = start;
-        while digits(end, 1) {
+        while digits(end, 1).is_some() {
             end += 1;
         }
         if end == start {
-            return false;
+            return None;
         }
         rest = end;
     }
-    match bytes.get(rest) {
-        Some(b'Z' | b'z') => rest + 1 == bytes.len(),
-        Some(b'+' | b'-') => {
-            digits(rest + 1, 2)
-                && at(rest + 3, b':')
-                && digits(rest + 4, 2)
-                && rest + 6 == bytes.len()
+    // The offset the timestamp is given in, in seconds east of UTC.
+    let offset = match bytes.get(rest) {
+        Some(b'Z' | b'z') if rest + 1 == bytes.len() => 0,
+        Some(sign @ (b'+' | b'-')) if rest + 6 == bytes.len() && at(rest + 3, b':') => {
+            let (hours, minutes) = (digits(rest + 1, 2)?, digits(rest + 4, 2)?);
+            let east = hours * 3600 + minutes * 60;
+            match sign {
+                b'-' => -east,
+                _ => east,
+            }
         }
-        _ => false,
-    }
+        _ => return None,
+    };
+    // Howard Hinnant's `days_from_civil`, counting from 0000-03-01 so the leap day ends each
+    // 400-year era — the inverse of the one `explain` renders a timestamp with.
+    let year = year - i64::from(month <= 2);
+    let era = year.div_euclid(400);
+    let year_of_era = year.rem_euclid(400);
+    let month_from_march = if month > 2 { month - 3 } else { month + 9 };
+    let day_of_year = (153 * month_from_march + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    let seconds = days * 86_400 + hour * 3600 + minute * 60 + second - offset;
+    u64::try_from(seconds).ok()
 }
 
 /// One route this launch minted a credential for, with the provenance of where the route was
@@ -411,7 +436,15 @@ pub struct Minting {
     ///
     /// [spec §7.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#76-endpoint-rule-sets
     pub allowed: crate::proxy::Allowed,
-    pub credential: Minted,
+    /// The secret itself, **shared with the proxy that spends it and with the renewal that
+    /// replaces it** ([spec §7.2]). One handle rather than a copy each, so there is never a
+    /// second token in this process behind the one in use.
+    ///
+    /// [spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters
+    pub secret: crate::proxy::Secret,
+    /// When the credential now in `secret` expires, as the minter stated it. Replaced by each
+    /// renewal, which is why the run record is written again at teardown.
+    pub expires_at: String,
 }
 
 impl Minting {
@@ -422,20 +455,18 @@ impl Minting {
         crate::proxy::Route {
             host: self.route.host.clone(),
             path_prefix: self.route.path_prefix.clone(),
-            secret: Zeroizing::new(self.credential.secret().to_owned()),
+            secret: self.secret.clone(),
             allowed: self.allowed.clone(),
         }
     }
-}
 
-impl Minting {
     /// What the run record holds about this credential: never the token.
     pub fn recorded(&self) -> crate::record::RecordedCredential {
         crate::record::RecordedCredential {
             host: self.route.host.clone(),
             path_prefix: self.route.path_prefix.clone(),
             minter: self.minter.clone(),
-            expires_at: self.credential.expires_at.clone(),
+            expires_at: self.expires_at.clone(),
             from: self.from.clone(),
         }
     }
@@ -474,10 +505,230 @@ pub fn resolve(
             delivery: route.delivery.env.clone(),
             from,
             allowed: allowed(policy, route),
-            credential,
+            secret: crate::proxy::Secret::new(credential.secret().to_owned()),
+            expires_at: credential.expires_at,
         });
     }
     Ok(minted)
+}
+
+/// How much of a credential's own life passes before it is re-minted ([spec §7.2]), as a
+/// fraction: four fifths, so the last fifth is slack for a slow minter.
+///
+/// A fraction rather than a fixed lead, because playpen does not choose how long a credential
+/// lives. A fixed lead of minutes is a lead a five-second credential is already inside the moment
+/// it is minted, which would renew it as fast as the minter could run; a fraction renews a short
+/// life proportionally often and a long one well before the provider stops taking it.
+const RENEW_AFTER: (u64, u64) = (4, 5);
+
+/// The shortest a credential is ever held before being re-minted. A minter answering with an
+/// expiry already past would otherwise be re-invoked in a tight loop.
+const MIN_LIFE: Duration = Duration::from_secs(1);
+
+/// How often renewal looks at its credentials. Teardown joins this thread, so the tick is also
+/// the longest teardown waits on a renewal that has nothing to do.
+const RENEW_TICK: Duration = Duration::from_millis(250);
+
+/// One credential renewal keeps alive. Everything is owned, because the thread outlives the
+/// borrow of the policy it was built from.
+struct Kept {
+    /// The declared minter's name, which every sentence about it names.
+    name: String,
+    minter: Minter,
+    request: Request,
+    secret: crate::proxy::Secret,
+    /// When the credential now in `secret` was minted and when it expires, in whole seconds since
+    /// the epoch.
+    minted_at: u64,
+    expires_at: u64,
+    /// Set once a re-mint has failed. **A re-mint failure mid-run cannot be a refusal**: the
+    /// credential lapses and the provider's `401` stands ([spec §7.2]). Lapsed is final rather
+    /// than retried, because a minter that could not answer is one whose keystore wants an
+    /// operator, and retrying every tick would hammer it for the rest of the run.
+    ///
+    /// [spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters
+    lapsed: bool,
+}
+
+impl Kept {
+    /// When this credential is due to be re-minted, in whole seconds since the epoch.
+    fn due(&self) -> u64 {
+        let life = self.expires_at.saturating_sub(self.minted_at);
+        let after = (life * RENEW_AFTER.0 / RENEW_AFTER.1).max(MIN_LIFE.as_secs());
+        self.minted_at.saturating_add(after)
+    }
+}
+
+/// What renewal did, read once the child has exited and written to the run record.
+#[derive(Debug, Default)]
+pub struct Renewed {
+    /// Each credential's `expires_at` as it now stands, by destination. The run record holds each
+    /// new one ([spec §7.2]), so a reader can see the credential was alive when the push failed.
+    ///
+    /// [spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters
+    pub expiry: Vec<(Destination, String)>,
+    /// One sentence per re-mint that failed, after which that credential lapsed. Not a refusal
+    /// and not a teardown failure: the run stayed alive and this is why its requests stopped
+    /// authenticating.
+    pub lapsed: Vec<String>,
+}
+
+impl Renewed {
+    /// Put each credential's latest expiry back onto `credentials`, so what the run record is
+    /// written from is the credential as it now stands rather than as the launch minted it.
+    ///
+    /// Matched by destination, which is unique across a run's route table: the coherence tier has
+    /// refused two routes on one host whose prefixes are not ordered, and no two routes can share
+    /// both a host and a prefix.
+    pub fn apply(&self, credentials: &mut [Minting]) {
+        for (route, expires_at) in &self.expiry {
+            for minted in credentials.iter_mut().filter(|m| m.route == *route) {
+                minted.expires_at = expires_at.clone();
+            }
+        }
+    }
+}
+
+/// The renewal of a run's credentials, for as long as the run lasts.
+pub struct Renewing {
+    stopping: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    renewed: std::sync::Arc<std::sync::Mutex<Renewed>>,
+    renewing: Option<std::thread::JoinHandle<()>>,
+}
+
+/// Re-mint every credential of `credentials` as it nears expiry, in a thread of the supervisor's
+/// own ([spec §4.2] step 17).
+///
+/// The secret is replaced **in place**, in the handle the proxy already holds, so a request in
+/// flight when a renewal lands either sends the old secret or the new one and never half of
+/// either — and nothing about the child's environment changes, because what the child holds is
+/// the phantom.
+///
+/// Renewal is not capability expansion: the request handed to the minter is the one the launch
+/// handed it, so a renewed credential has exactly the scope the first one did.
+///
+/// [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
+pub fn renew(policy: &crate::policy::Policy, credentials: &[Minting]) -> Renewing {
+    let mut kept: Vec<Kept> = credentials
+        .iter()
+        .filter_map(|minted| {
+            Some(Kept {
+                name: minted.minter.clone(),
+                minter: policy.minters.get(&minted.minter)?.clone(),
+                request: minted.request.clone(),
+                secret: minted.secret.clone(),
+                // The launch minted it just now, which is the only issue time there is: a minter
+                // states when a credential expires and never when it was made.
+                minted_at: now_unix_s(),
+                // An expiry that does not read as an instant cannot happen — the mint refused one
+                // — so one here is a credential renewal cannot order, and it is left alone.
+                expires_at: instant(&minted.expires_at)?,
+                lapsed: false,
+            })
+        })
+        .collect();
+    let stopping = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let renewed = std::sync::Arc::new(std::sync::Mutex::new(Renewed::default()));
+    if kept.is_empty() {
+        return Renewing {
+            stopping,
+            renewed,
+            renewing: None,
+        };
+    }
+    let flag = std::sync::Arc::clone(&stopping);
+    let reporting = std::sync::Arc::clone(&renewed);
+    let renewing = std::thread::Builder::new()
+        .name("playpen-renewal".into())
+        .spawn(move || {
+            while !flag.load(std::sync::atomic::Ordering::SeqCst) {
+                let now = now_unix_s();
+                for keeping in kept.iter_mut().filter(|k| !k.lapsed) {
+                    if now < keeping.due() {
+                        continue;
+                    }
+                    // Checked again here: a mint is bounded by its own timeout, and teardown
+                    // should not start one it will then wait out.
+                    if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                        return;
+                    }
+                    match mint(&keeping.name, &keeping.minter, &keeping.request) {
+                        Ok(minted) => {
+                            keeping.secret.replace(minted.secret().to_owned());
+                            keeping.minted_at = now_unix_s();
+                            // An expiry that does not read stops renewal for this credential
+                            // rather than being guessed at.
+                            match instant(&minted.expires_at) {
+                                Some(expires_at) => keeping.expires_at = expires_at,
+                                None => keeping.lapsed = true,
+                            }
+                            report(&reporting, |renewed| {
+                                renewed.expiry.push((
+                                    keeping.request.route.clone(),
+                                    minted.expires_at.clone(),
+                                ));
+                            });
+                        }
+                        Err(refusal) => {
+                            keeping.lapsed = true;
+                            report(&reporting, |renewed| {
+                                renewed.lapsed.push(format!(
+                                    "the credential for {}{} was not renewed, so it lapses and \
+                                     the provider's own 401 stands: {refusal}",
+                                    keeping.request.route.host, keeping.request.route.path_prefix,
+                                ));
+                            });
+                        }
+                    }
+                }
+                std::thread::sleep(RENEW_TICK);
+            }
+        })
+        .ok();
+    Renewing {
+        stopping,
+        renewed,
+        renewing,
+    }
+}
+
+/// Write into the shared report, using a poisoned lock anyway: what it guards is two lists only
+/// ever appended to, and a panic in the renewal thread has nothing to do with their contents.
+fn report(renewed: &std::sync::Mutex<Renewed>, write: impl FnOnce(&mut Renewed)) {
+    write(&mut renewed.lock().unwrap_or_else(|held| held.into_inner()));
+}
+
+impl Renewing {
+    /// Stop renewing and say what renewal did ([spec §4.2] step 18). First in teardown, before
+    /// the revokers: a credential being revoked must not be re-minted behind the revoker's back.
+    ///
+    /// Joined rather than detached, so no minter is still running when the run exits. The wait is
+    /// bounded by that minter's own `timeout`, which is the same bound teardown already accepts
+    /// for a revoker.
+    ///
+    /// [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
+    pub fn stop(&mut self) -> Renewed {
+        self.stopping
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(renewing) = self.renewing.take() {
+            let _ = renewing.join();
+        }
+        std::mem::take(&mut *self.renewed.lock().unwrap_or_else(|held| held.into_inner()))
+    }
+}
+
+impl Drop for Renewing {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
+
+/// Now, in whole seconds since the epoch. A clock before 1970 is a host fault, and then every
+/// credential reads as due at once, which re-mints rather than hangs.
+fn now_unix_s() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
 }
 
 /// Run every declared revoker of `credentials`, writing each failure to `record`
@@ -871,6 +1122,229 @@ mod tests {
         assert_eq!(DEFAULT_TIMEOUT, Duration::from_secs(30));
     }
 
+    /// A credential is re-minted after four fifths of **its own life**, never on a fixed lead: a
+    /// lead of minutes is one a five-second credential is already inside the moment it is minted,
+    /// and renewing it as fast as the minter could run is not renewal.
+    #[test]
+    fn a_credential_is_due_after_four_fifths_of_its_own_life() {
+        let kept = |minted_at: u64, expires_at: u64| Kept {
+            name: "m".into(),
+            minter: minter("true", None),
+            request: request(),
+            secret: crate::proxy::Secret::new("s".into()),
+            minted_at,
+            expires_at,
+            lapsed: false,
+        };
+        // An hour's life is due after 48 minutes, well before the provider stops taking it.
+        assert_eq!(kept(1_000, 1_000 + 3600).due(), 1_000 + 2880);
+        // A short life is renewed proportionally often rather than at once and forever.
+        assert_eq!(kept(1_000, 1_000 + 100).due(), 1_000 + 80);
+        // Below the floor, and for an expiry already past, the credential is held for `MIN_LIFE`
+        // rather than re-minted in a tight loop.
+        assert_eq!(kept(1_000, 1_001).due(), 1_000 + MIN_LIFE.as_secs());
+        assert_eq!(kept(1_000, 1_000).due(), 1_000 + MIN_LIFE.as_secs());
+        assert_eq!(kept(1_000, 500).due(), 1_000 + MIN_LIFE.as_secs());
+    }
+
+    /// A short-lived credential is **re-minted before it expires, and the secret the proxy holds
+    /// is the new one** — replaced in the handle the proxy already has, so nothing of the child's
+    /// environment moves.
+    #[test]
+    fn a_short_lived_credential_is_re_minted_and_the_proxy_sees_the_new_secret() {
+        // A minter that answers with a new token each time and a two-second expiry, so the first
+        // renewal is due one and a half seconds in.
+        let counter = tempfile::NamedTempFile::new().expect("a file");
+        let script = format!(
+            r#"cat >/dev/null
+               n=$(( $(cat {count} 2>/dev/null || echo 0) + 1 ))
+               echo "$n" > {count}
+               printf '{{"token":"secret-%s","expires_at":"%s"}}' "$n" \
+                 "$(TZ=UTC date -u -d '+2 seconds' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+                    || date -u -v+2S '+%Y-%m-%dT%H:%M:%SZ')""#,
+            count = counter.path().display(),
+        );
+        let declared = minter(&script, None);
+        let minted = mint("short", &declared, &request()).expect("minted");
+        let credentials = vec![Minting {
+            request: request(),
+            route: request().route,
+            minter: "short".into(),
+            delivery: "T".into(),
+            from: "profile:p.credentials[0]".into(),
+            allowed: crate::proxy::Allowed::Everything,
+            secret: crate::proxy::Secret::new(minted.secret().to_owned()),
+            expires_at: minted.expires_at.clone(),
+        }];
+        let held = credentials[0].secret.clone();
+        assert_eq!(held.read().as_str(), "secret-1");
+        let policy_text = serde_json::json!({
+            "version": 1,
+            "minters": {"short": {"command": declared.command}},
+            "profiles": {},
+        });
+        let policy =
+            crate::policy::Policy::parse(&policy_text.to_string(), std::path::Path::new("/p.json"))
+                .expect("a policy");
+
+        let mut renewing = renew(&policy, &credentials);
+        // Well inside the credential's own life, so the run never ran unauthenticated.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while held.read().as_str() == "secret-1" {
+            assert!(
+                Instant::now() < deadline,
+                "the credential was not re-minted"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // The secret the proxy holds is the renewed one, in the same handle.
+        assert_eq!(held.read().as_str(), "secret-2");
+        let renewed = renewing.stop();
+        assert!(renewed.lapsed.is_empty(), "{renewed:?}");
+        // And the new expiry is reported, so the run record can hold it.
+        let (route, expires_at) = renewed.expiry.first().expect("a new expiry");
+        assert_eq!(*route, request().route);
+        assert!(instant(expires_at).is_some(), "{expires_at}");
+        assert_ne!(*expires_at, minted.expires_at);
+    }
+
+    /// **A failed re-mint is not a refusal**: the run stays alive, the credential lapses with the
+    /// secret it already had, and the provider's own `401` is the answer. It is never retried,
+    /// because a keystore that could not answer wants an operator, not a tight loop.
+    #[test]
+    fn a_failed_re_mint_leaves_the_run_alive_and_the_credential_lapses() {
+        let attempts = tempfile::NamedTempFile::new().expect("a file");
+        let script = format!(
+            "cat >/dev/null; echo x >> {}; exit 4",
+            attempts.path().display()
+        );
+        let declared = minter(&script, None);
+        let credentials = vec![Minting {
+            request: request(),
+            route: request().route,
+            minter: "flaky".into(),
+            delivery: "T".into(),
+            from: "profile:p.credentials[0]".into(),
+            allowed: crate::proxy::Allowed::Everything,
+            secret: crate::proxy::Secret::new("the-first-secret".into()),
+            // Already expired, so renewal is due at once.
+            expires_at: "2020-01-01T00:00:00Z".into(),
+        }];
+        let held = credentials[0].secret.clone();
+        let policy_text = serde_json::json!({
+            "version": 1,
+            "minters": {"flaky": {"command": declared.command}},
+            "profiles": {},
+        });
+        let policy =
+            crate::policy::Policy::parse(&policy_text.to_string(), std::path::Path::new("/p.json"))
+                .expect("a policy");
+
+        let mut renewing = renew(&policy, &credentials);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if std::fs::read_to_string(attempts.path()).is_ok_and(|a| a.lines().count() >= 1) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the re-mint was never attempted");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // Lapsed is final: a second tick does not try again.
+        std::thread::sleep(RENEW_TICK * 8);
+        let renewed = renewing.stop();
+        assert_eq!(
+            std::fs::read_to_string(attempts.path())
+                .expect("the attempts")
+                .lines()
+                .count(),
+            1,
+            "a failed re-mint was retried"
+        );
+        // The credential it already had is untouched: it lapses rather than vanishing, so the
+        // provider answers and not the broker.
+        assert_eq!(held.read().as_str(), "the-first-secret");
+        assert!(renewed.expiry.is_empty(), "{renewed:?}");
+        let lapsed = renewed.lapsed.first().expect("a sentence");
+        assert!(lapsed.contains("api.github.com"), "{lapsed}");
+        assert!(lapsed.contains("lapses"), "{lapsed}");
+        assert!(lapsed.contains("401"), "{lapsed}");
+    }
+
+    /// Renewal is not capability expansion ([spec §7.2]): the re-mint is handed the request the
+    /// launch handed the minter, so a renewed credential has exactly the scope the first one did.
+    ///
+    /// [spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters
+    #[test]
+    fn a_renewal_is_handed_the_launchs_own_request() {
+        let seen = tempfile::NamedTempFile::new().expect("a file");
+        let script = format!(
+            r#"cat > {}; printf '{{"token":"renewed","expires_at":"2030-01-01T00:00:00Z"}}'"#,
+            seen.path().display(),
+        );
+        let declared = minter(&script, None);
+        let request = Request::new(
+            Destination {
+                host: "github.com".into(),
+                path_prefix: "/firefly-engineering/".into(),
+            },
+            Some(ForgeScope::Org("firefly-engineering".into())),
+        );
+        let credentials = vec![Minting {
+            request: request.clone(),
+            route: request.route.clone(),
+            minter: "gh-app".into(),
+            delivery: "GH_TOKEN".into(),
+            from: "workspace:w.credentials[0]".into(),
+            allowed: crate::proxy::Allowed::Everything,
+            secret: crate::proxy::Secret::new("the-first-secret".into()),
+            expires_at: "2020-01-01T00:00:00Z".into(),
+        }];
+        let held = credentials[0].secret.clone();
+        let policy_text = serde_json::json!({
+            "version": 1,
+            "minters": {"gh-app": {"command": declared.command}},
+            "profiles": {},
+        });
+        let policy =
+            crate::policy::Policy::parse(&policy_text.to_string(), std::path::Path::new("/p.json"))
+                .expect("a policy");
+
+        let mut renewing = renew(&policy, &credentials);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while held.read().as_str() == "the-first-secret" {
+            assert!(
+                Instant::now() < deadline,
+                "the credential was not re-minted"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let mut renewed = renewing.stop();
+        assert_eq!(held.read().as_str(), "renewed");
+        // The same stdin the launch's own mint would have got, scope included.
+        assert_eq!(
+            std::fs::read_to_string(seen.path()).expect("the stdin"),
+            request.body()
+        );
+        // And the new expiry lands back on the credential the record is written from.
+        let mut credentials = credentials;
+        renewed.expiry.truncate(1);
+        renewed.apply(&mut credentials);
+        assert_eq!(credentials[0].expires_at, "2030-01-01T00:00:00Z");
+        assert_eq!(credentials[0].recorded().expires_at, "2030-01-01T00:00:00Z");
+    }
+
+    /// A profile with no credential route has nothing to renew, so no thread is started.
+    #[test]
+    fn a_run_with_no_credential_renews_nothing() {
+        let policy =
+            crate::policy::Policy::parse(r#"{"version": 1}"#, std::path::Path::new("/p.json"))
+                .expect("a policy");
+        let mut renewing = renew(&policy, &[]);
+        assert!(renewing.renewing.is_none(), "a thread with nothing to do");
+        let renewed = renewing.stop();
+        assert!(renewed.expiry.is_empty() && renewed.lapsed.is_empty());
+    }
+
     #[test]
     fn rfc_3339_is_recognised_by_its_layout() {
         for good in [
@@ -881,7 +1355,7 @@ mod tests {
             "2026-10-05T12:00:00+02:00",
             "2026-10-05T12:00:00.000001-05:00",
         ] {
-            assert!(is_rfc_3339(good), "{good}");
+            assert!(instant(good).is_some(), "{good}");
         }
         for bad in [
             "",
@@ -893,8 +1367,42 @@ mod tests {
             "2026-10-05T12:00:00Zz",
             "20261005T120000Z",
             "2026-10-05T12:00:00Z ",
+            // Before the epoch, which no expiry is, and which has no instant to order by.
+            "1969-12-31T23:59:59Z",
         ] {
-            assert!(!is_rfc_3339(bad), "{bad}");
+            assert!(instant(bad).is_none(), "{bad}");
+        }
+    }
+
+    /// The expiry is read as an instant, not only validated: a credential whose expiry playpen
+    /// could read but not order is one renewal could never act on.
+    #[test]
+    fn an_expiry_reads_as_the_instant_it_names() {
+        assert_eq!(instant("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(instant("1970-01-02T00:00:00Z"), Some(86_400));
+        // The ULID specification's own example time, to the second.
+        assert_eq!(instant("2016-07-30T22:36:16Z"), Some(1_469_918_176));
+        // Leap days land where they should, on a leap year and on a century that is one.
+        assert_eq!(instant("2000-02-29T00:00:00Z"), Some(951_782_400));
+        assert_eq!(instant("2024-12-31T23:59:59Z"), Some(1_735_689_599));
+        // An offset moves the instant, and the two spellings of one instant agree.
+        assert_eq!(
+            instant("2026-10-05T14:00:00+02:00"),
+            instant("2026-10-05T12:00:00Z")
+        );
+        assert_eq!(
+            instant("2026-10-05T07:00:00-05:00"),
+            instant("2026-10-05T12:00:00Z")
+        );
+        // The fraction is dropped rather than rounded: no credential is renewed on a millisecond.
+        assert_eq!(
+            instant("2026-10-05T12:00:00.999Z"),
+            instant("2026-10-05T12:00:00Z")
+        );
+        // It is the inverse of what `explain` renders, over a spread of instants.
+        for seconds in [0, 1, 86_399, 951_782_400, 1_469_918_176, 4_102_444_799] {
+            let rendered = crate::explain::timestamp(seconds * 1000);
+            assert_eq!(instant(&rendered), Some(seconds), "{rendered}");
         }
     }
 }

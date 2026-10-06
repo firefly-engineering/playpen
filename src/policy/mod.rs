@@ -55,7 +55,7 @@ pub struct Policy {
 /// A command that produces one secret ([spec §7.2]). Argv, never a shell string.
 ///
 /// [spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Minter {
     pub command: Vec<String>,

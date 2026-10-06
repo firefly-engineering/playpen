@@ -536,7 +536,7 @@ fn render_summary(record: &Record, out: &mut impl Write) -> io::Result<()> {
 }
 
 /// `unix_ms` as an RFC 3339 UTC timestamp, to the millisecond.
-fn timestamp(unix_ms: u64) -> String {
+pub(crate) fn timestamp(unix_ms: u64) -> String {
     let (year, month, day, ms) = civil(unix_ms);
     let (hour, minute, second, milli) = clock(ms);
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{milli:03}Z")

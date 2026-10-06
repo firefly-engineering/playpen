@@ -602,7 +602,7 @@ fn run(
     // run that wrote it.
     //
     // [spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters
-    let credentials = minter::resolve(&loaded.policy, profile, selected)?;
+    let mut credentials = minter::resolve(&loaded.policy, profile, selected)?;
     record.credentials(credentials.iter().map(minter::Minting::recorded).collect());
     // Step 11: the proxy exists **iff at least one credential route resolves** ([spec §6.2]). It
     // binds here, before the fork, so the port the child's environment names is one that already
@@ -683,6 +683,10 @@ fn run(
     //
     // [spec §6.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#62-the-broker
     let serving = std::cell::RefCell::new(None);
+    // Step 17's other half: re-mint near expiry, for as long as the child runs. It replaces each
+    // secret in the handle the proxy already holds, so nothing of the child's environment moves —
+    // what the child holds is the phantom.
+    let renewing = std::cell::RefCell::new(None);
     let status = child::run_confined(
         &caps,
         argv,
@@ -694,6 +698,7 @@ fn run(
             if let Some((bound, broker)) = bound {
                 *serving.borrow_mut() = Some(bound.serve(broker, pid));
             }
+            *renewing.borrow_mut() = Some(minter::renew(&loaded.policy, &credentials));
         },
         |fault| record.borrow_mut().fault(fault),
     );
@@ -701,6 +706,23 @@ fn run(
     // the scratch and the ephemeral areas go with `_provisioned`. **No teardown failure changes
     // the exit status** — `status` is already decided, and every failure below goes to the record
     // and nowhere else.
+    //
+    // Renewal stops before the revokers: a credential being revoked must not be re-minted behind
+    // the revoker's back. What it did goes into the record, because the record is the only place
+    // a credential that lapsed mid-run is ever reported.
+    if let Some(mut renewing) = renewing.into_inner() {
+        let renewed = renewing.stop();
+        let mut record = record.borrow_mut();
+        for lapsed in &renewed.lapsed {
+            record.lapsed(lapsed.clone());
+        }
+        // Written again with each credential's expiry as it now stands: the first write named the
+        // expiry the launch minted, which a renewal has since replaced.
+        if !renewed.expiry.is_empty() {
+            renewed.apply(&mut credentials);
+            record.credentials(credentials.iter().map(minter::Minting::recorded).collect());
+        }
+    }
     minter::revoke_all(&loaded.policy, &credentials, &mut record.borrow_mut());
     if let Some(mut serving) = serving.into_inner() {
         serving.stop();

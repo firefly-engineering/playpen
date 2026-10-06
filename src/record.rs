@@ -252,6 +252,18 @@ pub struct Record {
     /// [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
     #[serde(default)]
     pub teardown: Vec<String>,
+    /// One sentence per credential whose re-mint failed mid-run, after which it lapsed
+    /// ([spec §7.2]). **A re-mint failure is not a refusal**: the run stayed alive, so this is
+    /// the only answer to "why did the push stop working an hour in".
+    ///
+    /// Separate from `teardown`, because a credential that lapsed at minute ten is not a cleanup
+    /// that stumbled at the end.
+    ///
+    /// Additive, so a record written before renewal existed still reads.
+    ///
+    /// [spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters
+    #[serde(default)]
+    pub lapsed: Vec<String>,
 }
 
 /// One minted credential as recorded: enough to answer "why did the push stop working" — the
@@ -387,6 +399,7 @@ impl RunRecord {
             fault: None,
             credentials: Vec::new(),
             teardown: Vec::new(),
+            lapsed: Vec::new(),
         };
         // Staged whole, then linked into place: a reader never sees half of one, and a link
         // that exists already is a collision, which refuses rather than overwrites another run.
@@ -442,6 +455,14 @@ impl RunRecord {
     /// [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
     pub fn torn_down(&mut self, failure: String) {
         self.record.teardown.push(failure);
+    }
+
+    /// One credential whose re-mint failed mid-run, after which it lapsed ([spec §7.2]). Not a
+    /// refusal: the run went on, and this is why its requests stopped authenticating.
+    ///
+    /// [spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters
+    pub fn lapsed(&mut self, credential: String) {
+        self.record.lapsed.push(credential);
     }
 
     /// The selection trace, and the profile it selected if it did.
