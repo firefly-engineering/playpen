@@ -228,7 +228,7 @@ pub fn environment(
     // [spec §6.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#62-the-broker
     if let Some(broker) = broker {
         written.extend(broker.entries().into_iter().map(|(name, value)| Var {
-            name: name.into(),
+            name,
             value: Value::Written(value.into()),
             from: crate::proxy::FROM.into(),
         }));

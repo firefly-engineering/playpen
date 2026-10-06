@@ -316,8 +316,26 @@ pub struct Minting {
     pub route: Destination,
     /// The declared minter's name, which every refusal about it names.
     pub minter: String,
+    /// The variable the phantom is delivered in ([spec §7.1]). The policy authors it, which is why
+    /// the coherence tier holds it against every name playpen writes.
+    ///
+    /// [spec §7.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#71-credential-route
+    pub delivery: String,
     pub from: String,
     pub credential: Minted,
+}
+
+impl Minting {
+    /// This route as the proxy serves it: the destination, and the secret it puts in place of the
+    /// phantom. The one place the secret is handed on, and it is handed to the supervisor's own
+    /// proxy, in this process.
+    pub fn route(&self) -> crate::proxy::Route {
+        crate::proxy::Route {
+            host: self.route.host.clone(),
+            path_prefix: self.route.path_prefix.clone(),
+            secret: Zeroizing::new(self.credential.secret().to_owned()),
+        }
+    }
 }
 
 impl Minting {
@@ -362,6 +380,7 @@ pub fn resolve(
         minted.push(Minting {
             route: destination,
             minter: route.minter.clone(),
+            delivery: route.delivery.env.clone(),
             from,
             credential,
         });

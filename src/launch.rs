@@ -609,13 +609,33 @@ fn run(
     // exists; it starts serving once there is a child to tear down if it dies.
     //
     // [spec §6.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#62-the-broker
-    let bound = match credentials.is_empty() {
-        true => None,
-        false => Some(proxy::bind()?),
+    //
+    // The session CA is generated here too, its certificate written into the run scratch, and the
+    // run's one phantom made: the CA's private key never leaves this process ([spec §7.3]).
+    //
+    // [spec §7.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#73-session-phantom
+    let (bound, broker) = match credentials.is_empty() {
+        true => (None, None),
+        false => {
+            let bound = proxy::bind()?;
+            let ca = proxy::ca()?;
+            let certificate = layout.scratch().join(proxy::CA_FILE);
+            ca.write(&certificate)?;
+            let phantom = proxy::Phantom::random()?;
+            let set = proxy::Set {
+                addr: bound.addr(),
+                ca: certificate,
+                phantom: phantom.clone(),
+                deliveries: credentials
+                    .iter()
+                    .map(|minted| minted.delivery.clone())
+                    .collect(),
+            };
+            let routes = credentials.iter().map(minter::Minting::route).collect();
+            let serving = std::sync::Arc::new(proxy::Broker::new(ca, phantom, routes)?);
+            (Some((bound, serving)), Some(set))
+        }
     };
-    let broker = bound
-        .as_ref()
-        .map(|bound| proxy::Set { addr: bound.addr() });
     // Step 12: the capability set compiles on this mechanism.
     backend::check(&caps)?;
     // Step 13: the manifest, written on every run even when nothing is provisioned
@@ -671,8 +691,8 @@ fn run(
         || Ok(()),
         |pid| {
             record.borrow_mut().spawned(pid);
-            if let Some(bound) = bound {
-                *serving.borrow_mut() = Some(bound.serve(pid));
+            if let Some((bound, broker)) = bound {
+                *serving.borrow_mut() = Some(bound.serve(broker, pid));
             }
         },
         |fault| record.borrow_mut().fault(fault),

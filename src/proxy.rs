@@ -23,11 +23,17 @@
 //! [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
 //! [ADR 0013]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0013-the-proxy-is-the-supervisors-and-the-two-confinements-are-independent.md
 
+use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::os::fd::AsRawFd;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use zeroize::Zeroizing;
 
 use crate::code::Code;
 use crate::refusal::Refusal;
@@ -50,6 +56,21 @@ const MAX_HEAD: usize = 64 * 1024;
 /// The provenance of everything the broker authors in the child's environment.
 pub const FROM: &str = "broker";
 
+/// What the CA certificate is called in the run scratch. Public, because the certificate is: it is
+/// the key beside it that never leaves the supervisor.
+pub const CA_FILE: &str = "broker-ca.pem";
+
+/// The one protocol the broker speaks. Offered on both legs, so a client that would have chosen
+/// HTTP/2 chooses this instead rather than speaking something the broker would mangle.
+const ALPN: &[u8] = b"http/1.1";
+
+/// How many bytes of the session phantom. 32 bytes of the kernel's randomness, hex-encoded: long
+/// enough that a host process cannot guess it, which is the outward half of what the phantom is
+/// for ([spec §7.3]).
+///
+/// [spec §7.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#73-session-phantom
+const PHANTOM_BYTES: usize = 32;
+
 /// What hosts are never proxied: the agent's own loopback, so a language server, a dev server or
 /// an MCP server it started for itself is reached directly. Both spellings of the name are written
 /// because clients disagree about which they read ([spec §9.2]).
@@ -67,23 +88,297 @@ pub const NO_PROXY: &str = "localhost,127.0.0.1,::1";
 pub struct Set {
     /// Where the proxy is listening, which `HTTPS_PROXY` is rendered from.
     pub addr: SocketAddr,
+    /// The session CA's certificate in the run scratch, which both certificate variables name.
+    pub ca: PathBuf,
+    /// The session phantom, which every route's delivery variable carries. **Never a real
+    /// secret**: there is no mode in which one enters the sandbox's environment ([spec §7.3]).
+    ///
+    /// [spec §7.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#73-session-phantom
+    pub phantom: Phantom,
+    /// Every route's delivery variable, each carrying the phantom. One phantom rather than one
+    /// per credential, because delivery cannot hand one tool a choice between two values.
+    pub deliveries: Vec<String>,
 }
 
 impl Set {
-    /// The proxy entries, by name and value: rendered from the bound address, never formatted from
-    /// a string the policy supplied.
-    pub fn entries(&self) -> Vec<(&'static str, String)> {
-        vec![
-            ("HTTPS_PROXY", format!("http://{}", self.addr)),
-            ("NO_PROXY", NO_PROXY.to_owned()),
-            ("no_proxy", NO_PROXY.to_owned()),
+    /// The entries the broker writes, by name and value: rendered from the bound address and the
+    /// paths playpen made, never formatted from a string the policy supplied.
+    pub fn entries(&self) -> Vec<(String, String)> {
+        let mut entries = vec![
+            ("HTTPS_PROXY".to_owned(), format!("http://{}", self.addr)),
+            ("NO_PROXY".to_owned(), NO_PROXY.to_owned()),
+            ("no_proxy".to_owned(), NO_PROXY.to_owned()),
             // Bun and Node honour a proxy from the environment only when asked to
             // ([ADR 0012]), and both flagship agents are Bun.
             //
             // [ADR 0012]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0012-the-environment-is-constructed-and-exactly-one-author-writes-each-name.md
-            ("NODE_USE_ENV_PROXY", "1".to_owned()),
-        ]
+            ("NODE_USE_ENV_PROXY".to_owned(), "1".to_owned()),
+        ];
+        // Both names, because `git` and `curl` read one and Bun reads the other ([ADR 0012]).
+        let ca = self.ca.to_string_lossy().into_owned();
+        entries.push(("SSL_CERT_FILE".to_owned(), ca.clone()));
+        entries.push(("NODE_EXTRA_CA_CERTS".to_owned(), ca));
+        for delivery in &self.deliveries {
+            entries.push((delivery.clone(), self.phantom.as_str().to_owned()));
+        }
+        entries
     }
+}
+
+/// The session phantom ([spec §7.3]): one random bearer token per run, delivered into every
+/// route's delivery variable, which the proxy strips and replaces with the real secret.
+///
+/// It works in both directions. **Inward** it contains exfiltration: a secret that is not present
+/// cannot leak through a log line or a tool call. **Outward** it authenticates callers of the
+/// proxy — a host process can reach the listener but cannot present a token it never saw.
+///
+/// It belongs to the process tree, not to the agent: every child, a third-party MCP server
+/// included, inherits it and has full use of every route. That follows from the unit of policy,
+/// and endpoint rule sets bound every holder alike ([spec §7.6]).
+///
+/// [spec §7.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#73-session-phantom
+/// [spec §7.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#76-endpoint-rule-sets
+#[derive(Clone)]
+pub struct Phantom(Arc<String>);
+
+impl Phantom {
+    /// One phantom, from the kernel's randomness. A failure to get randomness is
+    /// `refusal.proxy.ca`: the broker could not be set up, and a guessable phantom would let any
+    /// host process spend the run's credentials.
+    pub fn random() -> Result<Self, Refusal> {
+        let mut bytes = [0u8; PHANTOM_BYTES];
+        getrandom::fill(&mut bytes).map_err(|e| {
+            Refusal::new(
+                Code::ProxyCa,
+                format!("the broker cannot make a session phantom: {e}"),
+            )
+        })?;
+        let mut hex = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            let _ = write!(hex, "{byte:02x}");
+        }
+        Ok(Self(Arc::new(hex)))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Never the phantom's value in a `Debug`: it is not a secret, but it spends the run's credentials
+/// for anyone who has it, so it is treated like one everywhere but the child's environment.
+impl std::fmt::Debug for Phantom {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Phantom(<redacted>)")
+    }
+}
+
+/// The interception CA ([spec §6.2]): **ephemeral, in-memory, and per-session.** Its private key
+/// never leaves the supervisor — it is never written anywhere, and dies with the process. Its
+/// certificate, which is public, goes into the run scratch.
+///
+/// A leaf is minted per host on first use and kept for the run, because a handshake must not wait
+/// on a key generation it has already done once.
+///
+/// [spec §6.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#62-the-broker
+pub struct Ca {
+    issuer: rcgen::Issuer<'static, rcgen::KeyPair>,
+    /// The certificate, PEM, which is what a client is told to trust.
+    pem: String,
+    certificate: CertificateDer<'static>,
+    leaves: Mutex<HashMap<String, Arc<Leaf>>>,
+}
+
+/// One host's leaf: the chain a client is served, and the key that proves it.
+struct Leaf {
+    chain: Vec<CertificateDer<'static>>,
+    /// PKCS#8 DER. Held as bytes because a `PrivateKeyDer` is not `Clone`, and a config is built
+    /// per connection.
+    key: Vec<u8>,
+}
+
+/// Generate the session CA. A failure is `refusal.proxy.ca`: a route resolved, and **a
+/// TLS-interception failure is a refusal, never a fallback to an opaque tunnel** — a tunnel would
+/// carry the phantom to the destination unexamined.
+pub fn ca() -> Result<Ca, Refusal> {
+    let failed = |what: &str, e: rcgen::Error| {
+        Refusal::new(
+            Code::ProxyCa,
+            format!("the broker cannot {what} for this session: {e}"),
+        )
+    };
+    let key = rcgen::KeyPair::generate().map_err(|e| failed("make a CA key", e))?;
+    let mut params =
+        rcgen::CertificateParams::new(Vec::new()).map_err(|e| failed("describe its CA", e))?;
+    // Path length zero: this CA signs end-entity certificates and nothing else.
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Constrained(0));
+    params.key_usages = vec![
+        rcgen::KeyUsagePurpose::KeyCertSign,
+        rcgen::KeyUsagePurpose::DigitalSignature,
+    ];
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "playpen session CA");
+    let certificate = params
+        .self_signed(&key)
+        .map_err(|e| failed("sign its CA", e))?;
+    Ok(Ca {
+        pem: certificate.pem(),
+        certificate: certificate.der().clone(),
+        issuer: rcgen::Issuer::new(params, key),
+        leaves: Mutex::new(HashMap::new()),
+    })
+}
+
+impl Ca {
+    /// Write the certificate — and only the certificate — where both certificate variables name
+    /// it. The key is not written, here or anywhere.
+    pub fn write(&self, at: &Path) -> Result<(), Refusal> {
+        std::fs::write(at, &self.pem).map_err(|e| {
+            Refusal::new(
+                Code::ProxyCa,
+                format!(
+                    "the broker cannot write its CA certificate {}: {e}",
+                    at.display()
+                ),
+            )
+        })
+    }
+
+    /// The leaf for `host`, minted on first use and kept for the run.
+    fn leaf(&self, host: &str) -> Result<Arc<Leaf>, rcgen::Error> {
+        if let Some(found) = self
+            .leaves
+            .lock()
+            .ok()
+            .and_then(|leaves| leaves.get(host).cloned())
+        {
+            return Ok(found);
+        }
+        let key = rcgen::KeyPair::generate()?;
+        let mut params = rcgen::CertificateParams::new(vec![host.to_owned()])?;
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, host);
+        let certificate = params.signed_by(&key, &self.issuer)?;
+        let leaf = Arc::new(Leaf {
+            // The CA beside the leaf, so a client that was given the certificate to trust can
+            // build the chain without having to have cached it.
+            chain: vec![certificate.der().clone(), self.certificate.clone()],
+            key: key.serialize_der(),
+        });
+        if let Ok(mut leaves) = self.leaves.lock() {
+            leaves.insert(host.to_owned(), Arc::clone(&leaf));
+        }
+        Ok(leaf)
+    }
+}
+
+/// One credential route the proxy can authenticate ([spec §7.1]): where it goes, and the secret it
+/// puts in place of the phantom.
+///
+/// `path_prefix` is **a selector and never access control**: it decides *which* credential a
+/// request gets, not whether the request may be made. What a credential may reach is an endpoint
+/// rule set's business ([spec §7.6]).
+///
+/// [spec §7.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#71-credential-route
+/// [spec §7.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#76-endpoint-rule-sets
+pub struct Route {
+    pub host: String,
+    pub path_prefix: String,
+    pub secret: Zeroizing<String>,
+}
+
+/// Everything the proxy needs to serve, shared by every connection thread.
+pub struct Broker {
+    ca: Ca,
+    phantom: Phantom,
+    routes: Vec<Route>,
+    upstream: Arc<rustls::ClientConfig>,
+}
+
+impl Broker {
+    /// The broker of a run with `routes`, delivering `phantom`, intercepting under `ca`.
+    ///
+    /// Upstream verification is the host's own trust store: playpen intercepts the agent's TLS and
+    /// must not weaken its own. A host with no usable roots is `refusal.proxy.ca` — there would be
+    /// nothing to verify a destination against, and the alternative is trusting whatever answers.
+    pub fn new(ca: Ca, phantom: Phantom, routes: Vec<Route>) -> Result<Self, Refusal> {
+        let mut roots = rustls::RootCertStore::empty();
+        let native = rustls_native_certs::load_native_certs();
+        for certificate in native.certs {
+            let _ = roots.add(certificate);
+        }
+        if roots.is_empty() {
+            return Err(Refusal::new(
+                Code::ProxyCa,
+                format!(
+                    "the broker cannot verify destinations: this host offers no trusted roots \
+                     ({} errors loading them)",
+                    native.errors.len()
+                ),
+            ));
+        }
+        Self::trusting(ca, phantom, routes, roots)
+    }
+
+    /// As [`Broker::new`], against `roots` rather than the host's own.
+    ///
+    /// A seam, so a test can stand up a destination of its own and show that a request reaches it
+    /// with the phantom stripped and the secret injected. Every launch uses [`Broker::new`]: there
+    /// is no policy field and no flag that reaches this, because a proxy that could be told to
+    /// trust something else is a proxy that can be told to trust an attacker.
+    pub fn trusting(
+        ca: Ca,
+        phantom: Phantom,
+        routes: Vec<Route>,
+        roots: rustls::RootCertStore,
+    ) -> Result<Self, Refusal> {
+        let failed = |detail: String| {
+            Refusal::new(
+                Code::ProxyCa,
+                format!("the broker cannot verify destinations: {detail}"),
+            )
+        };
+        let mut upstream = rustls::ClientConfig::builder_with_provider(Arc::new(provider()))
+            .with_safe_default_protocol_versions()
+            .map_err(|e| failed(e.to_string()))?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        upstream.alpn_protocols = vec![ALPN.to_vec()];
+        Ok(Self {
+            ca,
+            phantom,
+            routes,
+            upstream: Arc::new(upstream),
+        })
+    }
+
+    /// Whether any route names `host`. TLS is terminated **only** for a routed host: you cannot
+    /// strip a phantom through a tunnel you cannot read, and reading one you have no credential
+    /// for would buy nothing and cost the agent its own trust chain.
+    fn routed(&self, host: &str) -> bool {
+        self.routes.iter().any(|route| route.host == host)
+    }
+
+    /// The route a request to `host` for `path` is authenticated with, if one matches. A request
+    /// on a routed host matching no prefix goes out unauthenticated, which is what the provider's
+    /// own `401` is for.
+    fn route(&self, host: &str, path: &str) -> Option<&Route> {
+        self.routes
+            .iter()
+            .filter(|route| route.host == host && path.starts_with(&route.path_prefix))
+            // The longest prefix among those that match. Two routes on one host where neither
+            // prefix strictly extends the other are refused before the run ever starts (#89), so
+            // among what is left there is exactly one longest.
+            .max_by_key(|route| route.path_prefix.len())
+    }
+}
+
+/// The crypto provider for both legs. Named rather than taken from process-global state, so there
+/// is one provider in the proxy and no way for two halves of it to disagree.
+fn provider() -> rustls::crypto::CryptoProvider {
+    rustls::crypto::aws_lc_rs::default_provider()
 }
 
 /// A listener bound before the fork, not yet serving ([spec §4.2] step 11).
@@ -128,7 +423,7 @@ impl Bound {
     /// `child` is the confined child, killed if the proxy ever stops before teardown does: that is
     /// what "a dead proxy tears the run down" means in one process, where the proxy cannot exit on
     /// its own without taking the run with it.
-    pub fn serve(self, child: libc::pid_t) -> Serving {
+    pub fn serve(self, broker: Arc<Broker>, child: libc::pid_t) -> Serving {
         let stopping = Arc::new(AtomicBool::new(false));
         let accepting = Arc::clone(&stopping);
         // A second descriptor on the same socket, kept here so teardown can shut the socket down
@@ -142,7 +437,7 @@ impl Bound {
             Ok(held) => {
                 let served = std::thread::Builder::new()
                     .name("playpen-broker".into())
-                    .spawn(move || accept_loop(self.listener, &accepting, child))
+                    .spawn(move || accept_loop(self.listener, &broker, &accepting, child))
                     .ok();
                 (Some(held), served)
             }
@@ -198,7 +493,12 @@ impl Drop for Serving {
 
 /// Accept until told to stop. Anything that ends this loop early tears the run down, because every
 /// client is pointed here and a silent end is the one failure the agent cannot interpret.
-fn accept_loop(listener: TcpListener, stopping: &AtomicBool, child: libc::pid_t) {
+fn accept_loop(
+    listener: TcpListener,
+    broker: &Arc<Broker>,
+    stopping: &AtomicBool,
+    child: libc::pid_t,
+) {
     loop {
         match listener.accept() {
             Ok((client, _)) => {
@@ -207,6 +507,7 @@ fn accept_loop(listener: TcpListener, stopping: &AtomicBool, child: libc::pid_t)
                 }
                 // One thread per connection, detached: a connection that outlives its usefulness
                 // is bounded by `IDLE` rather than by anything this loop does.
+                let serving = Arc::clone(broker);
                 let _ = std::thread::Builder::new()
                     .name("playpen-broker-connection".into())
                     .spawn(move || {
@@ -214,7 +515,7 @@ fn accept_loop(listener: TcpListener, stopping: &AtomicBool, child: libc::pid_t)
                         // down ([spec §4.2]): it means the credential path is broken, and the
                         // agent must not run on against a broker that half works.
                         let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            serve_connection(client);
+                            serve_connection(client, &serving);
                         }));
                         if served.is_err() {
                             tear_down(child);
@@ -245,15 +546,19 @@ fn tear_down(child: libc::pid_t) {
 }
 
 /// Serve one client connection ([spec §6.2]).
-fn serve_connection(mut client: TcpStream) {
+fn serve_connection(mut client: TcpStream, broker: &Broker) {
     let _ = client.set_read_timeout(Some(IDLE));
     let _ = client.set_write_timeout(Some(IDLE));
     let Some(head) = read_head(&mut client) else {
         return;
     };
     match connect_target(&head) {
-        // Every host gets an opaque tunnel: playpen confines no network traffic, and a host with
-        // no credential route has nothing for the broker to do.
+        // TLS is terminated only for a routed host; every other host gets an opaque tunnel, with
+        // no check. playpen confines no network traffic, and a host with no credential route has
+        // nothing for the broker to do.
+        Some(target) if broker.routed(authority_host(&target)) => {
+            intercept(client, &target, broker)
+        }
         Some(target) => tunnel(client, &target),
         // Only `HTTPS_PROXY` points here, so everything that arrives is a `CONNECT`. Anything else
         // is answered rather than dropped, and carries no `broker.*` code: the one denial the
@@ -273,7 +578,7 @@ fn serve_connection(mut client: TcpStream) {
 
 /// Read a request head — everything up to the blank line — or `None` if the peer sent no head
 /// worth parsing. Bounded by [`MAX_HEAD`] and by [`IDLE`].
-fn read_head(client: &mut TcpStream) -> Option<Vec<u8>> {
+fn read_head(client: &mut impl Read) -> Option<Vec<u8>> {
     let mut head = Vec::new();
     let mut byte = [0u8; 1];
     while head.len() < MAX_HEAD {
@@ -334,6 +639,257 @@ fn tunnel(mut client: TcpStream, target: &str) {
     splice(client, upstream);
 }
 
+/// The host of a `host:port` authority, without the port.
+fn authority_host(authority: &str) -> &str {
+    authority
+        .rsplit_once(':')
+        .map_or(authority, |(host, _)| host)
+}
+
+/// Terminate TLS for a routed host, substitute the phantom for the real secret, and forward
+/// ([spec §7.3]).
+///
+/// **An interception failure never falls back to a tunnel.** A tunnel would carry the phantom to
+/// the destination unread, which is the one thing the phantom exists to prevent; so a failure here
+/// answers `502` and closes.
+///
+/// [spec §7.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#73-session-phantom
+fn intercept(mut client: TcpStream, target: &str, broker: &Broker) {
+    let host = authority_host(target).to_owned();
+    let Ok(leaf) = broker.ca.leaf(&host) else {
+        return bad_gateway(&mut client);
+    };
+    let certified = rustls::ServerConfig::builder_with_provider(Arc::new(provider()))
+        .with_safe_default_protocol_versions()
+        .and_then(|builder| {
+            builder.with_no_client_auth().with_single_cert(
+                leaf.chain.clone(),
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf.key.clone())),
+            )
+        });
+    let Ok(mut config) = certified else {
+        return bad_gateway(&mut client);
+    };
+    config.alpn_protocols = vec![ALPN.to_vec()];
+    // The tunnel is established before the handshake, because the client speaks TLS only once it
+    // believes it has one.
+    if client
+        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        .is_err()
+    {
+        return;
+    }
+    let accepted = rustls::ServerConnection::new(Arc::new(config));
+    let Ok(accepted) = accepted else {
+        return;
+    };
+    let mut inside = rustls::StreamOwned::new(accepted, client);
+    // The agent's request, in plaintext, for the first time.
+    let Some(head) = read_head(&mut inside) else {
+        return;
+    };
+    let Some(rewritten) = rewrite(&head, &host, broker) else {
+        let _ = inside.write_all(
+            b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+        );
+        return;
+    };
+    // Upstream: the real host, verified against the host's own roots.
+    let Ok(server_name) = rustls::pki_types::ServerName::try_from(host.clone()) else {
+        let _ = inside.write_all(
+            b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+        );
+        return;
+    };
+    let upstream = TcpStream::connect(target).ok().and_then(|socket| {
+        let session =
+            rustls::ClientConnection::new(Arc::clone(&broker.upstream), server_name).ok()?;
+        Some(rustls::StreamOwned::new(session, socket))
+    });
+    let Some(mut upstream) = upstream else {
+        let _ = inside.write_all(
+            b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+        );
+        return;
+    };
+    if upstream.write_all(&rewritten.head).is_err() {
+        return;
+    }
+    // The body, verbatim, for exactly as long as the head said it would be. Reading until the
+    // client closed instead would stall every request that has no body at all — which is every
+    // `GET` — until the idle timeout.
+    //
+    // One request per connection: the head is the only thing rewritten, so a second request on the
+    // same connection would go out carrying the phantom. `Connection: close` is forced on the
+    // forwarded head, and the client reconnects, which is a cost stated rather than a risk taken.
+    if forward_body(&mut inside, &mut upstream, rewritten.body).is_err() {
+        return;
+    }
+    let _ = upstream.flush();
+    // The response, verbatim and to the end: `Connection: close` means upstream closes when it is
+    // done, so end of stream is end of response.
+    let mut answer = Vec::new();
+    let _ = upstream.read_to_end(&mut answer);
+    let _ = inside.write_all(&answer);
+    let _ = inside.flush();
+}
+
+/// How much body follows a request head ([RFC 9112 §6]). A request with neither framing header has
+/// no body, which is what makes a `GET` answerable without waiting on the client to close.
+///
+/// [RFC 9112 §6]: https://www.rfc-editor.org/rfc/rfc9112.html#name-message-body-length
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Body {
+    None,
+    Length(u64),
+    Chunked,
+}
+
+/// A head rewritten for upstream, and the body the original said would follow it.
+struct Rewritten {
+    head: Vec<u8>,
+    body: Body,
+}
+
+/// Copy `body` from `from` to `to`, exactly as framed and no further.
+fn forward_body(from: &mut impl Read, to: &mut impl Write, body: Body) -> std::io::Result<()> {
+    match body {
+        Body::None => Ok(()),
+        Body::Length(length) => {
+            std::io::copy(&mut from.take(length), to)?;
+            Ok(())
+        }
+        // Chunk by chunk, so the end of the body is read from the body itself rather than from the
+        // client closing: a size line, that many bytes and their terminator, until the zero chunk,
+        // then whatever trailers follow up to the blank line. Everything is passed on byte for
+        // byte; only the framing is read.
+        Body::Chunked => {
+            loop {
+                let line = read_line(from)?;
+                to.write_all(&line)?;
+                let size = std::str::from_utf8(&line)
+                    .ok()
+                    .map(|line| line.trim_end())
+                    // A chunk size may carry extensions after a `;`, which are not the size.
+                    .map(|line| line.split(';').next().unwrap_or_default())
+                    .and_then(|size| u64::from_str_radix(size.trim(), 16).ok())
+                    .ok_or_else(|| std::io::Error::other("a chunk size that is not one"))?;
+                if size == 0 {
+                    break;
+                }
+                std::io::copy(&mut from.take(size), to)?;
+                // The chunk's own terminator.
+                to.write_all(&read_line(from)?)?;
+            }
+            // Trailers, up to and including the blank line that ends them.
+            loop {
+                let line = read_line(from)?;
+                to.write_all(&line)?;
+                if line == b"\r\n" || line.is_empty() {
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+/// One CRLF-terminated line, terminator included. Bounded, because a peer that sends no newline
+/// must not be able to grow this without limit.
+fn read_line(from: &mut impl Read) -> std::io::Result<Vec<u8>> {
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    while line.len() < MAX_HEAD {
+        match from.read(&mut byte)? {
+            0 => return Ok(line),
+            _ => line.push(byte[0]),
+        }
+        if line.ends_with(b"\r\n") {
+            return Ok(line);
+        }
+    }
+    Err(std::io::Error::other("a line with no end"))
+}
+
+/// `head` with the phantom replaced by the route's real secret, in whichever header carried it
+/// ([spec §7.3]), and `Connection: close` forced.
+///
+/// `None` where the head does not parse as a request, which is not something to forward.
+///
+/// Substitution is **in place**: the proxy finds the phantom in whichever header the client sent
+/// it in — `Authorization: Bearer`, `x-api-key`, whatever the harness already sends — and replaces
+/// it there, so the request's shape stays the harness's own. The head is rebuilt from the parse
+/// rather than edited as bytes, so a phantom that appeared in a path or a body is left alone: only
+/// a header value is a place a credential is presented.
+///
+/// A request whose host has a route but whose path matches no prefix goes out **unauthenticated**,
+/// and with the phantom still stripped: the provider's own `401` is the answer, and a destination
+/// playpen did not mean to authenticate should not learn the run's phantom either.
+///
+/// [spec §7.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#73-session-phantom
+fn rewrite(head: &[u8], host: &str, broker: &Broker) -> Option<Rewritten> {
+    let mut headers = [httparse::EMPTY_HEADER; 64];
+    let mut request = httparse::Request::new(&mut headers);
+    request.parse(head).ok()?;
+    let method = request.method?;
+    let path = request.path?;
+    let phantom = broker.phantom.as_str();
+    let secret = broker.route(host, path).map(|route| route.secret.as_str());
+    let mut body = Body::None;
+    let mut out = Vec::with_capacity(head.len() + 64);
+    out.extend_from_slice(format!("{method} {path} HTTP/1.1\r\n").as_bytes());
+    for header in request.headers.iter() {
+        let name = header.name;
+        // Read the framing as it is passed on, so the body that follows is read to the length the
+        // head it came with declared. Chunked wins, as the standard has it.
+        if name.eq_ignore_ascii_case("transfer-encoding")
+            && std::str::from_utf8(header.value)
+                .is_ok_and(|value| value.to_ascii_lowercase().contains("chunked"))
+        {
+            body = Body::Chunked;
+        } else if name.eq_ignore_ascii_case("content-length")
+            && body != Body::Chunked
+            && let Some(length) = std::str::from_utf8(header.value)
+                .ok()
+                .and_then(|value| value.trim().parse().ok())
+        {
+            body = Body::Length(length);
+        }
+        // The broker's own hop-by-hop headers, and the one it is about to author itself.
+        if name.eq_ignore_ascii_case("connection") || name.eq_ignore_ascii_case("proxy-connection")
+        {
+            continue;
+        }
+        let value = header.value;
+        let carries = std::str::from_utf8(value).is_ok_and(|value| value.contains(phantom));
+        if carries {
+            // A value is UTF-8 here, because that is what carrying the phantom required.
+            let value = std::str::from_utf8(value).unwrap_or_default();
+            let replaced = match secret {
+                Some(secret) => value.replace(phantom, secret),
+                // Stripped rather than forwarded: the phantom is not a secret, but it spends this
+                // run's credentials for anyone who learns it.
+                None => value.replace(phantom, ""),
+            };
+            out.extend_from_slice(format!("{name}: {replaced}\r\n").as_bytes());
+        } else {
+            out.extend_from_slice(format!("{name}: ").as_bytes());
+            out.extend_from_slice(value);
+            out.extend_from_slice(b"\r\n");
+        }
+    }
+    out.extend_from_slice(b"Connection: close\r\n\r\n");
+    Some(Rewritten { head: out, body })
+}
+
+/// A destination the broker could not reach or could not intercept: `502`, and no code
+/// ([spec §6.4]).
+///
+/// [spec §6.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#64-broker-denial
+fn bad_gateway(client: &mut TcpStream) {
+    let _ = client
+        .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+}
+
 /// Copy between two streams in both directions until either closes.
 fn splice(client: TcpStream, upstream: TcpStream) {
     let Ok(client_back) = client.try_clone() else {
@@ -364,6 +920,341 @@ fn splice(client: TcpStream, upstream: TcpStream) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A broker with `routes`, its own session CA and its own phantom.
+    fn brokering(routes: Vec<Route>) -> Arc<Broker> {
+        let ca = ca().expect("a session CA");
+        let phantom = Phantom::random().expect("a phantom");
+        Arc::new(Broker::new(ca, phantom, routes).expect("a broker"))
+    }
+
+    /// A broker with no route at all: every host gets an opaque tunnel.
+    fn tunnelling() -> Arc<Broker> {
+        brokering(Vec::new())
+    }
+
+    /// A TLS destination on loopback with a certificate for `localhost`, which records the first
+    /// request head it is sent. Returns its address, its own root, and where the head will land.
+    ///
+    /// `localhost` rather than a made-up name, because the proxy connects to the authority the
+    /// `CONNECT` named and nothing here can make a name resolve.
+    fn destination() -> (SocketAddr, CertificateDer<'static>, Arc<Mutex<Vec<u8>>>) {
+        let root_key = rcgen::KeyPair::generate().expect("a root key");
+        let mut root_params = rcgen::CertificateParams::new(Vec::new()).expect("root params");
+        root_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Constrained(0));
+        let root = root_params.self_signed(&root_key).expect("a root");
+        let leaf_key = rcgen::KeyPair::generate().expect("a leaf key");
+        let leaf_params =
+            rcgen::CertificateParams::new(vec!["localhost".to_owned()]).expect("leaf params");
+        let leaf = leaf_params
+            .signed_by(
+                &leaf_key,
+                &rcgen::Issuer::from_params(&root_params, &root_key),
+            )
+            .expect("a leaf");
+        let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(provider()))
+            .with_safe_default_protocol_versions()
+            .expect("versions")
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![leaf.der().clone(), root.der().clone()],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der())),
+            )
+            .expect("a destination certificate");
+        config.alpn_protocols = vec![ALPN.to_vec()];
+        let listener = TcpListener::bind((INTERFACE, 0)).expect("a destination");
+        let addr = listener.local_addr().expect("addr");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recording = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            let (socket, _) = listener.accept().expect("accepted");
+            let session = rustls::ServerConnection::new(Arc::new(config)).expect("a session");
+            let mut tls = rustls::StreamOwned::new(session, socket);
+            if let Some(head) = read_head(&mut tls) {
+                *recording.lock().expect("the recording") = head;
+            }
+            let _ = tls
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+            let _ = tls.flush();
+        });
+        (addr, root.der().clone(), seen)
+    }
+
+    /// `P-endpoint` without rule sets ([spec §17.2]): a request through the proxy reaches upstream
+    /// with the phantom stripped and the secret injected **in the same header**.
+    ///
+    /// [spec §17.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#172-rows
+    #[test]
+    fn a_routed_request_reaches_upstream_with_the_secret_in_place_of_the_phantom() {
+        let (destination, destination_root, seen) = destination();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(destination_root).expect("the destination's root");
+        let session = ca().expect("a session CA");
+        let ca_certificate = session.certificate.clone();
+        let phantom = Phantom::random().expect("a phantom");
+        let broker = Arc::new(
+            Broker::trusting(
+                session,
+                phantom.clone(),
+                vec![Route {
+                    host: "localhost".into(),
+                    path_prefix: "/v1/".into(),
+                    secret: Zeroizing::new("the-real-secret".into()),
+                }],
+                roots,
+            )
+            .expect("a broker"),
+        );
+        let bound = bind().expect("bound");
+        let addr = bound.addr();
+        let mut serving = bound.serve(broker, 0);
+
+        // The agent's own client: trusts the session CA, as `SSL_CERT_FILE` tells it to.
+        let mut trusted = rustls::RootCertStore::empty();
+        trusted.add(ca_certificate).expect("the session CA");
+        let mut client_config = rustls::ClientConfig::builder_with_provider(Arc::new(provider()))
+            .with_safe_default_protocol_versions()
+            .expect("versions")
+            .with_root_certificates(trusted)
+            .with_no_client_auth();
+        client_config.alpn_protocols = vec![ALPN.to_vec()];
+        let mut socket = TcpStream::connect(addr).expect("the proxy");
+        socket
+            .write_all(
+                format!("CONNECT localhost:{} HTTP/1.1\r\n\r\n", destination.port()).as_bytes(),
+            )
+            .expect("the CONNECT");
+        let mut established = [0u8; 39];
+        socket.read_exact(&mut established).expect("established");
+        let session = rustls::ClientConnection::new(
+            Arc::new(client_config),
+            rustls::pki_types::ServerName::try_from("localhost").expect("a name"),
+        )
+        .expect("a client session");
+        let mut tls = rustls::StreamOwned::new(session, socket);
+        // The phantom, in the header this harness happens to use.
+        tls.write_all(
+            format!(
+                "GET /v1/messages HTTP/1.1\r\nHost: localhost\r\n\
+                 x-api-key: {}\r\nAccept: application/json\r\n\r\n",
+                phantom.as_str()
+            )
+            .as_bytes(),
+        )
+        .expect("the request");
+        tls.flush().expect("flushed");
+        let mut answer = Vec::new();
+        let _ = tls.read_to_end(&mut answer);
+        assert!(
+            String::from_utf8_lossy(&answer).starts_with("HTTP/1.1 200 OK"),
+            "{}",
+            String::from_utf8_lossy(&answer)
+        );
+
+        let head = String::from_utf8(seen.lock().expect("the recording").clone()).expect("utf-8");
+        // The secret arrived, in the header the phantom came in, and the phantom did not.
+        assert!(
+            head.contains("x-api-key: the-real-secret"),
+            "the secret was not injected in place: {head}"
+        );
+        assert!(
+            !head.contains(phantom.as_str()),
+            "the phantom reached upstream: {head}"
+        );
+        // Everything else the harness sent is still the harness's own.
+        assert!(head.contains("Accept: application/json"), "{head}");
+        assert!(head.starts_with("GET /v1/messages HTTP/1.1\r\n"), "{head}");
+        serving.stop();
+    }
+
+    /// A routed host whose path matches no prefix goes out **unauthenticated** — and with the
+    /// phantom stripped even so: a destination playpen did not mean to authenticate should not
+    /// learn the run's phantom either.
+    #[test]
+    fn a_path_that_matches_no_prefix_is_neither_authenticated_nor_given_the_phantom() {
+        let broker = brokering(vec![Route {
+            host: "localhost".into(),
+            path_prefix: "/v1/".into(),
+            secret: Zeroizing::new("the-real-secret".into()),
+        }]);
+        let phantom = broker.phantom.as_str().to_owned();
+        let head = format!(
+            "GET /other HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {phantom}\r\n\r\n"
+        );
+        let rewritten = String::from_utf8(
+            rewrite(head.as_bytes(), "localhost", &broker)
+                .expect("rewritten")
+                .head,
+        )
+        .expect("utf-8");
+        assert!(!rewritten.contains(&phantom), "{rewritten}");
+        assert!(!rewritten.contains("the-real-secret"), "{rewritten}");
+        assert!(
+            rewritten.contains("Authorization: Bearer \r\n"),
+            "{rewritten}"
+        );
+    }
+
+    /// The phantom is replaced in whichever header carried it, and nowhere else: a path or a
+    /// header that merely looks like one is left alone.
+    #[test]
+    fn the_phantom_is_replaced_only_where_a_credential_is_presented() {
+        let broker = brokering(vec![Route {
+            host: "localhost".into(),
+            path_prefix: "/".into(),
+            secret: Zeroizing::new("the-real-secret".into()),
+        }]);
+        let phantom = broker.phantom.as_str().to_owned();
+        for header in ["Authorization: Bearer", "x-api-key:", "X-Custom-Token:"] {
+            let head = format!(
+                "POST /v1/messages HTTP/1.1\r\nHost: localhost\r\n{header} {phantom}\r\n\r\n"
+            );
+            let rewritten = String::from_utf8(
+                rewrite(head.as_bytes(), "localhost", &broker)
+                    .expect("rewritten")
+                    .head,
+            )
+            .expect("utf-8");
+            assert!(
+                rewritten.contains(&format!("{header} the-real-secret")),
+                "{header}: {rewritten}"
+            );
+            assert!(!rewritten.contains(&phantom), "{rewritten}");
+        }
+        // A path that happens to hold the phantom is not a place a credential is presented.
+        let head = format!("GET /{phantom} HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        let rewritten = String::from_utf8(
+            rewrite(head.as_bytes(), "localhost", &broker)
+                .expect("rewritten")
+                .head,
+        )
+        .expect("utf-8");
+        assert!(
+            rewritten.contains(&format!("GET /{phantom} ")),
+            "{rewritten}"
+        );
+        assert!(!rewritten.contains("the-real-secret"), "{rewritten}");
+    }
+
+    /// The body that follows a head is read to the length that head declared. A request with no
+    /// framing header has no body — which is every `GET` — and reading until the client closed
+    /// instead would stall each of them until the idle timeout.
+    #[test]
+    fn the_body_is_framed_by_the_head_and_never_by_the_client_closing() {
+        let broker = tunnelling();
+        let framed = |head: &str| {
+            rewrite(head.as_bytes(), "localhost", &broker)
+                .expect("rewritten")
+                .body
+        };
+        assert_eq!(framed("GET /x HTTP/1.1\r\nHost: h\r\n\r\n"), Body::None);
+        assert_eq!(
+            framed("POST /x HTTP/1.1\r\nHost: h\r\nContent-Length: 12\r\n\r\n"),
+            Body::Length(12)
+        );
+        assert_eq!(
+            framed("POST /x HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n"),
+            Body::Chunked
+        );
+        // Chunked wins over a length, as the standard has it.
+        assert_eq!(
+            framed(
+                "POST /x HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\
+                 Content-Length: 12\r\n\r\n"
+            ),
+            Body::Chunked
+        );
+    }
+
+    /// A body is forwarded byte for byte, and the forwarding stops where the framing says: nothing
+    /// after the body is read, so what follows on the stream is still there.
+    #[test]
+    fn a_framed_body_is_forwarded_and_nothing_past_it() {
+        let mut from = std::io::Cursor::new(b"twelve bytesTRAILING".to_vec());
+        let mut to = Vec::new();
+        forward_body(&mut from, &mut to, Body::Length(12)).expect("forwarded");
+        assert_eq!(to, b"twelve bytes");
+        let mut rest = Vec::new();
+        from.read_to_end(&mut rest).expect("the rest");
+        assert_eq!(rest, b"TRAILING");
+
+        let mut nothing = std::io::Cursor::new(b"NOT A BODY".to_vec());
+        let mut to = Vec::new();
+        forward_body(&mut nothing, &mut to, Body::None).expect("forwarded");
+        assert!(to.is_empty(), "{to:?}");
+    }
+
+    /// A chunked body ends at its own zero chunk, read from the body rather than from the client
+    /// closing, and every byte of it is passed on as it came.
+    #[test]
+    fn a_chunked_body_ends_at_its_zero_chunk() {
+        let chunked = "4\r\nWiki\r\n7\r\npedia i\r\n0\r\n\r\nAFTER";
+        let mut from = std::io::Cursor::new(chunked.as_bytes().to_vec());
+        let mut to = Vec::new();
+        forward_body(&mut from, &mut to, Body::Chunked).expect("forwarded");
+        assert_eq!(
+            String::from_utf8(to).expect("utf-8"),
+            "4\r\nWiki\r\n7\r\npedia i\r\n0\r\n\r\n"
+        );
+        let mut rest = Vec::new();
+        from.read_to_end(&mut rest).expect("the rest");
+        assert_eq!(rest, b"AFTER");
+        // A chunk size that is not one is an error, never a guess.
+        let mut broken = std::io::Cursor::new(b"not-a-size\r\n".to_vec());
+        assert!(forward_body(&mut broken, &mut Vec::new(), Body::Chunked).is_err());
+    }
+
+    /// TLS is terminated only for a routed host; every other host is a tunnel.
+    #[test]
+    fn only_a_routed_host_is_intercepted() {
+        let broker = brokering(vec![Route {
+            host: "api.anthropic.com".into(),
+            path_prefix: "/".into(),
+            secret: Zeroizing::new("s".into()),
+        }]);
+        assert!(broker.routed("api.anthropic.com"));
+        assert!(!broker.routed("example.com"));
+        assert!(!broker.routed("evil.api.anthropic.com"));
+        assert_eq!(authority_host("api.anthropic.com:443"), "api.anthropic.com");
+        assert_eq!(authority_host("api.anthropic.com"), "api.anthropic.com");
+    }
+
+    /// The CA is ephemeral and per-session: two runs share nothing, and only the certificate is
+    /// ever written.
+    #[test]
+    fn the_ca_is_per_session_and_only_its_certificate_is_written() {
+        let dir = tempfile::TempDir::new().expect("dir");
+        let first = ca().expect("a CA");
+        let second = ca().expect("another CA");
+        assert_ne!(first.pem, second.pem, "two sessions shared a CA");
+        let at = dir.path().join(CA_FILE);
+        first.write(&at).expect("written");
+        let written = std::fs::read_to_string(&at).expect("the certificate");
+        assert_eq!(written, first.pem);
+        assert!(written.contains("BEGIN CERTIFICATE"), "{written}");
+        assert!(
+            !written.contains("PRIVATE KEY"),
+            "the CA's key was written: {written}"
+        );
+        // The leaf for a host is minted once and kept.
+        let leaf = first.leaf("api.github.com").expect("a leaf");
+        let again = first.leaf("api.github.com").expect("the same leaf");
+        assert!(Arc::ptr_eq(&leaf, &again));
+        assert_eq!(leaf.chain.len(), 2, "the leaf is served with its CA");
+    }
+
+    /// A phantom is this run's own, and never shown.
+    #[test]
+    fn a_phantom_is_random_and_never_shown() {
+        let first = Phantom::random().expect("a phantom");
+        let second = Phantom::random().expect("another");
+        assert_ne!(first.as_str(), second.as_str());
+        assert_eq!(first.as_str().len(), PHANTOM_BYTES * 2);
+        assert!(first.as_str().bytes().all(|b| b.is_ascii_hexdigit()));
+        let shown = format!("{first:?}");
+        assert!(!shown.contains(first.as_str()), "{shown}");
+        assert!(shown.contains("<redacted>"), "{shown}");
+    }
 
     #[test]
     fn it_binds_loopback_at_a_port_the_kernel_picks() {
@@ -434,7 +1325,7 @@ mod tests {
         let addr = bound.addr();
         // Served with no child to kill: the pid 0 group is never signalled here, because the
         // tunnel closes in good order.
-        let mut serving = bound.serve(0);
+        let mut serving = bound.serve(tunnelling(), 0);
 
         let mut client = TcpStream::connect(addr).expect("connected");
         client
@@ -460,7 +1351,7 @@ mod tests {
     fn a_request_that_is_not_a_connect_is_answered() {
         let bound = bind().expect("bound");
         let addr = bound.addr();
-        let mut serving = bound.serve(0);
+        let mut serving = bound.serve(tunnelling(), 0);
         let mut client = TcpStream::connect(addr).expect("connected");
         client
             .write_all(b"GET /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\n\r\n")
@@ -484,7 +1375,7 @@ mod tests {
         drop(closed);
         let bound = bind().expect("bound");
         let addr = bound.addr();
-        let mut serving = bound.serve(0);
+        let mut serving = bound.serve(tunnelling(), 0);
         let mut client = TcpStream::connect(addr).expect("connected");
         client
             .write_all(format!("CONNECT {closed_addr} HTTP/1.1\r\n\r\n").as_bytes())
@@ -525,7 +1416,7 @@ mod tests {
             // owns it until it returns, and this thread is joined before that.
             unsafe { libc::shutdown(fd, libc::SHUT_RDWR) };
         });
-        accept_loop(listener, &AtomicBool::new(false), pid);
+        accept_loop(listener, &tunnelling(), &AtomicBool::new(false), pid);
         broken.join().expect("the breaker");
         let status = child.wait().expect("reaped");
         assert_eq!(
@@ -541,7 +1432,7 @@ mod tests {
         let mut child = sleeper();
         let pid = child.id() as libc::pid_t;
         let bound = bind().expect("bound");
-        let mut serving = bound.serve(pid);
+        let mut serving = bound.serve(tunnelling(), pid);
         serving.stop();
         // Still running: it was teardown that stopped the proxy, not the proxy that stopped.
         assert_eq!(
@@ -559,7 +1450,7 @@ mod tests {
     fn stopping_ends_the_accept_loop() {
         let bound = bind().expect("bound");
         let addr = bound.addr();
-        let mut serving = bound.serve(0);
+        let mut serving = bound.serve(tunnelling(), 0);
         serving.stop();
         serving.stop();
         drop(serving);
