@@ -1415,15 +1415,44 @@ naming *which* precondition failed. That refusal is scoped to the flag, not to t
     and naming only the socket sends that operator to fix what is already right
     ([#98](https://github.com/firefly-engineering/playpen/issues/98)).
   - It **brackets the run**. It re-runs after the agent exits and **before the tail is stopped**,
-    and if it fails, the trace is marked **unverified** rather than presented as complete. The
-    order is load-bearing: stopping the tail first lost the denials of a child that exited
-    immediately after one, giving a trace file that was empty while the kernel had logged the
-    denial. The self-test's own round trip is the window the tail reads them in — a window and
-    not yet a barrier
-    ([#98](https://github.com/firefly-engineering/playpen/issues/98),
+    and if it fails, the trace is marked **unverified** rather than presented as complete.
+  - The tail stops on a **barrier**, not on a window: the run domain's own
+    `status=deallocated` record. The kernel logs it once the last task in the domain is gone, so a
+    tail that has read it has read past every record journald wrote before it. Stopping the tail
+    on a kill instead raced the records it was reading, and lost the denials of a child that
+    exited immediately after one — a trace file that was empty while the kernel had logged the
+    denial ([#98](https://github.com/firefly-engineering/playpen/issues/98),
     [#152](https://github.com/firefly-engineering/playpen/issues/152)).
+    - The wait for it is **bounded**, because a domain a leaked descendant keeps alive is
+      deallocated by nothing and teardown must still finish. When the bound expires the tail is
+      killed as before and the trace is marked **unverified**, saying it could not be read to a
+      known end.
+    - That record's `denials=N` is checked against the run-domain denials the trace holds. A
+      mismatch marks the trace **unverified** with both numbers, and like every other trace
+      failure it leaves the run's exit status alone.
+    - The kernel names a domain **lazily, at its first denial**, and the journal carries that
+      denial *ahead* of the `status=allocated` record that names it. So a record of a domain not
+      yet known is held in a bounded lookbehind and flushed once the allocation arrives; dropping
+      it lost the first denial of every traced run, which is the only denial a child that exits on
+      its first refusal ever makes.
+    - A run that **denied nothing** is logged not at all — no allocation, no deallocation — so its
+      empty trace is a complete account and is not marked unverified for want of a barrier. What
+      vouches for such a run is the bracketing self-test, as it always was. A tail that read no
+      record of this run looks exactly the same, so the two are told apart by asking the journal
+      directly, at teardown, whether a domain was allocated by the child's pid: where one was, the
+      trace holds none of the run's denials and is marked **unverified** saying so.
+  - A kept record is one line of **`<transport>\t<time>\t<message>`**, and each denial appears
+    **exactly once**. The tail observes **`_TRANSPORT=audit` only**: a host where the kernel's
+    printk path is also on carries every Landlock record twice, and an operator counting a trace
+    of both counts double ([#151](https://github.com/firefly-engineering/playpen/issues/151)).
+    The self-test still observes **both** transports, because distinguishing them is its verdict.
+    The time is the journal entry's own `__REALTIME_TIMESTAMP` as seconds and milliseconds —
+    **journald's** time for the entry, not audit's event time from the message text — and is `-`
+    where the entry carried none. A record with no readable time is written all the same.
   - The self-test's own record is identified by its Landlock domain id and unique path, filtered
-    with a key=value tokenizer, never a pattern. The self-test is never cached.
+    with a key=value tokenizer, never a pattern. **Both** self-tests' domains are excluded — the
+    opening one's and the bracketing one's, the latter added to the set while the tail is already
+    reading, since the domain does not exist when the tail starts. The self-test is never cached.
 
   Upstream nono passes flags `0` and caps its ABI probe at V6, so with it this refusal would
   always fire. The pinned fork passes the flag and probes further ([ADR 0022](adr/0022-playpen-pins-a-maintained-fork-of-nono.md)), so

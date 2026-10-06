@@ -60,6 +60,18 @@ const POLL: Duration = Duration::from_millis(25);
 /// The groups `journalctl(1)` names as able to read every journal file.
 const JOURNAL_GROUPS: [&str; 3] = ["systemd-journal", "adm", "wheel"];
 
+/// How long teardown waits for the tail to reach the barrier — the run domain's deallocation
+/// record — after which the tail is killed and the trace is marked unverified. A bound and never
+/// a join: a domain kept alive by a leaked descendant is never deallocated, and teardown that
+/// waited for it would hang rather than say so
+/// ([#152](https://github.com/firefly-engineering/playpen/issues/152)).
+const BARRIER_WAIT: Duration = Duration::from_secs(2);
+
+/// How many records of a domain not yet named are held. The kernel names a domain at its first
+/// denial and the journal carries that denial ahead of the naming, so one would nearly always do;
+/// a handful costs nothing and covers a kernel that batches differently.
+const LOOKBEHIND: usize = 16;
+
 /// One run's denial trace, once every precondition has held. Opened before launch, followed once
 /// there is a child to follow, and closed at teardown — where the self-test runs a **second**
 /// time, because a denial flood can overrun journald's receive buffer and make it drop its audit
@@ -72,21 +84,32 @@ pub struct Tracing {
     /// The channel self-test, held rather than called twice by name, so the pass that brackets
     /// the run is the same test as the pass that opened the trace.
     self_test: SelfTest,
-    /// The domain the self-test's own denial was logged under, which is what keeps it out of the
-    /// run's trace — by its id, read off the record, and never by a pattern over the text.
-    self_test_domain: String,
+    /// The domains whose denials are not this run's: the self-test's own, by its id read off the
+    /// record and never by a pattern over the text. Shared with the draining thread and written
+    /// after it has started, because the **bracketing** self-test allocates a second domain while
+    /// the tail is already reading.
+    excludes: Excludes,
     following: Option<Following>,
+    /// The pid the tail was started for and the moment it was started from, kept so teardown can
+    /// ask the journal itself what the tail may have missed.
+    followed: Option<(libc::pid_t, SystemTime)>,
     /// The Landlock domain this run's child was confined by, learned from its `status=allocated`
     /// record. It is what a later query filters on, because a domain covers the whole confined
     /// tree where a pid covers one process.
     domain: Option<String>,
 }
 
+/// The domains the tail drops, writable after it has started.
+type Excludes = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
 /// The live tail: a `journalctl` of playpen's own, and the thread draining it into the trace.
 #[derive(Debug)]
 struct Following {
     journal: std::process::Child,
     draining: std::thread::JoinHandle<Drained>,
+    /// Signalled when the drain has stopped, so teardown can wait for the barrier without waiting
+    /// on a `join` it has no way to bound.
+    ended: std::sync::mpsc::Receiver<()>,
 }
 
 /// What the tail found while it ran.
@@ -94,7 +117,14 @@ struct Following {
 struct Drained {
     /// The confined child's Landlock domain, if its allocation was logged.
     domain: Option<String>,
-    /// Why the tail stopped early, if it did.
+    /// Whether the tail read the run domain's `status=deallocated` record. That record is the
+    /// barrier: reaching it proves the tail has read past every record journald wrote before it.
+    sealed: bool,
+    /// The kernel's own denial count, off that record, where it carried a readable one.
+    counted: Option<u64>,
+    /// Denials written to the trace for the run domain, which `counted` is checked against.
+    written: u64,
+    /// Why the trace is unverified, if it is.
     failure: Option<String>,
 }
 
@@ -178,8 +208,9 @@ pub fn open_with(facts: Facts, file: &Path, workspace: &Path) -> Result<Tracing,
         file: file.to_owned(),
         workspace: workspace.to_owned(),
         self_test,
-        self_test_domain: domain,
+        excludes: std::sync::Arc::new(std::sync::Mutex::new(vec![domain])),
         following: None,
+        followed: None,
         domain: None,
     };
     tracing.create()?;
@@ -283,8 +314,9 @@ impl std::fmt::Debug for Tracing {
         f.debug_struct("Tracing")
             .field("file", &self.file)
             .field("workspace", &self.workspace)
-            .field("self_test_domain", &self.self_test_domain)
+            .field("excludes", &self.excludes)
             .field("following", &self.following)
+            .field("followed", &self.followed)
             .field("domain", &self.domain)
             .finish_non_exhaustive()
     }
@@ -317,7 +349,8 @@ impl Tracing {
     /// now, so a denial between the fork and this call is in the trace rather than lost to the
     /// race.
     pub fn follow(&mut self, pid: libc::pid_t, since: SystemTime) {
-        let spawned = query(since)
+        self.followed = Some((pid, since));
+        let spawned = query(since, &AUDIT_TRANSPORT)
             .arg("--follow")
             .stdout(std::process::Stdio::piped())
             .spawn();
@@ -325,9 +358,20 @@ impl Tracing {
             Ok(mut journal) => match journal.stdout.take() {
                 Some(stdout) => {
                     let file = std::fs::OpenOptions::new().append(true).open(&self.file);
-                    let exclude = self.self_test_domain.clone();
-                    let draining = std::thread::spawn(move || drain(stdout, file, pid, &exclude));
-                    self.following = Some(Following { journal, draining });
+                    let excludes = self.excludes.clone();
+                    let (ends, ended) = std::sync::mpsc::channel();
+                    let draining = std::thread::spawn(move || {
+                        let drained = drain(stdout, file, pid, &excludes);
+                        // Before the value is handed back, so teardown learns the drain has
+                        // stopped without blocking on the `join` that collects it.
+                        let _ = ends.send(());
+                        drained
+                    });
+                    self.following = Some(Following {
+                        journal,
+                        draining,
+                        ended,
+                    });
                 }
                 None => {
                     let _ = journal.kill();
@@ -351,24 +395,44 @@ impl Tracing {
         // logged the denial and the trace file was empty, which is the "nothing was denied" trace
         // the whole flag exists to prevent ([#98]).
         //
-        // This is a **window, not a barrier**. The self-test polls a `journalctl` of its own, so
-        // what it observes is the journal's state and not how far the tail has read, and
-        // `Following::stop` then kills the tail outright — so a record journald has written but
-        // the tail has not reached is still lost. Closing it takes a barrier the tail itself
-        // reports ([#152]); what this does is widen the window from nothing to the self-test's
-        // own round trip, which on the measured host is the whole of it.
+        // The barrier itself is the tail's own: it stops on the run domain's `status=deallocated`
+        // record, which cannot reach it before every record journald wrote earlier has ([#152]).
+        // The self-test's round trip is no longer what the run's last denials are read in, but it
+        // still runs first, because its verdict is about a channel that may have died *during*
+        // the run and the tail's is about the file.
         //
-        // Never cached, and never skipped because the first one passed: what this one looks for
-        // is a channel that stopped working *during* the run.
+        // Never cached, and never skipped because the first one passed.
         //
         // [#98]: https://github.com/firefly-engineering/playpen/issues/98
         // [#152]: https://github.com/firefly-engineering/playpen/issues/152
         let bracketing = (self.self_test)(&self.workspace);
+        // This self-test's domain is not the one the trace is of, and it is only knowable now:
+        // the tail started before the domain existed, which is why the set is written and not
+        // fixed at construction.
+        if let Channel::Delivers { domain } = &bracketing {
+            self.exclude(domain.clone());
+        }
         let mut tail = None;
         if let Some(following) = self.following.take() {
             let drained = following.stop();
             self.domain = drained.domain;
             tail = drained.failure;
+        }
+        // A tail that learnt no domain read nothing of this run, and two very different things
+        // look like that: a run that denied nothing, which the kernel logs not at all, and a tail
+        // stopped before it reached the record naming the domain. The drain cannot tell them
+        // apart, and resolving the ambiguity towards "complete" would hand back exactly the trace
+        // that reads as "nothing was denied". So the journal is asked directly, here, where the
+        // pid and the run's whole window are both known.
+        if tail.is_none()
+            && self.domain.is_none()
+            && let Some((pid, since)) = self.followed
+            && let Some(domain) = allocated_by(pid, since)
+        {
+            tail = Some(format!(
+                "the run was confined by Landlock domain {domain} and no record of it reached the \
+                 tail, so the trace holds none of this run's denials"
+            ));
         }
         let channel = match bracketing {
             Channel::Delivers { .. } => None,
@@ -401,6 +465,14 @@ impl Tracing {
         self.domain.as_deref()
     }
 
+    /// Drop this domain's records from the trace from now on.
+    fn exclude(&self, domain: String) {
+        self.excludes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(domain);
+    }
+
     /// Mark the trace unverified in the trace itself, and say why. The operator may never read
     /// the run record, and a file that ends without this reads as a complete account.
     fn unverified(&self, why: String) -> String {
@@ -421,14 +493,19 @@ impl Tracing {
 
 impl Following {
     fn stop(mut self) -> Drained {
+        // The barrier: the drain stops of its own accord on the run domain's deallocation record.
+        // Bounded, because a domain no record ever deallocates — one a leaked descendant keeps
+        // alive — would otherwise hang teardown. The timeout is not reported here: the drain says
+        // for itself whether it reached a known end, and it reaches the same verdict at EOF.
+        let _ = self.ended.recv_timeout(BARRIER_WAIT);
         // The thread ends when its pipe does, and the pipe ends when `journalctl --follow` does.
         let killed = self
             .journal
             .kill()
             .and_then(|()| self.journal.wait().map(drop));
         let mut drained = self.draining.join().unwrap_or_else(|_| Drained {
-            domain: None,
             failure: Some("the thread draining the journal panicked".to_string()),
+            ..Drained::default()
         });
         if let Err(err) = killed {
             drained
@@ -440,17 +517,30 @@ impl Following {
 }
 
 /// Drain `stdout` into `file`, keeping the records of the domain `pid` was confined by and never
-/// those of `exclude`, the self-test's own domain.
+/// those of `excludes`, the self-tests' own domains. Each kept record is one line of
+/// `<transport>\t<time>\t<message>`.
 ///
 /// The domain is learnt rather than guessed: Landlock logs a `status=allocated` record naming the
-/// pid that allocated it, and every denial in the tree beneath carries the same `domain`. Until
-/// that record arrives there is nothing of this run to keep, and it arrives first, because a
-/// domain denies nothing before it exists.
+/// pid that allocated it, and every denial in the tree beneath carries the same `domain`.
+///
+/// It does **not** arrive first. The kernel logs a domain's details lazily, at the domain's first
+/// denial, and the journal carries that denial *ahead* of them — measured 140 µs ahead on kernel
+/// 7.1. So a record of an unknown domain is held in a bounded lookbehind rather than dropped, and
+/// the lookbehind is flushed once the allocation names the domain. Dropping it instead lost the
+/// **first** denial of every traced run, which is the only denial a child that exits on its first
+/// refusal ever makes; the deallocation record's own count is what showed it up
+/// ([#152](https://github.com/firefly-engineering/playpen/issues/152)).
+///
+/// It stops on that domain's `status=deallocated` record rather than on the pipe closing. That is
+/// the **barrier**: the kernel logs it when the last task in the domain is gone, so a tail that
+/// has read it has read past every record journald wrote before it. Stopping on the pipe instead
+/// stops on whenever teardown killed the tail, which is a race with the records it was reading
+/// ([#152](https://github.com/firefly-engineering/playpen/issues/152)).
 fn drain(
     stdout: std::process::ChildStdout,
     file: std::io::Result<std::fs::File>,
     pid: libc::pid_t,
-    exclude: &str,
+    excludes: &std::sync::Mutex<Vec<String>>,
 ) -> Drained {
     let mut drained = Drained::default();
     let mut file = match file {
@@ -461,6 +551,9 @@ fn drain(
         }
     };
     let pid = pid.to_string();
+    // Records of a domain not yet known, newest last. Bounded, because a run whose allocation
+    // never arrives must not buffer every other run's denials for the length of the run.
+    let mut lookbehind: std::collections::VecDeque<Entry> = std::collections::VecDeque::new();
     for line in BufReader::new(stdout).lines() {
         let Ok(line) = line else {
             drained.failure = Some("the journal stopped being readable mid-run".to_string());
@@ -473,24 +566,102 @@ fn drain(
         let Some(domain) = fields.get("domain") else {
             continue;
         };
-        if domain == exclude {
+        if excludes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|excluded| excluded == domain)
+        {
             continue;
         }
-        if drained.domain.is_none()
-            && fields.get("status") == Some("allocated")
-            && fields.get("pid") == Some(pid.as_str())
-        {
+        if drained.domain.is_none() {
+            if fields.get("status") != Some("allocated") || fields.get("pid") != Some(pid.as_str())
+            {
+                lookbehind.push_back(entry);
+                if lookbehind.len() > LOOKBEHIND {
+                    lookbehind.pop_front();
+                }
+                continue;
+            }
             drained.domain = Some(domain.to_owned());
+            // The denials this domain had already made before the kernel named it.
+            for held in std::mem::take(&mut lookbehind) {
+                let held_fields = Fields::of(&held.message);
+                if held_fields.get("domain") == drained.domain.as_deref()
+                    && !drained.keep(&mut file, &held, &held_fields)
+                {
+                    return drained;
+                }
+            }
         }
         if drained.domain.as_deref() != Some(domain) {
             continue;
         }
-        if writeln!(file, "{}\t{}", entry.transport, entry.message).is_err() {
-            drained.failure = Some("the trace could not be written to".to_string());
+        if !drained.keep(&mut file, &entry, &fields) {
             return drained;
         }
+        if fields.get("status") == Some("deallocated") {
+            drained.sealed = true;
+            drained.counted = fields.get("denials").and_then(|n| n.parse().ok());
+            break;
+        }
     }
+    drained.vouch();
     drained
+}
+
+impl Drained {
+    /// Write one record to the trace, counting it where it is a denial — and not where it is the
+    /// domain's own allocation or deallocation, because the kernel's count is of what it denied.
+    /// `false` where the trace could not be written, which ends the drain.
+    fn keep(&mut self, file: &mut std::fs::File, entry: &Entry, fields: &Fields) -> bool {
+        if writeln!(
+            file,
+            "{}\t{}\t{}",
+            entry.transport,
+            entry.stamp(),
+            entry.message
+        )
+        .is_err()
+        {
+            self.failure = Some("the trace could not be written to".to_string());
+            return false;
+        }
+        if fields.get("blockers").is_some() {
+            self.written += 1;
+        }
+        true
+    }
+
+    /// What the trace cannot be vouched for, having read what it read. Neither of these changes
+    /// the run's exit status: a trace that cannot be vouched for is **said** to be so, rather than
+    /// presented as complete.
+    fn vouch(&mut self) {
+        // A domain the kernel never named denied nothing: it logs a domain's details at its first
+        // denial and nothing at all for a domain that never denies, so there is no allocation,
+        // no deallocation, and no denial to have missed. An empty trace is the true account of
+        // such a run, and demanding a barrier of it would mark every clean run unverified.
+        if self.domain.is_none() {
+            return;
+        }
+        if !self.sealed {
+            self.failure.get_or_insert_with(|| {
+                "the journal tail could not be read to a known end: no record deallocating this \
+                 run's Landlock domain reached it, so a denial journald wrote may be missing"
+                    .to_string()
+            });
+            return;
+        }
+        if let Some(counted) = self.counted
+            && counted != self.written
+        {
+            self.failure.get_or_insert(format!(
+                "the kernel counted {counted} denials for this run's domain and {} reached the \
+                 trace",
+                self.written
+            ));
+        }
+    }
 }
 
 /// One journal entry, as much of it as a trace needs. An `Entry` and never a `Record`:
@@ -498,6 +669,12 @@ fn drain(
 #[derive(Debug, PartialEq, Eq)]
 struct Entry {
     transport: String,
+    /// `__REALTIME_TIMESTAMP`: **journald's** time for the entry, in microseconds since the epoch,
+    /// and never audit's own event time out of the message text. For the audit transport it is
+    /// when journald received the record. Optional, because a hand-written fixture carries no
+    /// such field and the wild may not either — and a record with no time belongs in the trace far
+    /// more than it belongs nowhere.
+    time: Option<u64>,
     message: String,
 }
 
@@ -508,8 +685,20 @@ impl Entry {
         let entry: serde_json::Value = serde_json::from_str(line).ok()?;
         Some(Entry {
             transport: text(entry.get("_TRANSPORT")?)?,
+            time: entry
+                .get("__REALTIME_TIMESTAMP")
+                .and_then(text)
+                .and_then(|micros| micros.parse().ok()),
             message: text(entry.get("MESSAGE")?)?,
         })
+    }
+
+    /// The entry's time as seconds and milliseconds, or `-` where it carried none.
+    fn stamp(&self) -> String {
+        match self.time {
+            Some(micros) => format!("{}.{:03}", micros / 1_000_000, micros % 1_000_000 / 1_000),
+            None => "-".to_string(),
+        }
     }
 }
 
@@ -717,45 +906,85 @@ fn channel_self_test(workspace: &Path) -> Channel {
         Ok(pid) => pid.to_string(),
         Err(why) => return Channel::Unprovoked(why),
     };
-    let wanted = marker.to_string_lossy().into_owned();
     let deadline = Instant::now() + BUDGET;
-    let mut lossy = false;
-    // The **domain** this self-test's own denial was logged under, learnt from the
-    // `status=allocated` record naming the pid that allocated it. Two fields identify the record
-    // and not one ([spec §14.5]): the path is unique to this self-test, and the domain is what a
-    // *concurrent* playpen's self-test cannot share even if it chose the same path.
-    let mut provoker = None;
+    let mut observing = Observing {
+        wanted: marker.to_string_lossy().into_owned(),
+        pid,
+        provoker: None,
+        lossy: false,
+    };
     loop {
-        for entry in since_then(since) {
+        if let Some(delivers) = observing.round(&since_then(since)) {
+            return delivers;
+        }
+        if Instant::now() >= deadline {
+            return observing.verdict();
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+/// The self-test's reading of what the journal has shown it so far, across the rounds of one
+/// poll. A value rather than four locals, so the one decision the whole ladder rests on — which
+/// **transport** carried the record — can be driven by a test rather than only by a host
+/// ([ADR 0016], [#151](https://github.com/firefly-engineering/playpen/issues/151)).
+///
+/// [ADR 0016]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0016-the-suite-defines-the-backend-and-an-assertion-that-can-pass-vacuously-is-a-defect.md
+struct Observing {
+    /// The marker path the provoked denial names, unique to this self-test.
+    wanted: String,
+    /// The pid that was confined, as the `status=allocated` record spells it.
+    pid: String,
+    /// The **domain** this self-test's own denial was logged under, learnt from the
+    /// `status=allocated` record naming the pid that allocated it. Two fields identify the record
+    /// and not one ([spec §14.5]): the path is unique to this self-test, and the domain is what a
+    /// *concurrent* playpen's self-test cannot share even if it chose the same path.
+    ///
+    /// [spec §14.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#145---trace-denials
+    provoker: Option<String>,
+    /// Whether the record has been seen on `_TRANSPORT=kernel`, which is not delivery.
+    lossy: bool,
+}
+
+impl Observing {
+    /// One round of entries. `Some` only for the one answer that ends the poll: the record on the
+    /// transport that counts.
+    fn round(&mut self, entries: &[Entry]) -> Option<Channel> {
+        for entry in entries {
             let fields = Fields::of(&entry.message);
-            if fields.get("status") == Some("allocated") && fields.get("pid") == Some(pid.as_str())
+            if fields.get("status") == Some("allocated")
+                && fields.get("pid") == Some(self.pid.as_str())
             {
-                provoker = fields.get("domain").map(str::to_owned);
+                self.provoker = fields.get("domain").map(str::to_owned);
             }
-            if fields.get("path") != Some(wanted.as_str()) {
+            if fields.get("path") != Some(self.wanted.as_str()) {
                 continue;
             }
             // Where the allocation was logged too, the denial must carry the same domain. Where it
             // was not — the record for it can be dropped on its own — the unique path stands
             // alone, because refusing a delivered record for a *missing* second record would
             // report a working channel as a broken one.
-            if provoker.is_some() && fields.get("domain") != provoker.as_deref() {
+            if self.provoker.is_some() && fields.get("domain") != self.provoker.as_deref() {
                 continue;
             }
             if entry.transport == "audit" {
-                return Channel::Delivers {
+                return Some(Channel::Delivers {
                     domain: fields.get("domain").unwrap_or_default().to_owned(),
-                };
+                });
             }
-            lossy = true;
+            self.lossy = true;
         }
-        if Instant::now() >= deadline {
-            return match lossy {
-                true => Channel::Lossy,
-                false => Channel::Silent,
-            };
+        None
+    }
+
+    /// What the budget running out means, given what was seen: a record on the kernel transport
+    /// alone is the shared print rate limit, which drops records silently, and no record at all
+    /// is silence.
+    fn verdict(&self) -> Channel {
+        match self.lossy {
+            true => Channel::Lossy,
+            false => Channel::Silent,
         }
-        std::thread::sleep(POLL);
     }
 }
 
@@ -844,9 +1073,24 @@ struct LandlockRulesetAttr {
 /// nothing, so that reading any file at all is a denial.
 const LANDLOCK_ACCESS_FS_READ_FILE: u64 = 1 << 2;
 
-/// The journal's kernel-facing records since `since`, read once.
+/// The Landlock domain `pid` allocated, if the journal holds the record naming it. Asked once, at
+/// teardown, and only where the tail learnt no domain: it is what tells a run that denied nothing
+/// — which the kernel logs not at all, so an empty trace is its complete account — from a tail
+/// that was stopped before it read that record.
+fn allocated_by(pid: libc::pid_t, since: SystemTime) -> Option<String> {
+    let pid = pid.to_string();
+    since_then(since).into_iter().find_map(|entry| {
+        let fields = Fields::of(&entry.message);
+        let allocated =
+            fields.get("status") == Some("allocated") && fields.get("pid") == Some(pid.as_str());
+        allocated.then(|| fields.get("domain").unwrap_or_default().to_owned())
+    })
+}
+
+/// The journal's kernel-facing records since `since`, read once, on **both** transports: this is
+/// the self-test's query, and which transport carried the record is its verdict.
 fn since_then(since: SystemTime) -> Vec<Entry> {
-    let Ok(output) = query(since).output() else {
+    let Ok(output) = query(since, &EITHER_TRANSPORT).output() else {
         return Vec::new();
     };
     String::from_utf8_lossy(&output.stdout)
@@ -855,12 +1099,22 @@ fn since_then(since: SystemTime) -> Vec<Entry> {
         .collect()
 }
 
+/// The transports the **self-test** asks for. Both, because telling them apart is its whole job:
+/// the audit one is the channel, and the kernel one is the shared print rate limit that silently
+/// drops records, which is `refusal.trace.channel-lossy`.
+const EITHER_TRANSPORT: [&str; 3] = ["_TRANSPORT=audit", "+", "_TRANSPORT=kernel"];
+
+/// The transport the **tail** asks for. One, because a host carrying Landlock records on both
+/// delivers every denial twice, and an operator counting a trace of them counts double
+/// ([#151](https://github.com/firefly-engineering/playpen/issues/151)). The audit transport is
+/// the one to keep: the ladder has already made its delivery a precondition of the run, so after
+/// it passes the kernel copy is never the only copy.
+const AUDIT_TRANSPORT: [&str; 1] = ["_TRANSPORT=audit"];
+
 /// The query both the self-test and the tail make: every record the kernel put in the journal
-/// since `since`, on either transport a Landlock denial can arrive by, as JSON.
-///
-/// Both transports, because telling them apart is the point: the audit one is the channel, and
-/// the kernel one is the shared print rate limit that silently drops records.
-fn query(since: SystemTime) -> std::process::Command {
+/// since `since`, on `transports`, as JSON. One builder and not two, so the window, the output
+/// format and the stdio setup have one source of truth.
+fn query(since: SystemTime, transports: &[&str]) -> std::process::Command {
     let epoch = since
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|since| since.as_secs())
@@ -869,7 +1123,7 @@ fn query(since: SystemTime) -> std::process::Command {
     command
         .args(["--quiet", "--no-pager", "-o", "json"])
         .arg(format!("--since=@{epoch}"))
-        .args(["_TRANSPORT=audit", "+", "_TRANSPORT=kernel"])
+        .args(transports)
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     command
@@ -879,10 +1133,54 @@ fn query(since: SystemTime) -> std::process::Command {
 mod tests {
     use super::*;
 
-    const ALLOCATED: &str = "LANDLOCK_DOMAIN domain=195ba459b status=allocated mode=enforcing \
-                             pid=4242 uid=1000 exe=\"/usr/bin/claude\" comm=\"claude\"";
+    /// The pid the fixture's records were allocated by, and the pid a drain over them is told to
+    /// follow. One source of truth: the two have to agree for the domain to be learnt at all.
+    const TRACED_PID: libc::pid_t = 4242;
+
+    /// This run's domain, as the fixture's records spell it.
+    const TRACED_DOMAIN: &str = "195ba459b";
+
     const DENIAL: &str = "LANDLOCK_ACCESS domain=195ba459b blockers=fs.read_file \
                           path=\"/home/u/.ssh/id_ed25519\" dev=\"vda2\" ino=1234";
+    const DEALLOCATED: &str = "LANDLOCK_DOMAIN domain=195ba459b status=deallocated denials=1";
+
+    /// The record naming [`TRACED_DOMAIN`] as [`TRACED_PID`]'s, built from both rather than
+    /// spelling the pid a second time.
+    fn allocated() -> String {
+        format!(
+            "LANDLOCK_DOMAIN domain={TRACED_DOMAIN} status=allocated mode=enforcing \
+             pid={TRACED_PID} uid=1000 exe=\"/usr/bin/claude\" comm=\"claude\""
+        )
+    }
+
+    /// One line of `journalctl -o json`, as the drain reads them.
+    fn entry(message: &str) -> String {
+        serde_json::json!({"_TRANSPORT": "audit", "MESSAGE": message}).to_string()
+    }
+
+    /// The domains a drain drops, as [`Tracing`] shares them with it.
+    fn excluding(domains: &[&str]) -> Excludes {
+        std::sync::Arc::new(std::sync::Mutex::new(
+            domains.iter().map(|d| (*d).to_string()).collect(),
+        ))
+    }
+
+    /// Drain `lines` as the journal would deliver them, and return what the drain found alongside
+    /// what reached the trace. The scratch goes with the call, so an assertion that panics leaves
+    /// no directory behind.
+    fn drained(lines: &[String], excludes: &Excludes) -> (Drained, String) {
+        let dir = tempdir();
+        let trace = dir.join("trace");
+        let drained = drain(
+            feed(&lines.join("\n")),
+            std::fs::File::create(&trace),
+            TRACED_PID,
+            excludes,
+        );
+        let written = std::fs::read_to_string(&trace).expect("the trace");
+        let _ = std::fs::remove_dir_all(dir);
+        (drained, written)
+    }
 
     fn delivers() -> Channel {
         Channel::Delivers {
@@ -1045,7 +1343,7 @@ mod tests {
 
     #[test]
     fn an_allocation_names_the_pid_that_made_the_domain() {
-        let fields = Fields::of(ALLOCATED);
+        let fields = Fields::of(&allocated());
         assert_eq!(fields.get("status"), Some("allocated"));
         assert_eq!(fields.get("pid"), Some("4242"));
         assert_eq!(fields.get("domain"), Some("195ba459b"));
@@ -1058,11 +1356,28 @@ mod tests {
             Entry::read(&line),
             Some(Entry {
                 transport: "audit".to_string(),
+                time: None,
                 message: DENIAL.to_string(),
             })
         );
         assert_eq!(Entry::read("not json"), None);
         assert_eq!(Entry::read(r#"{"MESSAGE":"no transport"}"#), None);
+    }
+
+    /// The trace's time column is journald's own time for the entry, and an entry carrying none is
+    /// still written: a record with no time beats a denial that is silently absent.
+    #[test]
+    fn an_entry_is_stamped_with_journalds_time_or_with_nothing() {
+        let line = serde_json::json!({
+            "_TRANSPORT": "audit",
+            "__REALTIME_TIMESTAMP": "1791320929225431",
+            "MESSAGE": DENIAL,
+        })
+        .to_string();
+        let stamped = Entry::read(&line).expect("an entry");
+        assert_eq!(stamped.time, Some(1_791_320_929_225_431));
+        assert_eq!(stamped.stamp(), "1791320929.225");
+        assert_eq!(Entry::read(&entry(DENIAL)).expect("an entry").stamp(), "-");
     }
 
     /// journald renders a field that is not UTF-8 as the bytes it is, and a trace that dropped
@@ -1082,30 +1397,327 @@ mod tests {
     /// not, and the self-test's own domain is excluded by its id.
     #[test]
     fn the_tail_keeps_this_runs_domain_and_nothing_else() {
-        let entry = |message: &str| {
-            serde_json::json!({"_TRANSPORT": "audit", "MESSAGE": message}).to_string()
-        };
-        let lines = [
-            // Another run's denial, before this one's domain is known.
-            entry("LANDLOCK_ACCESS domain=ffff blockers=fs.read_file path=\"/other\""),
-            // The self-test's own, which is never this run's business.
-            entry("LANDLOCK_ACCESS domain=5e1f blockers=fs.read_file path=\"/self-test\""),
-            entry(ALLOCATED),
-            entry(DENIAL),
-            entry("LANDLOCK_ACCESS domain=ffff blockers=fs.write_file path=\"/other\""),
-        ]
-        .join("\n");
-        let dir = tempdir();
-        let trace = dir.join("trace");
-        let drained = drain(feed(&lines), std::fs::File::create(&trace), 4242, "5e1f");
-        assert_eq!(drained.domain.as_deref(), Some("195ba459b"));
+        let (drained, written) = drained(
+            &[
+                // Another run's denial, before this one's domain is known.
+                entry("LANDLOCK_ACCESS domain=ffff blockers=fs.read_file path=\"/other\""),
+                // The self-test's own, which is never this run's business.
+                entry("LANDLOCK_ACCESS domain=5e1f blockers=fs.read_file path=\"/self-test\""),
+                entry(&allocated()),
+                entry(DENIAL),
+                entry("LANDLOCK_ACCESS domain=ffff blockers=fs.write_file path=\"/other\""),
+                entry(DEALLOCATED),
+            ],
+            &excluding(&["5e1f"]),
+        );
+        assert_eq!(drained.domain.as_deref(), Some(TRACED_DOMAIN));
         assert_eq!(drained.failure, None);
-        let written = std::fs::read_to_string(&trace).expect("the trace");
-        assert_eq!(written.lines().count(), 2, "{written}");
+        assert_eq!(written.lines().count(), 3, "{written}");
         assert!(written.contains("status=allocated"), "{written}");
         assert!(written.contains("id_ed25519"), "{written}");
         assert!(!written.contains("/other"), "{written}");
         assert!(!written.contains("/self-test"), "{written}");
+    }
+
+    /// The kernel names a domain at its **first denial**, and the journal carries that denial
+    /// ahead of the naming. A drain that insisted on learning the domain first lost exactly the
+    /// denial of a child that exits on its first refusal — and the count off the deallocation
+    /// record is what says so.
+    #[test]
+    fn a_denial_logged_before_its_domain_was_named_is_still_kept() {
+        let (drained, written) = drained(
+            &[
+                // Another run's, before anything of this one is known: never recovered.
+                entry("LANDLOCK_ACCESS domain=ffff blockers=fs.read_file path=\"/other\""),
+                entry(DENIAL),
+                entry(&allocated()),
+                entry(DEALLOCATED),
+            ],
+            &excluding(&[]),
+        );
+        assert_eq!((drained.counted, drained.written), (Some(1), 1));
+        assert_eq!(drained.failure, None, "the count agreed with the trace");
+        assert!(written.contains("id_ed25519"), "{written}");
+        assert!(!written.contains("/other"), "{written}");
+    }
+
+    /// Three columns, and a time of journald's where the entry carried one. A trace with no time
+    /// of its own was why the duplicate kernel copy could not simply be dropped.
+    #[test]
+    fn a_trace_line_is_transport_time_and_message() {
+        let stamped = serde_json::json!({
+            "_TRANSPORT": "audit",
+            "__REALTIME_TIMESTAMP": "1791320929225431",
+            "MESSAGE": DENIAL,
+        })
+        .to_string();
+        let (_, written) = drained(
+            &[entry(&allocated()), stamped, entry(DEALLOCATED)],
+            &excluding(&[]),
+        );
+        let denial = written
+            .lines()
+            .find(|line| line.contains("id_ed25519"))
+            .expect("the denial");
+        assert_eq!(
+            denial.split('\t').collect::<Vec<_>>(),
+            vec!["audit", "1791320929.225", DENIAL],
+            "{written}"
+        );
+        // The fixtures that carry no timestamp are written all the same, with `-` for the time.
+        assert!(
+            written.lines().all(|line| line.split('\t').count() == 3)
+                && written.contains("audit\t-\tLANDLOCK_DOMAIN"),
+            "{written}"
+        );
+    }
+
+    /// The two surfaces ask for different transports, and must: the tail asks for the audit one
+    /// alone, because a host carrying both wrote every denial twice; the self-test asks for both,
+    /// because telling them apart is what `refusal.trace.channel-lossy` is made of.
+    #[test]
+    fn the_tail_reads_one_transport_and_the_self_test_both() {
+        let args = |transports: &[&str]| {
+            query(SystemTime::UNIX_EPOCH, transports)
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        let tail = args(&AUDIT_TRANSPORT);
+        assert!(tail.contains(&"_TRANSPORT=audit".to_string()), "{tail:?}");
+        assert!(!tail.contains(&"_TRANSPORT=kernel".to_string()), "{tail:?}");
+        let self_test = args(&EITHER_TRANSPORT);
+        assert!(
+            self_test.contains(&"_TRANSPORT=audit".to_string())
+                && self_test.contains(&"_TRANSPORT=kernel".to_string())
+                && self_test.contains(&"+".to_string()),
+            "{self_test:?}"
+        );
+    }
+
+    /// The barrier: the tail stops on the run domain's deallocation, and never waits for the
+    /// journal to go quiet. What follows it in the stream is another run's business.
+    #[test]
+    fn the_tail_stops_on_the_run_domains_deallocation() {
+        let (drained, written) = drained(
+            &[
+                entry(&allocated()),
+                entry(DENIAL),
+                entry(DEALLOCATED),
+                entry("LANDLOCK_ACCESS domain=195ba459b blockers=fs.read_file path=\"/after\""),
+            ],
+            &excluding(&[]),
+        );
+        assert!(drained.sealed);
+        assert_eq!((drained.counted, drained.written), (Some(1), 1));
+        assert_eq!(drained.failure, None);
+        assert!(!written.contains("/after"), "{written}");
+    }
+
+    /// A tail that was never read to a known end says so, rather than presenting what it has as
+    /// the whole account.
+    #[test]
+    fn a_tail_with_no_deallocation_record_leaves_the_trace_unverified() {
+        let (drained, _) = drained(&[entry(DENIAL), entry(&allocated())], &excluding(&[]));
+        assert!(!drained.sealed);
+        let failure = drained.failure.expect("unverified");
+        assert!(failure.contains("known end"), "{failure}");
+    }
+
+    /// The count is what the trace is checked against: a denial the kernel counted and the trace
+    /// does not hold is the failure the whole barrier exists to notice.
+    #[test]
+    fn a_denial_count_that_disagrees_with_the_trace_names_both_numbers() {
+        let (drained, _) = drained(
+            &[
+                entry(&allocated()),
+                entry(DENIAL),
+                entry("LANDLOCK_DOMAIN domain=195ba459b status=deallocated denials=4"),
+            ],
+            &excluding(&[]),
+        );
+        let failure = drained.failure.expect("unverified");
+        assert!(failure.contains('4') && failure.contains('1'), "{failure}");
+    }
+
+    /// The bracketing self-test allocates its domain while the tail is already reading, so the
+    /// exclude set is written after the tail has started — and the record is dropped by that id
+    /// and not merely by failing to be this run's.
+    #[test]
+    fn the_bracketing_self_tests_domain_joins_the_exclude_set() {
+        let dir = tempdir();
+        let mut tracing = Tracing {
+            file: dir.join("trace"),
+            workspace: dir.clone(),
+            self_test: std::sync::Arc::new(|_: &Path| delivers()),
+            excludes: excluding(&["5e1f"]),
+            following: None,
+            followed: None,
+            domain: None,
+        };
+        std::fs::File::create(tracing.file()).expect("the trace");
+        assert_eq!(tracing.stop(), None);
+        assert_eq!(
+            *tracing.excludes.lock().expect("the excludes"),
+            vec!["5e1f".to_string(), "abc".to_string()],
+            "the bracketing self-test's domain was never excluded"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A run that denied nothing has an empty trace and nothing to vouch for: the kernel logs a
+    /// domain's details at its first denial, so a denial-free run leaves no record at all — not an
+    /// allocation, not a deallocation. Demanding the barrier of it would mark every clean run
+    /// unverified, which is the trace failure that would mean nothing.
+    #[test]
+    fn a_run_that_denied_nothing_is_not_unverified_for_want_of_a_barrier() {
+        let (drained, written) = drained(
+            &[entry(
+                "LANDLOCK_ACCESS domain=ffff blockers=fs.read_file path=\"/other\"",
+            )],
+            &excluding(&[]),
+        );
+        assert_eq!(drained.domain, None);
+        assert_eq!(drained.failure, None);
+        assert_eq!(written, "");
+    }
+
+    /// The transport is the verdict, which is what the tail reading one transport must not have
+    /// cost ([#151]): a record carried only by `_TRANSPORT=kernel` came through the shared print
+    /// rate limit, so the channel is **lossy** and never delivering, and no record at all is
+    /// silence. Driven as entries rather than as a host, because on a host with both halves on
+    /// neither of the two failing verdicts can be provoked at all ([ADR 0016]).
+    ///
+    /// [#151]: https://github.com/firefly-engineering/playpen/issues/151
+    /// [ADR 0016]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0016-the-suite-defines-the-backend-and-an-assertion-that-can-pass-vacuously-is-a-defect.md
+    #[test]
+    fn the_transport_that_carried_the_record_is_the_self_tests_verdict() {
+        let marker = "/state/trace-self-test-7-1";
+        let denial = format!("LANDLOCK_ACCESS domain=5e1f blockers=fs.read_file path=\"{marker}\"");
+        let observing = || Observing {
+            wanted: marker.to_string(),
+            pid: "7".to_string(),
+            provoker: None,
+            lossy: false,
+        };
+        let seen = |transport: &str, message: &str| {
+            vec![
+                Entry::read(
+                    &serde_json::json!({"_TRANSPORT": transport, "MESSAGE": message}).to_string(),
+                )
+                .expect("an entry"),
+            ]
+        };
+        // On the audit transport the channel delivers, and names the domain to exclude.
+        let mut audit = observing();
+        assert_eq!(
+            audit.round(&seen("audit", &denial)),
+            Some(Channel::Delivers {
+                domain: "5e1f".to_string()
+            })
+        );
+        // On the kernel transport the same record is not delivery: the poll runs on, and the
+        // budget running out is `Lossy`, which is `refusal.trace.channel-lossy`.
+        let mut kernel = observing();
+        assert_eq!(kernel.round(&seen("kernel", &denial)), None);
+        assert_eq!(kernel.verdict(), Channel::Lossy);
+        // Another self-test's denial, on the transport that delivers, is still not this one's.
+        let mut other = observing();
+        assert_eq!(
+            other.round(&seen(
+                "audit",
+                "LANDLOCK_ACCESS domain=ffff blockers=fs.read_file path=\"/state/other\""
+            )),
+            None
+        );
+        assert_eq!(other.verdict(), Channel::Silent);
+    }
+
+    /// Both verdicts, where both failed ([spec §14.5]): the tail's and the bracketing self-test's.
+    /// The self-test has already been paid for by the time the tail is stopped, so dropping its
+    /// verdict for the tail's would hide a channel that died during the run behind a tail that
+    /// could not be read to the end.
+    ///
+    /// [spec §14.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#145---trace-denials
+    #[test]
+    fn a_failing_self_test_and_an_unreadable_tail_both_reach_the_sentence() {
+        let (ends, ended) = std::sync::mpsc::channel();
+        let draining = std::thread::spawn(move || {
+            let drained = Drained {
+                failure: Some("the trace could not be written to".to_string()),
+                ..Drained::default()
+            };
+            let _ = ends.send(());
+            drained
+        });
+        let dir = tempdir();
+        let mut tracing = Tracing {
+            file: dir.join("trace"),
+            workspace: dir.clone(),
+            self_test: std::sync::Arc::new(|_: &Path| Channel::Silent),
+            excludes: excluding(&["5e1f"]),
+            following: Some(Following {
+                journal: std::process::Command::new("cat")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .spawn()
+                    .expect("a stand-in for the journal tail"),
+                draining,
+                ended,
+            }),
+            followed: None,
+            domain: None,
+        };
+        std::fs::File::create(tracing.file()).expect("the trace");
+        let why = tracing.stop().expect("unverified");
+        assert!(why.contains("could not be written to"), "{why}");
+        assert!(why.contains("no record of its own denial"), "{why}");
+        // And in the file too, because the operator may never read the run record.
+        let written = std::fs::read_to_string(tracing.file()).expect("the trace");
+        assert!(written.contains("# playpen: unverified:"), "{written}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A deallocation record that never arrives is a sentence and never a hang: a domain a leaked
+    /// descendant keeps alive is deallocated by nothing, and teardown still has to finish.
+    #[test]
+    fn a_barrier_that_never_arrives_bounds_teardown_rather_than_waiting_for_it() {
+        let dir = tempdir();
+        let trace = dir.join("trace");
+        // A tail that delivers the run's denial and then holds its pipe open with no deallocation
+        // to follow it, as a domain a leaked descendant keeps alive leaves it.
+        let mut journal = std::process::Command::new("cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("a stand-in for the journal tail");
+        let mut writing = journal.stdin.take().expect("the writing end");
+        writeln!(writing, "{}\n{}", entry(DENIAL), entry(&allocated())).expect("delivered");
+        let stdout = journal.stdout.take().expect("the reading end");
+        let file = std::fs::File::create(&trace);
+        let excludes = excluding(&[]);
+        let (ends, ended) = std::sync::mpsc::channel();
+        let draining = std::thread::spawn(move || {
+            let drained = drain(stdout, file, 4242, &excludes);
+            let _ = ends.send(());
+            drained
+        });
+        let started = Instant::now();
+        let drained = Following {
+            journal,
+            draining,
+            ended,
+        }
+        .stop();
+        // Held until now, so the stand-in's pipe stays open and only the kill closes it.
+        drop(writing);
+        assert!(
+            started.elapsed() < BARRIER_WAIT * 4,
+            "teardown waited too long"
+        );
+        assert_eq!(drained.domain.as_deref(), Some("195ba459b"));
+        let failure = drained.failure.expect("unverified");
+        assert!(failure.contains("known end"), "{failure}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1117,12 +1729,18 @@ mod tests {
         // the last record the journal hands over. So it reports a domain only if the self-test
         // ran while it was still reading — and nothing at all if the tail was stopped first.
         let (provoked, records) = std::sync::mpsc::channel::<()>();
-        let draining = std::thread::spawn(move || Drained {
-            domain: records
-                .recv_timeout(BUDGET)
-                .ok()
-                .map(|()| "195ba459b".to_string()),
-            failure: None,
+        let (ends, ended) = std::sync::mpsc::channel();
+        let draining = std::thread::spawn(move || {
+            let drained = Drained {
+                domain: records
+                    .recv_timeout(BUDGET)
+                    .ok()
+                    .map(|()| "195ba459b".to_string()),
+                sealed: true,
+                ..Drained::default()
+            };
+            let _ = ends.send(());
+            drained
         });
         // A `Sender` is `Send` and not `Sync`, and a [`SelfTest`] is both.
         let provoked = std::sync::Mutex::new(provoked);
@@ -1134,7 +1752,7 @@ mod tests {
                 let _ = provoked.lock().expect("the sender").send(());
                 delivers()
             }),
-            self_test_domain: "5e1f".to_string(),
+            excludes: excluding(&["5e1f"]),
             following: Some(Following {
                 // Nothing of this one is read; `stop` only has to reap it.
                 journal: std::process::Command::new("cat")
@@ -1143,7 +1761,9 @@ mod tests {
                     .spawn()
                     .expect("a stand-in for the journal tail"),
                 draining,
+                ended,
             }),
+            followed: None,
             domain: None,
         };
         assert_eq!(tracing.stop(), None);
