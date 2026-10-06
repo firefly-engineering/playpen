@@ -8,8 +8,19 @@ on:
 permissions:
   contents: read
 
+# A new push to a PR makes the run in flight worthless, so it is cancelled rather than paid for.
+# Pushes to main are left alone: that history is what releases are cut from.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   check:
+    # GitHub's default job timeout is 360 minutes, and a macOS minute bills at ten times a Linux
+    # one, so one wedged `cargo test` on macOS costs 60 hours of quota before anything reaps it.
+    # A green run here is two to four minutes; 20 absorbs a cold cache and still fails fast
+    # (spec §17.1).
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -27,12 +38,17 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Build
         run: cargo build --all-targets --locked
+      # Bounded on its own, below the job's budget: the proxy tests block on socket reads with no
+      # deadline of their own, so this is the step that hangs when one of them wedges.
       - name: Test
+        timeout-minutes: 10
         run: cargo test --locked
 
   # The dev shell takes its Rust version from rust-toolchain.toml; evaluating it on every system
   # fails if toolbox does not ship that version, so the two can never drift apart unnoticed.
   flake:
+    # Evaluation is seconds; 10 is slack for a cold Nix download, not a budget to grow into.
+    timeout-minutes: 10
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
