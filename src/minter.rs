@@ -337,18 +337,24 @@ pub struct Minting {
     /// [spec §7.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#71-credential-route
     pub delivery: String,
     pub from: String,
+    /// What this route's endpoint rule sets allow, resolved out of `fragments.endpoints`
+    /// ([spec §7.6]).
+    ///
+    /// [spec §7.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#76-endpoint-rule-sets
+    pub allowed: crate::proxy::Allowed,
     pub credential: Minted,
 }
 
 impl Minting {
-    /// This route as the proxy serves it: the destination, and the secret it puts in place of the
-    /// phantom. The one place the secret is handed on, and it is handed to the supervisor's own
-    /// proxy, in this process.
+    /// This route as the proxy serves it: the destination, what its rule sets allow, and the
+    /// secret it puts in place of the phantom. The one place the secret is handed on, and it is
+    /// handed to the supervisor's own proxy, in this process.
     pub fn route(&self) -> crate::proxy::Route {
         crate::proxy::Route {
             host: self.route.host.clone(),
             path_prefix: self.route.path_prefix.clone(),
             secret: Zeroizing::new(self.credential.secret().to_owned()),
+            allowed: self.allowed.clone(),
         }
     }
 }
@@ -397,10 +403,41 @@ pub fn resolve(
             minter: route.minter.clone(),
             delivery: route.delivery.env.clone(),
             from,
+            allowed: allowed(policy, route),
             credential,
         });
     }
     Ok(minted)
+}
+
+/// What `route` allows ([spec §7.6]): unrestricted where it names no rule set, and otherwise the
+/// rules of every set it names, unioned.
+///
+/// A named set that `fragments.endpoints` does not declare contributes **no rules** rather than
+/// being skipped. The coherence tier has already refused one (`refusal.endpoint.unknown`), so a
+/// set missing here is a policy that changed under the launch — and the route still reads as
+/// restricted, which is the side to fail to.
+///
+/// [spec §7.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#76-endpoint-rule-sets
+pub(crate) fn allowed(
+    policy: &crate::policy::Policy,
+    route: &crate::policy::Route,
+) -> crate::proxy::Allowed {
+    if route.endpoints.is_empty() {
+        return crate::proxy::Allowed::Everything;
+    }
+    crate::proxy::Allowed::Only(
+        route
+            .endpoints
+            .iter()
+            .filter_map(|name| policy.fragments.endpoints.get(name))
+            .flatten()
+            .map(|rule| crate::proxy::Rule {
+                method: rule.method.clone(),
+                path: rule.path.clone(),
+            })
+            .collect(),
+    )
 }
 
 /// Every route profile `name` resolves ([spec §7.4]): each of its selected workspaces' routes,

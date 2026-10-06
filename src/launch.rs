@@ -652,7 +652,7 @@ fn run(
                 .to_string(),
         )
     })?;
-    let manifest = Manifest::new(&loaded.policy, selected, &layout, &agent_state);
+    let manifest = Manifest::new(&loaded.policy, profile, selected, &layout, &agent_state);
     manifest.write(&layout.manifest())?;
     // The kind's presentation adapter, rendered into the kind's instruction entry point inside
     // that directory ([spec §13.3]). Nothing is rendered for a kind whose entry point playpen does

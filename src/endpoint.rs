@@ -129,6 +129,57 @@ impl Glob {
             .iter()
             .all(|segment| *segment == Segment::Any)
     }
+
+    /// Whether **some** host-absolute path beginning with `prefix` matches this pattern — what
+    /// `refusal.endpoint.unsatisfiable` is decided from ([spec §7.6]). A rule that can match no
+    /// path the route it sits on would ever select is a rule the operator wrote for a different
+    /// route, and silently allowing nothing is worse than saying so.
+    ///
+    /// `prefix` is a route's `path_prefix`, which is a **literal string** and not a segment list:
+    /// it may stop in the middle of a segment (`/repos/op`) or on a separator (`/repos/op/`).
+    /// So it decomposes into whole segments the path must equal, then one partial segment the
+    /// path's own may extend, after which the path is free.
+    ///
+    /// [spec §7.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#76-endpoint-rule-sets
+    pub fn satisfiable_under(&self, prefix: &str) -> bool {
+        let prefix = prefix.strip_prefix('/').unwrap_or(prefix);
+        // `split` always yields at least one part, so the pop leaves the whole segments behind.
+        let mut fixed: Vec<&str> = prefix.split('/').collect();
+        let partial = fixed.pop().unwrap_or_default();
+        reachable(&self.segments, &fixed, partial)
+    }
+}
+
+/// Whether `segments` matches some path that begins with the whole segments `fixed`, then one
+/// segment beginning with `partial`, then any number of segments chosen freely.
+///
+/// Recursive rather than two-pointer, because it decides *existence* and so must try both of
+/// `**`'s readings rather than one with a bookmark. Exponential in the pattern's length, and run
+/// once per rule at `playpen check` over patterns of a handful of segments.
+fn reachable(segments: &[Segment], fixed: &[&str], partial: &str) -> bool {
+    let Some((first, rest)) = fixed.split_first() else {
+        // Every whole segment is consumed. What is left must match one segment beginning with
+        // `partial` followed by segments this chooses — and segments it chooses satisfy whatever
+        // comes after, since a literal takes its own text and `*` and `**` take anything. So only
+        // the pattern's next segment can refuse, and only by being a literal `partial` rules out.
+        return match segments.first() {
+            None => false,
+            Some(Segment::Any | Segment::One) => true,
+            Some(Segment::Literal(literal)) => literal.starts_with(partial),
+        };
+    };
+    match segments.split_first() {
+        // The path has a segment the pattern has run out of.
+        None => false,
+        Some((Segment::Literal(literal), rest_of_pattern)) => {
+            literal == first && reachable(rest_of_pattern, rest, partial)
+        }
+        Some((Segment::One, rest_of_pattern)) => reachable(rest_of_pattern, rest, partial),
+        // Zero segments, or this one and then the same `**` again.
+        Some((Segment::Any, rest_of_pattern)) => {
+            reachable(rest_of_pattern, fixed, partial) || reachable(segments, rest, partial)
+        }
+    }
 }
 
 impl TryFrom<String> for Glob {
@@ -216,6 +267,34 @@ mod tests {
         assert!(why.contains("host-absolute"), "{why}");
     }
 
+    /// A rule is satisfiable under a prefix when some path with that prefix matches it. The
+    /// prefix is a literal string, so it may stop mid-segment.
+    #[test]
+    fn satisfiability_is_about_the_paths_the_prefix_leaves() {
+        // The coarsest prefix leaves every path, so everything is satisfiable under it.
+        for pattern in ["/", "/**", "/v1/messages", "/repos/*/*/**"] {
+            assert!(glob(pattern).satisfiable_under("/"), "{pattern}");
+        }
+        // A prefix that fixes whole segments rules out every pattern that disagrees with them.
+        let under = |pattern: &str, prefix: &str| glob(pattern).satisfiable_under(prefix);
+        assert!(under("/repos/*/*/**", "/repos/firefly/"));
+        assert!(under("/repos/**", "/repos/firefly/playpen"));
+        assert!(!under("/v1/messages", "/repos/firefly/"));
+        assert!(!under("/repos/a/**", "/repos/b/"));
+        // A prefix stopping mid-segment: a literal segment must be able to extend it.
+        assert!(under("/repos/firefly-engineering/**", "/repos/firefly"));
+        assert!(!under("/repos/other/**", "/repos/firefly"));
+        // `*` and `**` extend any partial segment.
+        assert!(under("/repos/*/**", "/repos/firefly"));
+        assert!(under("/**", "/repos/firefly"));
+        // A pattern shorter than the prefix's whole segments can still reach it through `**`.
+        assert!(under("/**/pulls", "/repos/a/b/"));
+        assert!(!under("/repos", "/repos/a/"));
+        // `/repos` fixes one segment and stops after it, so a path under it needs one more.
+        assert!(under("/repos/*", "/repos/"));
+        assert!(!under("/repos", "/repos/"));
+    }
+
     /// The naive reading of the semantics, as a reference: `**` tries every split, `*` takes one
     /// segment, a literal takes itself. Exponential, and only ever run over tiny inputs.
     fn reference(segments: &[Segment], parts: &[&str]) -> bool {
@@ -273,6 +352,20 @@ mod tests {
                     "{pattern} against {path}"
                 );
                 checked += 1;
+                // Satisfiability never refuses a rule a path with that prefix does match: an
+                // over-approximation merely leaves a rule set that allows nothing, which fails
+                // closed, while an under-approximation refuses a policy that was fine. Every
+                // prefix of a matching path witnesses satisfiability, mid-segment ones included.
+                if g.matches(path) {
+                    for end in 1..=path.len() {
+                        let prefix = &path[..end];
+                        assert!(
+                            g.satisfiable_under(prefix),
+                            "{pattern} matches {path} but was called unsatisfiable \
+                             under {prefix}"
+                        );
+                    }
+                }
             }
         }
         assert_eq!(checked, patterns.len() * paths.len());

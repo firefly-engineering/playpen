@@ -391,3 +391,115 @@ fn explain_refuses_where_run_would() {
         .expect("playpen explain");
     assert_explain_refused(&output, "refusal.selection.unknown-profile");
 }
+
+/// `explain --json` lists **every route with its provenance and never a token** ([spec §14.2]),
+/// and the human form renders the same table. Nothing is minted to answer: the only secret a
+/// route has is the one a launch's minter makes, and `explain` launches nothing.
+///
+/// [spec §14.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#142-playpen-explain
+#[test]
+fn explain_states_the_resolved_route_table_with_provenance_and_no_token() {
+    let fx = Fixture::new();
+    // A minter that would hand back a token if anything ran it, so a route table that held one
+    // could only have got it by running one.
+    let policy = fx.policy_named(
+        "routes.json",
+        &serde_json::json!({
+            "version": 1,
+            "minters": {"gh-app": {"command": [
+                os_bin("sh"), "-c",
+                r#"cat >/dev/null; printf '{"token":"s3cret","expires_at":"2027-01-01T00:00:00Z"}'"#,
+            ]}},
+            "fragments": {"endpoints": {
+                "github-read-only": [{"method": "GET", "path": "/repos/*/*/**"}],
+            }},
+            "workspaces": {"w": {
+                "roots": [{"path": fx.root(), "mode": "readwrite"}],
+                "forge": {"org": "firefly-engineering"},
+                "credentials": [{
+                    "host": "api.github.com",
+                    "path_prefix": "/repos/firefly-engineering/",
+                    "minter": "gh-app",
+                    "delivery": {"env": "GH_TOKEN"},
+                    "endpoints": ["github-read-only"],
+                }],
+            }},
+            "profiles": {"p": {
+                "workspaces": ["w"],
+                "toolchain": [],
+                "credentials": [{
+                    "host": "api.anthropic.com",
+                    "path_prefix": "/",
+                    "minter": "gh-app",
+                    "delivery": {"env": "CLAUDE_CODE_OAUTH_TOKEN"},
+                }],
+            }},
+        }),
+    );
+    let text = explain(
+        &fx,
+        &["p", "--policy", policy.to_str().expect("utf-8"), "--json"],
+    );
+    let json: Value = serde_json::from_str(&text).expect("JSON");
+    let routes = json["routes"].as_array().expect("a route table").clone();
+    assert_eq!(routes.len(), 2, "{routes:?}");
+    // The workspace's own route first, then the profile's, as a launch resolves them.
+    assert_eq!(routes[0]["host"], "api.github.com");
+    assert_eq!(routes[0]["path_prefix"], "/repos/firefly-engineering/");
+    assert_eq!(routes[0]["delivery_env"], "GH_TOKEN");
+    assert_eq!(routes[0]["minter"], "gh-app");
+    assert_eq!(routes[0]["from"], "workspace:w.credentials[0]");
+    let set = &routes[0]["endpoints"][0];
+    assert_eq!(set["name"], "github-read-only");
+    assert_eq!(set["from"], "fragment:endpoints.github-read-only");
+    assert_eq!(set["rules"][0]["method"], "GET");
+    assert_eq!(set["rules"][0]["path"], "/repos/*/*/**");
+    assert_eq!(routes[1]["host"], "api.anthropic.com");
+    assert_eq!(routes[1]["from"], "profile:p.credentials[0]");
+    // Absent `endpoints:` means unrestricted, which is the empty list and not a rule set.
+    assert_eq!(routes[1]["endpoints"], serde_json::json!([]));
+    // Never a token, in either form.
+    assert!(!text.contains("s3cret"), "{text}");
+
+    let human = explain(&fx, &["p", "--policy", policy.to_str().expect("utf-8")]);
+    assert!(!human.contains("s3cret"), "{human}");
+    let routes = human.split_once("\nroutes\n").expect("a routes section").1;
+    assert!(
+        routes.contains(
+            "  api.github.com/repos/firefly-engineering/  deliver GH_TOKEN  mint gh-app  \
+             (from workspace:w.credentials[0])\n"
+        ),
+        "{routes}"
+    );
+    assert!(
+        routes.contains(
+            "    endpoints github-read-only  (from fragment:endpoints.github-read-only)\n      \
+             allow GET /repos/*/*/**\n"
+        ),
+        "{routes}"
+    );
+    assert!(routes.contains("    unrestricted\n"), "{routes}");
+}
+
+/// A profile with no credential route states so, because "no route resolves, and so no proxy
+/// runs" is the answer to a question an operator asks.
+#[test]
+fn explain_states_that_a_profile_with_no_route_runs_no_proxy() {
+    let fx = Fixture::new();
+    let policy = fx.policy_named(
+        "no-routes.json",
+        &serde_json::json!({
+            "version": 1,
+            "workspaces": {"w": {"roots": [{"path": fx.root(), "mode": "readwrite"}]}},
+            "profiles": {"p": {"workspaces": ["w"], "toolchain": []}},
+        }),
+    );
+    let args = ["p", "--policy", policy.to_str().expect("utf-8")];
+    let json: Value =
+        serde_json::from_str(&explain(&fx, &[&args[..], &["--json"]].concat())).expect("JSON");
+    assert_eq!(json["routes"], serde_json::json!([]));
+    assert!(
+        explain(&fx, &args).contains("routes\n  none, so no proxy runs\n"),
+        "no route was stated"
+    );
+}

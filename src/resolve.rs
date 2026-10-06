@@ -290,6 +290,94 @@ pub fn exclusions(
     Ok(denials)
 }
 
+/// The route table profile `name` resolves ([spec §14.2]): every credential route, with the
+/// provenance of where it was written and the endpoint rule sets it carries.
+///
+/// **Never a token.** Nothing here mints anything: a route table is what the policy says, and
+/// `explain` launches nothing, so it can state the table a run would serve without reaching a
+/// keystore. The secret is the proxy's alone ([`crate::minter::Minting::route`]).
+///
+/// Read through [`crate::minter::attached`], the same function a launch mints from and the
+/// coherence tier checks, so what `explain` lists is the set a launch would resolve.
+///
+/// [spec §14.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#142-playpen-explain
+pub fn routes(policy: &Policy, name: &str, selected: &Profile) -> Vec<ResolvedRoute> {
+    crate::minter::attached(policy, name, selected)
+        .into_iter()
+        .map(|(from, route, _)| ResolvedRoute {
+            host: route.host.clone(),
+            path_prefix: route.path_prefix.clone(),
+            minter: route.minter.clone(),
+            delivery_env: route.delivery.env.clone(),
+            endpoints: route
+                .endpoints
+                .iter()
+                .map(|set| ResolvedRuleSet {
+                    name: set.clone(),
+                    // A reference the coherence tier refuses, so an absent one is a policy that
+                    // changed under the read: stated as the empty set it resolved to, never
+                    // dropped, because a rule set that is named and shows no rules is the
+                    // operator's answer to why nothing authenticates.
+                    rules: policy
+                        .fragments
+                        .endpoints
+                        .get(set)
+                        .map(|rules| {
+                            rules
+                                .iter()
+                                .map(|rule| crate::manifest::Rule {
+                                    method: rule.method.clone(),
+                                    path: rule.path.as_str().to_owned(),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    from: format!("{FROM_ENDPOINTS}{set}"),
+                })
+                .collect(),
+            from,
+        })
+        .collect()
+}
+
+/// The provenance prefix of an endpoint rule set, which `fragments.endpoints` declares
+/// ([spec §14.2] names it "fragment provenance"). Its own prefix rather than `fragment:`, because
+/// `fragments.env` is a separate table and the two can declare the same name.
+///
+/// [spec §14.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#142-playpen-explain
+pub const FROM_ENDPOINTS: &str = "fragment:endpoints.";
+
+/// One credential route as `explain` states it ([spec §14.2]): where it goes, what authenticates
+/// it, and what it is restricted to. Never a token.
+///
+/// [spec §14.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#142-playpen-explain
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ResolvedRoute {
+    pub host: String,
+    pub path_prefix: String,
+    /// The declared minter that makes this route's credential. Outward only: the manifest omits
+    /// it, because which keystore the operator reaches is not the agent's business.
+    pub minter: String,
+    /// The variable the phantom is delivered in — never the phantom's value, which is this run's
+    /// and is made after `explain` has already answered.
+    pub delivery_env: String,
+    /// The endpoint rule sets this route carries. Empty means unrestricted, not empty
+    /// ([spec §7.6]).
+    ///
+    /// [spec §7.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#76-endpoint-rule-sets
+    pub endpoints: Vec<ResolvedRuleSet>,
+    /// Where the route was written, the bridge back to the policy.
+    pub from: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ResolvedRuleSet {
+    pub name: String,
+    pub rules: Vec<crate::manifest::Rule>,
+    /// Where the rule set was declared.
+    pub from: String,
+}
+
 /// The resolved form: what `explain --json` prints, and what its human form is rendered from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Resolved {
@@ -307,6 +395,12 @@ pub struct Resolved {
     /// macOS Mach services the child may look up; every other service is denied.
     pub mach_services: Vec<ResolvedService>,
     pub network: ResolvedNetwork,
+    /// The resolved route table ([spec §14.2]): every credential route with its provenance, and
+    /// never a token. Empty where the profile resolves none, and then no proxy runs at all.
+    ///
+    /// [spec §14.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#142-playpen-explain
+    #[serde(default)]
+    pub routes: Vec<ResolvedRoute>,
     /// The constructed environment, by name ([spec §9.3]): outward only, since the agent can read
     /// its own `environ`.
     ///
@@ -424,6 +518,7 @@ impl Resolved {
                 mode: NetworkMode::AllowAll,
                 from: BUILT_IN.into(),
             },
+            routes: Vec::new(),
             env: env
                 .iter()
                 .map(|var| ResolvedVar {
@@ -445,6 +540,15 @@ impl Resolved {
     #[must_use]
     pub fn with_argv(mut self, argv: Vec<InjectedArg>) -> Self {
         self.argv = argv;
+        self
+    }
+
+    /// This resolved form with the route table [`routes`] read from the policy. Separate for the
+    /// same reason as the argv: the capability set and the environment are what a boundary is,
+    /// and the route table is what the broker inside it will serve.
+    #[must_use]
+    pub fn with_routes(mut self, routes: Vec<ResolvedRoute>) -> Self {
+        self.routes = routes;
         self
     }
 }

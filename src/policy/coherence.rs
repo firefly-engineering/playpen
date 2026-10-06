@@ -27,6 +27,8 @@ const CHECKS: &[Check] = &[
     areas_are_declared,
     minters_are_declared,
     routes_are_unambiguous,
+    endpoint_sets_are_declared,
+    endpoint_sets_are_satisfiable,
     shared_entry_points_can_be_imported,
 ];
 
@@ -249,24 +251,7 @@ fn shared_entry_points_can_be_imported(loaded: &Loaded) -> Result<(), Refusal> {
 /// does not exist would authenticate nothing, and would do it silently.
 fn minters_are_declared(loaded: &Loaded) -> Result<(), Refusal> {
     let Loaded { path, policy } = loaded;
-    let workspaces = policy.workspaces.iter().flat_map(|(name, workspace)| {
-        workspace
-            .credentials
-            .iter()
-            .enumerate()
-            .map(move |(i, route)| (format!("workspace:{name}.credentials[{i}]"), route))
-    });
-    let profiles = policy.profiles.iter().flat_map(|(name, profile)| {
-        profile
-            .credentials
-            .iter()
-            .enumerate()
-            .map(move |(i, route)| (format!("profile:{name}.credentials[{i}]"), route))
-    });
-    match workspaces
-        .chain(profiles)
-        .find(|(_, route)| !policy.minters.contains_key(&route.minter))
-    {
+    match routes(policy).find(|(_, route)| !policy.minters.contains_key(&route.minter)) {
         Some((from, route)) => Err(Refusal::new(
             Code::MinterUnknown,
             format!(
@@ -316,6 +301,97 @@ fn routes_are_unambiguous(loaded: &Loaded) -> Result<(), Refusal> {
         }
     }
     Ok(())
+}
+
+/// Every route names only declared endpoint rule sets (`refusal.endpoint.unknown`). A reference
+/// to a set that does not exist cannot be read as "unrestricted": an absent `endpoints:` means
+/// that, and a name that resolves to nothing would mean the operator's restriction silently did
+/// not apply ([spec §7.6]).
+///
+/// [spec §7.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#76-endpoint-rule-sets
+fn endpoint_sets_are_declared(loaded: &Loaded) -> Result<(), Refusal> {
+    let Loaded { path, policy } = loaded;
+    for (from, route) in routes(policy) {
+        for (i, set) in route.endpoints.iter().enumerate() {
+            if !policy.fragments.endpoints.contains_key(set) {
+                return Err(Refusal::new(
+                    Code::EndpointUnknown,
+                    format!(
+                        "{}: {from}.endpoints[{i}] is {set:?}, which is not declared; declared \
+                         endpoint rule sets: {}",
+                        path.display(),
+                        known(policy.fragments.endpoints.keys()),
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every rule set a route carries can allow something on that route
+/// (`refusal.endpoint.unsatisfiable`): some path beginning with the route's `path_prefix` matches
+/// at least one of its rules ([spec §7.6]).
+///
+/// A set that can match nothing under the prefix it is attached to allows nothing, so the route is
+/// a credential that can never be spent. That is almost always a set written for a different
+/// route, and a restriction that silently denies everything is the hardest kind of policy bug to
+/// see from inside the boundary.
+///
+/// Held per route rather than per set membership, because the same set is satisfiable on one route
+/// and not on another, and only the pairing is wrong.
+///
+/// [spec §7.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#76-endpoint-rule-sets
+fn endpoint_sets_are_satisfiable(loaded: &Loaded) -> Result<(), Refusal> {
+    let Loaded { path, policy } = loaded;
+    for (from, route) in routes(policy) {
+        for (i, name) in route.endpoints.iter().enumerate() {
+            // Declared, because the check before this one refused a route that names one that is
+            // not.
+            let Some(rules) = policy.fragments.endpoints.get(name) else {
+                continue;
+            };
+            if rules
+                .iter()
+                .any(|rule| rule.path.satisfiable_under(&route.path_prefix))
+            {
+                continue;
+            }
+            return Err(Refusal::new(
+                Code::EndpointUnsatisfiable,
+                format!(
+                    "{}: {from}.endpoints[{i}] is {name:?}, and no path under that route's prefix \
+                     {:?} matches any of its {} rule(s), so the rule set allows nothing and the \
+                     credential can never be spent",
+                    path.display(),
+                    route.path_prefix,
+                    rules.len(),
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Every credential route in the document, with the provenance of where it was written. Both
+/// endpoint checks are about a route and its prefix alone, so they hold over every route the
+/// document declares rather than over the set one profile resolves.
+fn routes(policy: &super::Policy) -> impl Iterator<Item = (String, &super::Route)> {
+    let workspaces = policy.workspaces.iter().flat_map(|(name, workspace)| {
+        workspace
+            .credentials
+            .iter()
+            .enumerate()
+            .map(move |(i, route)| (format!("workspace:{name}.credentials[{i}]"), route))
+    });
+    let profiles = policy.profiles.iter().flat_map(|(name, profile)| {
+        profile
+            .credentials
+            .iter()
+            .enumerate()
+            .map(move |(i, route)| (format!("profile:{name}.credentials[{i}]"), route))
+    });
+    workspaces.chain(profiles)
 }
 
 /// Whether one of `a` and `b` **strictly** extends the other: equal prefixes are not ordered, so
@@ -700,6 +776,118 @@ workspaces:
             refusal.message().contains("\"/repos/a/\"")
                 && refusal.message().contains("\"/repos/b/\""),
             "{refusal}"
+        );
+    }
+
+    /// A policy with one route carrying `endpoints`, with `fragments.endpoints` as written.
+    fn with_endpoints(prefix: &str, endpoints: &str, declared: &str) -> String {
+        format!(
+            "\
+version: 1
+minters:
+  m: {{ command: [/bin/true] }}
+fragments:
+  endpoints:
+{declared}
+workspaces:
+  w:
+    roots: []
+    credentials:
+      - host: api.example
+        path_prefix: {prefix}
+        minter: m
+        delivery: {{ env: T }}
+        endpoints: {endpoints}
+profiles:
+  p: {{ workspaces: [w], toolchain: [] }}
+"
+        )
+    }
+
+    /// An absent `endpoints:` means unrestricted, so a policy declaring no rule set at all is
+    /// coherent ([spec §7.6]).
+    #[test]
+    fn a_route_with_no_rule_set_is_coherent() {
+        let text = "\
+version: 1
+minters:
+  m: { command: [/bin/true] }
+workspaces:
+  w:
+    roots: []
+    credentials:
+      - { host: api.example, path_prefix: /, minter: m, delivery: { env: T } }
+profiles:
+  p: { workspaces: [w], toolchain: [] }
+";
+        assert_eq!(checked(text), Ok(()));
+    }
+
+    /// A rule set a route names must exist: a name that resolved to nothing would mean the
+    /// operator's restriction silently did not apply.
+    #[test]
+    fn an_undeclared_rule_set_is_refused() {
+        let refusal = checked(&with_endpoints(
+            "/",
+            "[read-only, nope]",
+            "    read-only:\n      - { method: GET, path: /** }\n",
+        ))
+        .expect_err("refused");
+        assert_eq!(refusal.code, Code::EndpointUnknown);
+        assert!(
+            refusal
+                .message()
+                .contains("workspace:w.credentials[0].endpoints[1]"),
+            "{refusal}"
+        );
+        assert!(refusal.message().contains("\"nope\""), "{refusal}");
+        assert!(
+            refusal
+                .message()
+                .ends_with("declared endpoint rule sets: read-only"),
+            "{refusal}"
+        );
+    }
+
+    /// A rule set that can allow nothing on the route it is attached to is refused rather than
+    /// left to deny every request: it is a set written for a different route.
+    #[test]
+    fn a_rule_set_that_can_match_nothing_under_the_prefix_is_refused() {
+        let refusal = checked(&with_endpoints(
+            "/repos/firefly/",
+            "[inference]",
+            "    inference:\n      - { method: POST, path: /v1/messages }\n",
+        ))
+        .expect_err("refused");
+        assert_eq!(refusal.code, Code::EndpointUnsatisfiable);
+        assert!(
+            refusal
+                .message()
+                .contains("workspace:w.credentials[0].endpoints[0]"),
+            "{refusal}"
+        );
+        assert!(refusal.message().contains("\"inference\""), "{refusal}");
+        assert!(
+            refusal.message().contains("\"/repos/firefly/\""),
+            "{refusal}"
+        );
+        // An empty set allows nothing by construction, so it is unsatisfiable under any prefix.
+        let empty = checked(&with_endpoints("/", "[none]", "    none: []\n")).expect_err("refused");
+        assert_eq!(empty.code, Code::EndpointUnsatisfiable);
+    }
+
+    /// The same set is satisfiable on the route it was written for. One rule reaching under the
+    /// prefix is enough: a set is allow-only, so any rule of it can be the one that allows.
+    #[test]
+    fn a_rule_set_one_of_whose_rules_reaches_under_the_prefix_is_coherent() {
+        assert_eq!(
+            checked(&with_endpoints(
+                "/repos/firefly/",
+                "[github-read-only]",
+                "    github-read-only:\n      - { method: POST, path: /v1/messages }\n      \
+                 - { method: GET, path: /repos/*/*/** }\n",
+            )),
+            Ok(())
         );
     }
 

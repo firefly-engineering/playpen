@@ -203,7 +203,14 @@ fn resolve(args: &Args, host: &Host) -> Result<Resolved, Refusal> {
         }
         None => Vec::new(),
     };
-    Ok(Resolved::new(absolute(&path), trace, name, &caps, &env).with_argv(argv))
+    // The route table the broker would serve ([spec §14.2]). Read from the policy, never minted:
+    // `explain` launches nothing, so it reaches no keystore and states no token.
+    //
+    // [spec §14.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#142-playpen-explain
+    let routes = resolve::routes(&loaded.policy, &name, selected);
+    Ok(Resolved::new(absolute(&path), trace, name, &caps, &env)
+        .with_argv(argv)
+        .with_routes(routes))
 }
 
 /// The shim named `name`, or the refusal that the policy declares none ([spec §11.3]).
@@ -290,6 +297,44 @@ fn render_resolved(resolved: &Resolved, out: &mut impl Write) -> io::Result<()> 
                 OneLine(&arg.value),
                 OneLine(&arg.from)
             )?;
+        }
+    }
+    render_routes(&resolved.routes, out)
+}
+
+/// The resolved route table ([spec §14.2]): each route's destination, the minter that makes its
+/// credential and the variable the phantom is delivered in, then each endpoint rule set it
+/// carries with its rules. Never a token — there is none in the value this is rendered from.
+///
+/// The line is always written, even with no route, because "no route resolves, and so no proxy
+/// runs" is the answer to a question an operator asks.
+///
+/// [spec §14.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#142-playpen-explain
+fn render_routes(routes: &[resolve::ResolvedRoute], out: &mut impl Write) -> io::Result<()> {
+    writeln!(out, "routes")?;
+    if routes.is_empty() {
+        return writeln!(out, "  none, so no proxy runs");
+    }
+    for route in routes {
+        let line = format!(
+            "{}{}  deliver {}  mint {}",
+            route.host, route.path_prefix, route.delivery_env, route.minter
+        );
+        writeln!(out, "  {}  (from {})", OneLine(&line), OneLine(&route.from))?;
+        if route.endpoints.is_empty() {
+            writeln!(out, "    unrestricted")?;
+        }
+        for set in &route.endpoints {
+            writeln!(
+                out,
+                "    endpoints {}  (from {})",
+                OneLine(&set.name),
+                OneLine(&set.from)
+            )?;
+            for rule in &set.rules {
+                let rule = format!("{} {}", rule.method, rule.path);
+                writeln!(out, "      allow {}", OneLine(&rule))?;
+            }
         }
     }
     Ok(())

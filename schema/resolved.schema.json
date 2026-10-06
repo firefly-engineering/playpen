@@ -41,6 +41,14 @@
     "network": {
       "$ref": "#/$defs/ResolvedNetwork"
     },
+    "routes": {
+      "description": "The resolved route table ([spec §14.2]): every credential route with its provenance, and\nnever a token. Empty where the profile resolves none, and then no proxy runs at all.\n\n[spec §14.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#142-playpen-explain",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ResolvedRoute"
+      },
+      "default": []
+    },
     "env": {
       "description": "The constructed environment, by name ([spec §9.3]): outward only, since the agent can read\nits own `environ`.\n\n[spec §9.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#93-inward-and-outward",
       "type": "array",
@@ -259,6 +267,83 @@
       "type": "string",
       "enum": [
         "allow-all"
+      ]
+    },
+    "ResolvedRoute": {
+      "description": "One credential route as `explain` states it ([spec §14.2]): where it goes, what authenticates\nit, and what it is restricted to. Never a token.\n\n[spec §14.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#142-playpen-explain",
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "path_prefix": {
+          "type": "string"
+        },
+        "minter": {
+          "description": "The declared minter that makes this route's credential. Outward only: the manifest omits\nit, because which keystore the operator reaches is not the agent's business.",
+          "type": "string"
+        },
+        "delivery_env": {
+          "description": "The variable the phantom is delivered in — never the phantom's value, which is this run's\nand is made after `explain` has already answered.",
+          "type": "string"
+        },
+        "endpoints": {
+          "description": "The endpoint rule sets this route carries. Empty means unrestricted, not empty\n([spec §7.6]).\n\n[spec §7.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#76-endpoint-rule-sets",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ResolvedRuleSet"
+          }
+        },
+        "from": {
+          "description": "Where the route was written, the bridge back to the policy.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "path_prefix",
+        "minter",
+        "delivery_env",
+        "endpoints",
+        "from"
+      ]
+    },
+    "ResolvedRuleSet": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Rule"
+          }
+        },
+        "from": {
+          "description": "Where the rule set was declared.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "rules",
+        "from"
+      ]
+    },
+    "Rule": {
+      "type": "object",
+      "properties": {
+        "method": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "method",
+        "path"
       ]
     },
     "ResolvedVar": {

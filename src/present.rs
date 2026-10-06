@@ -271,8 +271,9 @@ mod tests {
             claude(),
         );
         let agent_state = layout.agent_state().expect("a kind was stated");
-        let mut manifest = Manifest::new(&policy, &policy.profiles["p"], &layout, &agent_state)
-            .with_broker_denial();
+        let mut manifest =
+            Manifest::new(&policy, "p", &policy.profiles["p"], &layout, &agent_state)
+                .with_broker_denial();
         manifest.network.routes.push(Route {
             host: "api.github.com".into(),
             path_prefix: "/repos/firefly-engineering/".into(),

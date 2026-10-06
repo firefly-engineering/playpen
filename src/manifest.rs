@@ -214,8 +214,12 @@ pub const DENIAL_ERRNOS: &[&str] = &["EPERM"];
 #[cfg(target_os = "linux")]
 pub const DENIAL_ERRNOS: &[&str] = &["EACCES", "EXDEV", "EPERM", "ENOSYS"];
 
-/// The header a broker denial carries, and the code in its body.
-const DENIED_HEADER: &str = "X-Playpen-Denied";
+/// The header a broker denial carries ([spec §6.4]). Named here, where the manifest states it,
+/// and read by the proxy that writes it, so the two cannot disagree about what the agent is
+/// looking for.
+///
+/// [spec §6.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#64-broker-denial
+pub const DENIED_HEADER: &str = "X-Playpen-Denied";
 
 impl Manifest {
     /// The manifest of a launch of profile `selected` from `policy`, under `layout`, whose agent
@@ -226,7 +230,13 @@ impl Manifest {
     /// could not name it must not be written at all: every path this file states is one
     /// `P-manifest` holds reachable, so a placeholder would be a false fact in the one file whose
     /// job is true ones.
-    pub fn new(policy: &Policy, selected: &Profile, layout: &Layout, agent_state: &Path) -> Self {
+    pub fn new(
+        policy: &Policy,
+        profile: &str,
+        selected: &Profile,
+        layout: &Layout,
+        agent_state: &Path,
+    ) -> Self {
         let workspaces = selected
             .workspaces
             .iter()
@@ -266,15 +276,36 @@ impl Manifest {
                 })
             })
             .collect();
-        Self {
+        // The same route table `explain` states, minus the provenance and the minter: which
+        // keystore the operator reaches is not the agent's business, and policy provenance is
+        // omitted from the manifest throughout ([spec §13.2]).
+        let routes: Vec<Route> = crate::resolve::routes(policy, profile, selected)
+            .into_iter()
+            .map(|route| Route {
+                host: route.host,
+                path_prefix: route.path_prefix,
+                delivery_env: route.delivery_env,
+                endpoints: route
+                    .endpoints
+                    .into_iter()
+                    .map(|set| RuleSet {
+                        name: set.name,
+                        rules: set.rules,
+                    })
+                    .collect(),
+            })
+            .collect();
+        // Stated **only where a denial can fire**: a vocabulary for a denial that cannot happen
+        // is noise the agent would reason from ([spec §13.2]).
+        let restricted = routes.iter().any(|route| !route.endpoints.is_empty());
+        let manifest = Self {
             manifest_version: VERSION,
             workspaces,
             agent_state: agent_state.to_owned(),
             run_scratch: layout.scratch(),
             network: Network {
                 egress: Egress::Unconfined,
-                // Credential routes join the manifest with the route table (#90).
-                routes: Vec::new(),
+                routes,
             },
             failure: Failure {
                 denial_errnos: DENIAL_ERRNOS.iter().map(|&e| e.to_owned()).collect(),
@@ -282,11 +313,16 @@ impl Manifest {
                 broker_denial: None,
                 boundary_fixed_for_the_session: true,
             },
+        };
+        match restricted {
+            true => manifest.with_broker_denial(),
+            false => manifest,
         }
     }
 
     /// The broker's refusal vocabulary, where some route carries a rule set and a denial can
     /// therefore fire.
+    #[must_use]
     pub fn with_broker_denial(mut self) -> Self {
         self.failure.broker_denial = Some(BrokerDenial {
             status: 403,
@@ -329,7 +365,7 @@ mod tests {
         let id = RunId::allocate().expect("id");
         let layout = Layout::new(state, &id, policy, "p", &policy.profiles["p"], kind);
         let agent_state = layout.agent_state().expect("a kind was stated");
-        Manifest::new(policy, &policy.profiles["p"], &layout, &agent_state)
+        Manifest::new(policy, "p", &policy.profiles["p"], &layout, &agent_state)
     }
 
     /// Even with nothing provisioned, the manifest is a whole statement: an absent one and an
@@ -461,11 +497,76 @@ mod tests {
         }));
         let manifest = manifest_of(&policy, Path::new("/state"));
         assert_eq!(manifest.failure.broker_denial, None);
-        let denied = manifest.with_broker_denial();
+        // A route with no rule set cannot be denied either: its credential is unrestricted.
+        let unrestricted = manifest_of(&routed("[]"), Path::new("/state"));
+        assert_eq!(unrestricted.failure.broker_denial, None);
+        let denied = manifest_of(&routed("[\"inference\"]"), Path::new("/state"));
         let denial = denied.failure.broker_denial.expect("a vocabulary");
         assert_eq!(denial.status, 403);
         assert_eq!(denial.header, DENIED_HEADER);
         assert_eq!(denial.code, "broker.endpoint.denied");
+    }
+
+    /// A policy whose profile has one route to `api.example` carrying `endpoints`.
+    fn routed(endpoints: &str) -> Policy {
+        policy(serde_json::json!({
+            "version": 1,
+            "minters": {"m": {"command": ["/mint"]}},
+            "fragments": {"endpoints": {
+                "inference": [{"method": "POST", "path": "/v1/messages"}],
+                "unused": [{"method": "GET", "path": "/**"}],
+            }},
+            "profiles": {"p": {
+                "workspaces": [],
+                "toolchain": [],
+                "credentials": [{
+                    "host": "api.example",
+                    "path_prefix": "/v1/",
+                    "minter": "m",
+                    "delivery": {"env": "API_TOKEN"},
+                    "endpoints": serde_json::from_str::<serde_json::Value>(endpoints)
+                        .expect("a list"),
+                }],
+            }},
+        }))
+    }
+
+    /// Each route's host, prefix and delivery variable, with its rule sets by name and their
+    /// rules ([spec §13.2]) — and never the minter, the secret or any provenance.
+    ///
+    /// [spec §13.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#132-content
+    #[test]
+    fn it_states_each_route_its_delivery_variable_and_its_rule_sets() {
+        let manifest = manifest_of(&routed("[\"inference\"]"), Path::new("/state"));
+        assert_eq!(
+            manifest.network.routes,
+            vec![Route {
+                host: "api.example".into(),
+                path_prefix: "/v1/".into(),
+                delivery_env: "API_TOKEN".into(),
+                endpoints: vec![RuleSet {
+                    name: "inference".into(),
+                    rules: vec![Rule {
+                        method: "POST".into(),
+                        path: "/v1/messages".into(),
+                    }],
+                }],
+            }]
+        );
+        // A rule set the route does not carry is not the agent's business.
+        let text = serde_json::to_string(&manifest).expect("JSON");
+        for absent in ["unused", "\"m\"", "minter", "from"] {
+            assert!(!text.contains(absent), "{absent} is in {text}");
+        }
+        // A profile with no route states none, and then no proxy runs at all.
+        let bare = policy(serde_json::json!({
+            "version": 1,
+            "profiles": {"p": {"workspaces": [], "toolchain": []}},
+        }));
+        assert_eq!(
+            manifest_of(&bare, Path::new("/state")).network.routes,
+            Vec::new()
+        );
     }
 
     #[test]
@@ -497,7 +598,7 @@ mod tests {
         let _provisioned = layout.provision().expect("provisioned");
         let at = layout.manifest();
         let agent_state = layout.agent_state().expect("a kind was stated");
-        Manifest::new(&policy, &policy.profiles["p"], &layout, &agent_state)
+        Manifest::new(&policy, "p", &policy.profiles["p"], &layout, &agent_state)
             .write(&at)
             .expect("written");
         assert_eq!(at.parent(), Some(layout.scratch().as_path()));
