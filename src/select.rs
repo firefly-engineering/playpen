@@ -193,6 +193,11 @@ fn named(
 /// Every profile with a prefix containing `cwd` at the greatest length found, each with that
 /// prefix. Containment and length are by path component, so `/src/playpen` contains
 /// `/src/playpen/a` and not `/src/playpen-old`, and `/` contains everything at length one.
+///
+/// The working directory is the kernel's, which is always resolved, so a prefix that exists is
+/// matched resolved too, at its resolved length: written through a symlink — `/var` on macOS, a
+/// `~/src` that is a link — it would otherwise contain nothing. One that does not exist is matched
+/// as written. Either way it is reported as written, because that is what the operator can find.
 fn longest_prefixes<'a>(policy: &'a Policy, cwd: &Path) -> Vec<(&'a str, &'a Path)> {
     let mut best: Vec<(&str, &Path)> = Vec::new();
     let mut best_len = 0;
@@ -200,10 +205,18 @@ fn longest_prefixes<'a>(policy: &'a Policy, cwd: &Path) -> Vec<(&'a str, &'a Pat
         let longest = profile
             .prefixes
             .iter()
-            .filter(|prefix| prefix.is_absolute() && cwd.starts_with(prefix))
-            .max_by_key(|prefix| prefix.components().count());
-        let Some(prefix) = longest else { continue };
-        let len = prefix.components().count();
+            .filter(|prefix| prefix.is_absolute())
+            .filter_map(|prefix| {
+                let resolved = prefix.canonicalize().unwrap_or_else(|_| prefix.clone());
+                [resolved.as_path(), prefix.as_path()]
+                    .into_iter()
+                    .find(|form| cwd.starts_with(form))
+                    .map(|form| (prefix.as_path(), form.components().count()))
+            })
+            .max_by_key(|(_, len)| *len);
+        let Some((prefix, len)) = longest else {
+            continue;
+        };
         if len > best_len {
             best.clear();
             best_len = len;
@@ -302,6 +315,39 @@ profiles:
         );
         let (_, result) = select(&policy(), inputs(None, None, "/src/firefly/other"));
         assert_eq!(result, Ok("firefly".into()));
+    }
+
+    /// The working directory is the kernel's, which is always resolved, so a prefix written
+    /// through a symlink selects by where it leads — and is reported as written.
+    #[test]
+    fn a_prefix_through_a_symlink_selects_by_its_target() {
+        let dir = tempfile::tempdir().expect("a dir");
+        let real = dir.path().canonicalize().expect("canonical").join("real");
+        std::fs::create_dir(&real).expect("real");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+        let text = format!(
+            "version: 1\nprofiles:\n  linked: {{ prefixes: [{}], workspaces: [], toolchain: [] }}\n",
+            link.display()
+        );
+        let policy = Policy::parse(&text, Path::new("/p.yaml")).expect("parses");
+        let cwd = real.join("work");
+        let (trace, result) = select(
+            &policy,
+            Inputs {
+                explicit: None,
+                env: None,
+                cwd: Some(&cwd),
+            },
+        );
+        assert_eq!(result, Ok("linked".into()));
+        assert_eq!(
+            trace.last().map(|step| &step.outcome),
+            Some(&Outcome::Selected {
+                profile: "linked".into(),
+                prefix: Some(link),
+            })
+        );
     }
 
     #[test]
