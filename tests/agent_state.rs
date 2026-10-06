@@ -67,7 +67,13 @@ fn the_redirect_names_a_writable_directory_keyed_by_profile_and_kind() {
     let dir = redirect(&fx, &policy, "p", "claude");
     assert!(dir.is_dir(), "{dir:?} was not created");
     assert!(
-        dir.starts_with(fx.state_home().join("playpen")),
+        // Resolved, as playpen resolves it: a temporary directory is under a symlink on macOS.
+        dir.starts_with(
+            fx.state_home()
+                .canonicalize()
+                .expect("canonical")
+                .join("playpen")
+        ),
         "the agent state directory is playpen's own: {dir:?}"
     );
     let written = dir.join("history.jsonl");

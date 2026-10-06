@@ -155,9 +155,14 @@ impl Layout {
     /// This layout with `home` as the caller's home directory, where every share entry is
     /// resolved. Separate from construction because the layout's own paths do not depend on it:
     /// only the share list does.
+    ///
+    /// Resolved, as the state directory is, because the mechanism enforces on real paths, and
+    /// because a share link points where its grant is. Only the home, though: an entry that is a
+    /// link of its own stays one. A home that cannot be resolved is kept as written, and the share
+    /// entries under it refuse as missing.
     #[must_use]
     pub fn with_home(mut self, home: Option<&Path>) -> Self {
-        self.home = home.map(Path::to_owned);
+        self.home = home.map(|home| home.canonicalize().unwrap_or_else(|_| home.to_owned()));
         self
     }
 
