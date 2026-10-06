@@ -6,7 +6,7 @@
 use playpen::code::Code;
 
 use crate::row::{
-    Action, Asymmetry, BOTH, Class, Decision, Expected, Fixture, Invocation, Listening, Os,
+    Action, Asymmetry, BOTH, Class, Decision, Expected, Fixture, Invocation, Legs, Listening, Os,
     POLICY_SPAN_SITES, Platform, Precondition, Row, Scope, Services, Signalled, Target,
 };
 
@@ -223,6 +223,72 @@ pub const ROWS: &[Row] = &[
         action: Action::Create(Target::DecoyDir),
         expected: Expected::Denial,
         from: &[Decision::Adr(7), Decision::Adr(16), Decision::Issue(53)],
+    },
+    // The credential path, against a live confined launch. The unit tests in `src/proxy.rs` assert
+    // the same substitution, and cannot catch the regression these exist for: a proxy that is
+    // correct while the launch never wires the child to it.
+    Row {
+        id: "P-endpoint",
+        class: Class::Positive,
+        platform: BOTH,
+        fixture: Fixture::CredentialRoute,
+        action: Action::Request(Legs::Proxied),
+        expected: Expected::Authenticated,
+        // ADR 0030 because this row *is* that residual's assertion: it points `SSL_CERT_FILE` at
+        // the destination's root on its own launch, and passes only if the ambient variable was
+        // honoured.
+        from: &[
+            Decision::Adr(16),
+            Decision::Adr(30),
+            Decision::Issue(87),
+            Decision::Issue(139),
+        ],
+    },
+    // Asserted as a pair against one destination: a build that injected into everything passes
+    // the bypass half alone, and one that injected into nothing passes the proxied half alone.
+    Row {
+        id: "P-open-bypass",
+        class: Class::Positive,
+        platform: BOTH,
+        fixture: Fixture::CredentialRoute,
+        action: Action::Request(Legs::ProxiedAndBypassing),
+        expected: Expected::OnlyThroughTheProxy,
+        from: &[
+            Decision::Adr(16),
+            Decision::Adr(20),
+            Decision::Issue(86),
+            Decision::Issue(139),
+        ],
+    },
+    Row {
+        id: "N-endpoint",
+        class: Class::Negative,
+        platform: BOTH,
+        fixture: Fixture::RestrictedRoute,
+        action: Action::Request(Legs::Proxied),
+        expected: Expected::Brokered(Code::BrokerEndpointDenied),
+        from: &[
+            Decision::Adr(16),
+            Decision::Adr(17),
+            Decision::Issue(94),
+            Decision::Issue(139),
+        ],
+    },
+    // The other half of the same event, and a row of its own because it is the half that matters:
+    // a `403` the destination saw the secret before is not a denial.
+    Row {
+        id: "N-endpoint-no-leg",
+        class: Class::Negative,
+        platform: BOTH,
+        fixture: Fixture::RestrictedRoute,
+        action: Action::Request(Legs::Proxied),
+        expected: Expected::NoUpstreamLeg,
+        from: &[
+            Decision::Adr(16),
+            Decision::Adr(17),
+            Decision::Issue(94),
+            Decision::Issue(139),
+        ],
     },
     Row {
         id: "R-record",

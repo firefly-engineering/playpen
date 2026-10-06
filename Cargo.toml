@@ -58,6 +58,15 @@ landlock = "=0.4.7"
 [dev-dependencies]
 tempfile = "3"
 toml = "0.9"
+# The enforcement suite's loopback TLS destination, stood up **outside** the launch: `rcgen` mints
+# a root of its own and a `localhost` leaf, and `rustls` serves them. The same crates the broker is
+# built on, so the destination and the proxy cannot disagree about a handshake.
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
+rustls = { version = "0.23", default-features = false, features = [
+  "std",
+  "aws-lc-rs",
+  "tls12",
+] }
 
 # The floor self-test forks, which is sound only in a single-threaded process, so this suite
 # runs outside the libtest harness.

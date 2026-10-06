@@ -221,6 +221,36 @@ pub enum Fixture {
     ///
     /// [spec §11.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#113-shims
     Shim,
+    /// One launch per row, under a policy with a **credential route** on a loopback TLS destination
+    /// the harness stands up **outside** the launch and reclaims with the fixture ([spec §7]).
+    ///
+    /// The destination is outside because [ADR 0016]'s two-part form wants what arrived observable
+    /// from outside: a listener inside the sandbox reporting on itself is the probe grading its own
+    /// homework. It answers as `localhost`, because route matching is an exact compare on the
+    /// authority the `CONNECT` named and nothing in the proxy can make a name resolve.
+    ///
+    /// The proxy is made to trust the destination's root by setting `SSL_CERT_FILE` on **that one
+    /// launch** — the supervisor's environment, which is what "the host's own trust store" means
+    /// ([ADR 0030]). Never on the suite: a per-suite store would narrow every other row's upstream
+    /// trust and make one row's failure read as another's. It is *replaced* rather than extended,
+    /// which is what a row wants — a proxy trusting only this root cannot pass by having reached
+    /// something else. The child's own store is built from the same read, so the probe inside
+    /// verifies the destination on either leg from `SSL_CERT_FILE` alone
+    /// ([#140](https://github.com/firefly-engineering/playpen/issues/140)).
+    ///
+    /// It reaches neither `Broker::trusting` nor any policy field, flag or cargo feature.
+    ///
+    /// [spec §7]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#7-enforcement-surface-credentials
+    /// [ADR 0016]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0016-the-suite-defines-the-backend-and-an-assertion-that-can-pass-vacuously-is-a-defect.md
+    /// [ADR 0030]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0030-the-hosts-own-trust-store-is-what-the-host-says-it-is.md
+    CredentialRoute,
+    /// [`Fixture::CredentialRoute`] with an **endpoint rule set** on the route, allowing one method
+    /// on the path the row then asks for with another ([spec §7.6]). A fixture of its own rather
+    /// than a flag on the action, so the row table says which rows run against a restricted
+    /// credential and which against an unrestricted one.
+    ///
+    /// [spec §7.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#76-endpoint-rule-sets
+    RestrictedRoute,
 }
 
 /// The closed set of checks.
@@ -279,6 +309,36 @@ pub enum Action {
     ///
     /// [spec §11.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#113-shims
     ArgvMatches,
+    /// The probe, inside a live confined launch, issues an HTTPS request to the fixture's loopback
+    /// destination on each of `legs`; the row is judged by **what arrived there**, read from
+    /// outside, as well as by what came back ([spec §7.3], [spec §7.6]).
+    ///
+    /// One variant rather than several: every check here is the same kind — issue a request from
+    /// inside and observe what the destination the harness controls received. Which leg, and what
+    /// is asserted of it, are the row's own fields.
+    ///
+    /// What this adds over the unit tests in `src/proxy.rs` is the thing a unit test structurally
+    /// cannot catch: it runs against a **live confined launch**, so it fails if the proxy is
+    /// correct but the launch never wires the child to it.
+    ///
+    /// [spec §7.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#73-session-phantom
+    /// [spec §7.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#76-endpoint-rule-sets
+    Request(Legs),
+}
+
+/// Which leg or legs of the proxy a [`Action::Request`] row drives. **Chosen explicitly, never
+/// inferred**: `NO_PROXY` holds `localhost`, so a probe that let its client decide would take the
+/// bypassing leg both times. That is a probe argument, not a host fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Legs {
+    /// Through the proxy alone: the credential path.
+    Proxied,
+    /// Both, against **one** destination, asserted as a pair. The proxied request is authenticated
+    /// and the bypassing one is not — and carries no phantom either. The pair is what keeps the
+    /// bypass half from being vacuous: "the bypassing request had no credential" would pass on a
+    /// build where the proxy injected into everything
+    /// ([#86](https://github.com/firefly-engineering/playpen/issues/86)).
+    ProxiedAndBypassing,
 }
 
 impl Action {
@@ -303,6 +363,9 @@ impl Action {
             Action::PullDenials => fixture == Fixture::DescendantDenied,
             Action::ManifestIsTrue => fixture == Fixture::Manifest,
             Action::ArgvMatches => fixture == Fixture::Shim,
+            Action::Request(_) => {
+                matches!(fixture, Fixture::CredentialRoute | Fixture::RestrictedRoute)
+            }
         }
     }
 }
@@ -474,14 +537,45 @@ pub enum Expected {
     /// `playpen check` refuses the document with this code, which shows the existence check is
     /// there to skip; `check --no-filesystem` of the same document then succeeds, silently.
     Unexamined(Code),
+    /// Succeeds outside; inside, the request reaches the destination with the **secret in place of
+    /// the phantom, in the header the phantom came in**, and the phantom does not arrive at all
+    /// ([spec §7.3]).
+    ///
+    /// [spec §7.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#73-session-phantom
+    Authenticated,
+    /// As [`Expected::Authenticated`] for the proxied leg, and the **bypassing** leg arrives with
+    /// neither the secret nor the phantom. One assertion over a pair, because either half alone
+    /// would pass on a build the other catches.
+    OnlyThroughTheProxy,
+    /// Succeeds outside; inside the broker answers `403` with this code and `X-Playpen-Denied`
+    /// ([spec §6.4]). A broker denial is a kernel denial's counterpart at L7, so this is a
+    /// negative — but it is an HTTP answer and not an errno, so [`DENIAL_ERRNOS`] does not govern
+    /// it.
+    ///
+    /// [spec §6.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#64-broker-denial
+    Brokered(Code),
+    /// Succeeds outside; inside the request **is denied** and the destination records no request at
+    /// all, so the secret was never sent to a destination a rule refused ([spec §7.6]).
+    ///
+    /// The denial is half of this assertion and not a duplicate of [`Expected::Brokered`]'s: "no
+    /// upstream leg occurred" is about *that request*, and a destination records nothing just as
+    /// readily from a launch that never ran.
+    ///
+    /// [spec §7.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#76-endpoint-rule-sets
+    NoUpstreamLeg,
 }
 
 impl Expected {
     /// The class an assertion of this kind belongs to.
     pub fn class(self) -> Class {
         match self {
-            Expected::Denial | Expected::Closed => Class::Negative,
-            Expected::Succeeds => Class::Positive,
+            Expected::Denial
+            | Expected::Closed
+            | Expected::Brokered(_)
+            | Expected::NoUpstreamLeg => Class::Negative,
+            Expected::Succeeds | Expected::Authenticated | Expected::OnlyThroughTheProxy => {
+                Class::Positive
+            }
             Expected::Recorded(_) | Expected::RecordedAt(..) | Expected::Unexamined(_) => {
                 Class::Refusal
             }
@@ -631,6 +725,175 @@ pub fn judge(expected: Expected, outside: &Seen, inside: &Seen) -> Verdict {
                     .into(),
             )
         }
+        (
+            Expected::Authenticated
+            | Expected::OnlyThroughTheProxy
+            | Expected::Brokered(_)
+            | Expected::NoUpstreamLeg,
+            _,
+        ) => Verdict::Setup(
+            "a credential-route assertion is judged by what arrived at the destination, which an \
+             errno cannot carry"
+                .into(),
+        ),
+    }
+}
+
+/// What one leg of a credential-route row did: what came back to the probe, and what the
+/// destination the harness stood up received of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Exchange {
+    /// The answer the probe read, or why it read none.
+    pub answer: Result<String, String>,
+    /// The request head the destination recorded, or `None` where **no upstream leg occurred**.
+    pub arrived: Option<String>,
+}
+
+/// What a credential-route row observed, on each leg it drove.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Exchanged {
+    pub proxied: Exchange,
+    /// The bypassing leg, where the row drove one.
+    pub bypassing: Option<Exchange>,
+    /// What was observed, for the report.
+    pub detail: String,
+}
+
+/// What a credential-route row is judged against: the secret that must arrive, and the header it
+/// must arrive in. The header matters because substitution is **in place** — the secret must arrive
+/// in whichever header the phantom came in, so a proxy that moved it has not done this.
+///
+/// The phantom's own value is not here, and does not need to be: the probe presents it in this one
+/// header and nowhere else, so a header whose value is **exactly** the secret is a header the
+/// phantom was replaced in. Asserting on a phantom the harness had to be told would mean printing
+/// one on the suite's stdout to learn it.
+#[derive(Debug, Clone, Copy)]
+pub struct Substitution<'a> {
+    pub secret: &'a str,
+    pub header: &'a str,
+}
+
+/// A credential-route row: the condition first holds outside, then the destination received what
+/// the row says it should have ([ADR 0016]).
+///
+/// Neither the answer nor what arrived is the assertion alone. A `200` says the legs connected; it
+/// says nothing about which token went out, and only the destination's own record does.
+///
+/// [ADR 0016]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0016-the-suite-defines-the-backend-and-an-assertion-that-can-pass-vacuously-is-a-defect.md
+pub fn judge_request(
+    expected: Expected,
+    substitution: Substitution<'_>,
+    outside: &Seen,
+    seen: &Exchanged,
+) -> Verdict {
+    if let Seen::Failed { detail, .. } = outside {
+        return Verdict::Setup(format!("the condition does not hold outside: {detail}"));
+    }
+    let detail = &seen.detail;
+    let Substitution { secret, header } = substitution;
+    // The whole header line, terminator included: a value that merely *contains* the secret would
+    // also match a phantom left beside it.
+    let presented = format!("{header}: {secret}\r\n");
+    let authenticated = |exchange: &Exchange| -> Verdict {
+        let Some(arrived) = &exchange.arrived else {
+            return Verdict::Fail(format!(
+                "no request reached the destination, so nothing was authenticated: {detail}"
+            ));
+        };
+        match arrived.contains(&presented) {
+            true => Verdict::Pass,
+            false => Verdict::Fail(format!(
+                "the secret did not arrive as the whole of the header the phantom came in \
+                 ({header}): {detail}"
+            )),
+        }
+    };
+    match expected {
+        Expected::Authenticated => authenticated(&seen.proxied),
+        Expected::OnlyThroughTheProxy => {
+            match authenticated(&seen.proxied) {
+                Verdict::Pass => {}
+                // A build that injected into nothing fails here, which is what keeps the bypass
+                // half from passing vacuously.
+                failed => return failed,
+            }
+            let Some(bypassing) = &seen.bypassing else {
+                return Verdict::Setup(format!(
+                    "the row drove no bypassing leg, and the pair is the assertion: {detail}"
+                ));
+            };
+            // A failure here is the inside's, never the host's: the outside half has already shown
+            // this host can reach and verify the destination, so a leg that cannot do it from
+            // inside is a boundary regression — the child's own trust store having stopped naming
+            // the roots it trusts, for one
+            // ([#140](https://github.com/firefly-engineering/playpen/issues/140)).
+            let Some(arrived) = &bypassing.arrived else {
+                return Verdict::Fail(format!(
+                    "the bypassing request never reached the destination, which this host reached \
+                     outside: {detail}"
+                ));
+            };
+            // Both legs present **whatever the delivery variable holds**, so what this half
+            // catches is a real secret having reached that variable: "there is no mode in which a
+            // real secret enters the sandbox's environment" ([spec §7.3]) asserted from inside,
+            // against a destination that records what it was sent. A build that leaked the secret
+            // into the child's environment passes a proxied-only row and fails here.
+            //
+            // The bypassing request does arrive carrying the phantom, and that is not a leak: the
+            // phantom is not a secret, and what it buys is use of the *proxy*, which a destination
+            // is not. Driving this leg with something else to avoid it would make the two legs
+            // incomparable, which is the vacuity the pair exists to rule out.
+            match arrived.contains(secret) {
+                false => Verdict::Pass,
+                true => Verdict::Fail(format!(
+                    "a request that bypassed the proxy arrived authenticated: {detail}"
+                )),
+            }
+        }
+        Expected::Brokered(code) => {
+            match denied(&seen.proxied, detail) {
+                Verdict::Pass => {}
+                failed => return failed,
+            }
+            // Unwrapped above.
+            let answer = seen.proxied.answer.as_deref().unwrap_or_default();
+            if !answer.contains("X-Playpen-Denied:") {
+                return Verdict::Fail(format!("no X-Playpen-Denied on the denial: {detail}"));
+            }
+            match answer.contains(code.as_str()) {
+                true => Verdict::Pass,
+                false => Verdict::Fail(format!("the denial does not name {code}: {detail}")),
+            }
+        }
+        Expected::NoUpstreamLeg => {
+            // The request has to have been made and refused, or "no upstream leg" is what a launch
+            // that never ran also shows.
+            match denied(&seen.proxied, detail) {
+                Verdict::Pass => {}
+                failed => return failed,
+            }
+            match &seen.proxied.arrived {
+                None => Verdict::Pass,
+                Some(arrived) => Verdict::Fail(format!(
+                    "a request reached the destination: {arrived:?}: {detail}"
+                )),
+            }
+        }
+        other => Verdict::Setup(format!("{other:?} is not a credential route's assertion")),
+    }
+}
+
+/// Whether the broker refused `exchange` with a `403` it *answered* rather than a connection it
+/// dropped ([spec §6.4]).
+///
+/// [spec §6.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#64-broker-denial
+fn denied(exchange: &Exchange, detail: &str) -> Verdict {
+    match &exchange.answer {
+        Err(why) => Verdict::Fail(format!(
+            "the request was never answered, so nothing was refused: {why}: {detail}"
+        )),
+        Ok(answer) if answer.starts_with("HTTP/1.1 403 ") => Verdict::Pass,
+        Ok(_) => Verdict::Fail(format!("not a 403: {detail}")),
     }
 }
 

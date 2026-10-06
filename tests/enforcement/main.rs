@@ -20,9 +20,9 @@ use std::path::{Path, PathBuf};
 
 use playpen::code::Code;
 use row::{
-    Action, Asymmetry, BOTH, Cause, Checked, Class, Declined, Expected, Fixture, Os, Outcome,
-    Platform, Precondition, Row, Scope, Seen, Target, Verdict, judge, judge_refusal,
-    judge_unexamined,
+    Action, Asymmetry, BOTH, Cause, Checked, Class, Declined, Exchange, Exchanged, Expected,
+    Fixture, Os, Outcome, Platform, Precondition, Row, Scope, Seen, Substitution, Target, Verdict,
+    judge, judge_refusal, judge_request, judge_unexamined,
 };
 use rows::ROWS;
 use run::{DECOY, DECOY_MARKER, SSH_KEY_DECOY};
@@ -80,6 +80,22 @@ fn main() {
         (
             "an_unexamined_check_needs_the_examined_one_to_refuse",
             an_unexamined_check_needs_the_examined_one_to_refuse,
+        ),
+        (
+            "an_authenticated_request_needs_the_secret_in_the_header_the_phantom_came_in",
+            an_authenticated_request_needs_the_secret_in_the_header_the_phantom_came_in,
+        ),
+        (
+            "the_bypass_pair_needs_both_legs_and_judges_each",
+            the_bypass_pair_needs_both_legs_and_judges_each,
+        ),
+        (
+            "a_brokered_denial_needs_the_status_the_header_and_the_code",
+            a_brokered_denial_needs_the_status_the_header_and_the_code,
+        ),
+        (
+            "no_upstream_leg_needs_the_request_to_have_been_refused",
+            no_upstream_leg_needs_the_request_to_have_been_refused,
         ),
         (
             "a_row_scoped_to_the_other_platform_is_na_and_never_runs",
@@ -372,6 +388,249 @@ fn in_home(ids: &[&str]) -> Vec<Row> {
     // Every id asked for names a row that writes in the home.
     assert!(ids.is_empty() || rows.len() == ids.len(), "{ids:?}");
     rows
+}
+
+/// What the credential-route checks judge against.
+const SECRET: &str = "the-real-secret";
+const HEADER: &str = "x-api-key";
+
+fn substitution() -> Substitution<'static> {
+    Substitution {
+        secret: SECRET,
+        header: HEADER,
+    }
+}
+
+/// A leg that reached the destination with `arrived` as its head, answered `200`.
+fn reached(arrived: &str) -> Exchange {
+    Exchange {
+        answer: Ok("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".into()),
+        arrived: Some(arrived.to_owned()),
+    }
+}
+
+/// The denial the broker answers, and no leg to the destination.
+fn refused() -> Exchange {
+    Exchange {
+        answer: Ok(format!(
+            "HTTP/1.1 403 Forbidden\r\nX-Playpen-Denied: localhost\r\n\r\n{}",
+            Code::BrokerEndpointDenied
+        )),
+        arrived: None,
+    }
+}
+
+fn exchanged(proxied: Exchange, bypassing: Option<Exchange>) -> Exchanged {
+    Exchanged {
+        proxied,
+        bypassing,
+        detail: String::new(),
+    }
+}
+
+/// Substitution is **in place**: the secret has to arrive as the whole of the header the phantom
+/// came in. A secret in some other header, or beside something else in this one, is a proxy that
+/// did not do this.
+fn an_authenticated_request_needs_the_secret_in_the_header_the_phantom_came_in() {
+    let judged = |seen: &Exchanged| {
+        judge_request(
+            Expected::Authenticated,
+            substitution(),
+            &Seen::Succeeded,
+            seen,
+        )
+    };
+    let good = exchanged(
+        reached(&format!(
+            "GET /v1/messages HTTP/1.1\r\nHost: localhost\r\n{HEADER}: {SECRET}\r\n\r\n"
+        )),
+        None,
+    );
+    assert_eq!(judged(&good), Verdict::Pass);
+    for broken in [
+        // Nothing arrived at all, which is what a 502 upstream looks like from here.
+        exchanged(
+            Exchange {
+                answer: Ok("HTTP/1.1 502 Bad Gateway\r\n\r\n".into()),
+                arrived: None,
+            },
+            None,
+        ),
+        // The phantom was never replaced.
+        exchanged(
+            reached(&format!(
+                "GET /v1/messages HTTP/1.1\r\n{HEADER}: 0123456789abcdef\r\n\r\n"
+            )),
+            None,
+        ),
+        // Replaced, but not in the header it came in.
+        exchanged(
+            reached(&format!(
+                "GET /v1/messages HTTP/1.1\r\nAuthorization: Bearer {SECRET}\r\n{HEADER}: \r\n\r\n"
+            )),
+            None,
+        ),
+        // The phantom left beside the secret, which a `contains` on the value alone would admit.
+        exchanged(
+            reached(&format!(
+                "GET /v1/messages HTTP/1.1\r\n{HEADER}: {SECRET} 0123456789abcdef\r\n\r\n"
+            )),
+            None,
+        ),
+    ] {
+        let verdict = judged(&broken);
+        assert!(
+            matches!(verdict, Verdict::Fail(_)),
+            "{broken:?}: {verdict:?}"
+        );
+    }
+    // A destination that is down outside proves nothing about the inside.
+    let outside = Seen::Failed {
+        cause: None,
+        detail: "connection refused".into(),
+    };
+    let verdict = judge_request(
+        Expected::Authenticated,
+        substitution(),
+        &outside,
+        &exchanged(reached("GET /v1/messages HTTP/1.1\r\n\r\n"), None),
+    );
+    assert!(matches!(verdict, Verdict::Setup(_)), "{verdict:?}");
+}
+
+/// The pair is the assertion: the proxied leg authenticated and the bypassing one not. Either half
+/// alone passes on a build the other catches — injecting into nothing, and the real secret having
+/// reached the child's environment.
+fn the_bypass_pair_needs_both_legs_and_judges_each() {
+    let authenticated =
+        format!("GET /v1/messages HTTP/1.1\r\nHost: localhost\r\n{HEADER}: {SECRET}\r\n\r\n");
+    let unauthenticated = format!(
+        "GET /v1/bypassed HTTP/1.1\r\nHost: localhost\r\n{HEADER}: 0123456789abcdef\r\n\r\n"
+    );
+    let judged = |seen: &Exchanged| {
+        judge_request(
+            Expected::OnlyThroughTheProxy,
+            substitution(),
+            &Seen::Succeeded,
+            seen,
+        )
+    };
+    let good = exchanged(reached(&authenticated), Some(reached(&unauthenticated)));
+    assert_eq!(judged(&good), Verdict::Pass);
+    // A build that injected into everything: the bypassing leg arrived authenticated.
+    let leaked = exchanged(
+        reached(&authenticated),
+        Some(reached(
+            &authenticated.replace("/v1/messages", "/v1/bypassed"),
+        )),
+    );
+    assert!(matches!(judged(&leaked), Verdict::Fail(_)), "{leaked:?}");
+    // A build that injected into nothing fails on the proxied half, not on the bypass half.
+    let inert = exchanged(
+        reached(&unauthenticated.replace("/v1/bypassed", "/v1/messages")),
+        Some(reached(&unauthenticated)),
+    );
+    assert!(matches!(judged(&inert), Verdict::Fail(_)), "{inert:?}");
+    // A row that drove no bypassing leg at all is a harness fault, not a verdict on the boundary.
+    let alone = exchanged(reached(&authenticated), None);
+    let verdict = judged(&alone);
+    assert!(matches!(verdict, Verdict::Setup(_)), "{verdict:?}");
+    // A bypassing leg that could not reach the destination *is* the boundary's: the outside half
+    // already showed this host reaches it, so the child's own trust store having stopped naming
+    // the roots it trusts reads as the regression it is, never as a host condition.
+    let unreached = exchanged(
+        reached(&authenticated),
+        Some(Exchange {
+            answer: Err("invalid peer certificate: UnknownIssuer".into()),
+            arrived: None,
+        }),
+    );
+    let verdict = judged(&unreached);
+    assert!(matches!(verdict, Verdict::Fail(_)), "{verdict:?}");
+}
+
+/// The broker *answers* a denial rather than dropping the connection, and the answer carries both
+/// the header the manifest states and the code consumers branch on ([spec §6.4]).
+///
+/// [spec §6.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#64-broker-denial
+fn a_brokered_denial_needs_the_status_the_header_and_the_code() {
+    let expected = Expected::Brokered(Code::BrokerEndpointDenied);
+    let judged = |seen: &Exchanged| judge_request(expected, substitution(), &Seen::Succeeded, seen);
+    assert_eq!(judged(&exchanged(refused(), None)), Verdict::Pass);
+    let answered = |answer: &str| {
+        exchanged(
+            Exchange {
+                answer: Ok(answer.to_owned()),
+                arrived: None,
+            },
+            None,
+        )
+    };
+    for broken in [
+        // A dropped connection is not an answer.
+        exchanged(
+            Exchange {
+                answer: Err("the peer closed".into()),
+                arrived: None,
+            },
+            None,
+        ),
+        // The origin's own 403 would be a 403 with neither the header nor the code.
+        answered("HTTP/1.1 403 Forbidden\r\n\r\n"),
+        answered(&format!(
+            "HTTP/1.1 403 Forbidden\r\n\r\n{}",
+            Code::BrokerEndpointDenied
+        )),
+        answered("HTTP/1.1 403 Forbidden\r\nX-Playpen-Denied: localhost\r\n\r\nrefused"),
+        // Not a denial at all.
+        answered("HTTP/1.1 200 OK\r\n\r\nok"),
+    ] {
+        let verdict = judged(&broken);
+        assert!(
+            matches!(verdict, Verdict::Fail(_)),
+            "{broken:?}: {verdict:?}"
+        );
+    }
+}
+
+/// "No upstream leg occurred" is about *that request*, so the request has to have been made and
+/// refused. A destination records nothing just as readily from a launch that never ran.
+fn no_upstream_leg_needs_the_request_to_have_been_refused() {
+    let judged = |seen: &Exchanged| {
+        judge_request(
+            Expected::NoUpstreamLeg,
+            substitution(),
+            &Seen::Succeeded,
+            seen,
+        )
+    };
+    assert_eq!(judged(&exchanged(refused(), None)), Verdict::Pass);
+    for broken in [
+        // The launch never ran, so nothing was refused and nothing arrived.
+        exchanged(
+            Exchange {
+                answer: Err("HTTPS_PROXY names no proxy".into()),
+                arrived: None,
+            },
+            None,
+        ),
+        // Refused, and the secret had already gone out.
+        exchanged(
+            Exchange {
+                arrived: Some(format!(
+                    "GET /v1/messages HTTP/1.1\r\n{HEADER}: {SECRET}\r\n\r\n"
+                )),
+                ..refused()
+            },
+            None,
+        ),
+    ] {
+        let verdict = judged(&broken);
+        assert!(
+            matches!(verdict, Verdict::Fail(_)),
+            "{broken:?}: {verdict:?}"
+        );
+    }
 }
 
 /// A home of the check's own holding `files`, each at a path relative to it.

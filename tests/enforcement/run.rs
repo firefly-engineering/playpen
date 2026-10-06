@@ -7,12 +7,15 @@
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use playpen::capability::CapabilitySet;
 use playpen::mechanism::Mechanism;
@@ -23,9 +26,10 @@ use tempfile::{NamedTempFile, TempDir};
 
 use crate::common::{self, PROBE};
 use crate::row::{
-    Action, Cause, Checked, Declined, Expected, Fixture, Invocation, Listening, MERGED_TYPO,
-    OVER_CEILING, Outcome, Row, Seen, Services, Signalled, Target, Verdict, applies, judge,
-    judge_refusal, judge_unexamined, over_ceiling_name,
+    Action, Cause, Checked, Declined, Exchange, Exchanged, Expected, Fixture, Invocation, Legs,
+    Listening, MERGED_TYPO, OVER_CEILING, Outcome, Row, Seen, Services, Signalled, Substitution,
+    Target, Verdict, applies, judge, judge_refusal, judge_request, judge_unexamined,
+    over_ceiling_name,
 };
 use playpen::refusal::EXIT_REFUSED;
 
@@ -62,6 +66,10 @@ pub fn run(rows: &[Row], home: &Path) -> Vec<Outcome> {
             Fixture::Excluded => members.iter().map(|row| excluded(row)).collect(),
             Fixture::Manifest => members.iter().map(|row| manifest_is_true(row)).collect(),
             Fixture::Shim => members.iter().map(|row| argv_matches(row)).collect(),
+            Fixture::CredentialRoute | Fixture::RestrictedRoute => members
+                .iter()
+                .map(|row| credential_route(row, fixture == Fixture::RestrictedRoute))
+                .collect(),
         };
         for (i, verdict) in batch.into_iter().zip(verdicts) {
             outcomes[i] = Some(Outcome::Runs(verdict));
@@ -522,6 +530,409 @@ fn argv_matches(row: &Row) -> Verdict {
              received {received:?}"
         ))
     }
+}
+
+/// The secret the credential-route fixture's minter hands back. Never on a command line and never
+/// in the child's environment: the child holds the phantom, and this is what the destination must
+/// have received in its place.
+const ROUTE_SECRET: &str = "the-real-secret-playpen-injected";
+
+/// The variable this fixture's one route delivers the phantom in. A name of the suite's own, so it
+/// collides with nothing playpen writes and nothing a kind sets.
+const ROUTE_DELIVERY: &str = "PLAYPEN_SUITE_ROUTE_TOKEN";
+
+/// The header the probe presents the phantom in, and so the header the secret must arrive in:
+/// substitution is **in place**, and a proxy that moved it has not done this ([spec §7.3]).
+///
+/// [spec §7.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#73-session-phantom
+const ROUTE_HEADER: &str = "x-api-key";
+
+/// The route's path prefix, which both legs' paths lie under, so each selects the route.
+const ROUTE_PREFIX: &str = "/v1/";
+
+/// The path the proxied leg asks for, and the path the bypassing leg asks for. Two paths rather
+/// than one, so what arrived at the destination is matched to the leg that sent it by its own
+/// request line rather than by arrival order.
+const PROXIED_PATH: &str = "/v1/messages";
+const BYPASSING_PATH: &str = "/v1/bypassed";
+
+/// The one method [`Fixture::RestrictedRoute`]'s rule set allows, on [`PROXIED_PATH`]. The row then
+/// asks for that path with [`DENIED_METHOD`], so what the denial turns on is the **method** and not
+/// the path: the method is matched exactly, and a request that differs only there is the sharpest
+/// instance of it.
+const ALLOWED_METHOD: &str = "POST";
+const DENIED_METHOD: &str = "GET";
+
+/// A loopback TLS destination the harness stands up **outside** the launch, answering as
+/// `localhost` and recording every request head it is sent ([ADR 0016]).
+///
+/// Outside, because the two-part form wants what arrived observable from outside: a listener inside
+/// the sandbox reporting on itself is the probe grading its own homework. `localhost`, because
+/// route matching is an exact compare on the authority the `CONNECT` named, and nothing in the
+/// proxy can make a name resolve.
+///
+/// [ADR 0016]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0016-the-suite-defines-the-backend-and-an-assertion-that-can-pass-vacuously-is-a-defect.md
+struct Destination {
+    /// `127.0.0.1:<port>`, whose port every leg's authority carries.
+    addr: SocketAddr,
+    /// Its own root, in PEM, which the launch's `SSL_CERT_FILE` names. Nothing of the host's trust
+    /// store is touched to make this row pass.
+    root: String,
+    /// Every request head it has received, in arrival order, readable while the run is live.
+    received: Arc<Mutex<Vec<String>>>,
+    /// Set on drop, and the loop sees it on the connection drop makes.
+    stopping: Arc<AtomicBool>,
+    /// A second descriptor on the listening socket, held so the wake-up connect reaches this
+    /// socket and not whatever the kernel next hands the port to.
+    held: Option<TcpListener>,
+    served: Option<std::thread::JoinHandle<()>>,
+}
+
+/// Stand up the destination. Its root and leaf are made here and die with the process, so no
+/// trust store of the host's is involved on either side.
+fn destination() -> Result<Destination, String> {
+    let failed = |what: &str, e: rcgen::Error| format!("the destination cannot {what}: {e}");
+    let root_key = rcgen::KeyPair::generate().map_err(|e| failed("make a root key", e))?;
+    let mut root_params =
+        rcgen::CertificateParams::new(Vec::new()).map_err(|e| failed("describe a root", e))?;
+    root_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Constrained(0));
+    let root = root_params
+        .self_signed(&root_key)
+        .map_err(|e| failed("sign a root", e))?;
+    let leaf_key = rcgen::KeyPair::generate().map_err(|e| failed("make a leaf key", e))?;
+    let leaf = rcgen::CertificateParams::new(vec!["localhost".to_owned()])
+        .map_err(|e| failed("describe a leaf", e))?
+        .signed_by(
+            &leaf_key,
+            &rcgen::Issuer::from_params(&root_params, &root_key),
+        )
+        .map_err(|e| failed("sign a leaf", e))?;
+
+    let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| format!("the destination's protocol versions: {e}"))?
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![leaf.der().clone(), root.der().clone()],
+        rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+            leaf_key.serialize_der(),
+        )),
+    )
+    .map_err(|e| format!("the destination's certificate: {e}"))?;
+    // The one protocol the broker speaks, so a client that would have chosen HTTP/2 does not.
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let config = Arc::new(config);
+
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .map_err(|e| format!("the destination cannot bind loopback: {e}"))?;
+    let addr = listener
+        .local_addr()
+        .map_err(|e| format!("the destination's address: {e}"))?;
+    let held = listener
+        .try_clone()
+        .map_err(|e| format!("a second descriptor on the destination: {e}"))?;
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let stopping = Arc::new(AtomicBool::new(false));
+    let (recording, done) = (Arc::clone(&received), Arc::clone(&stopping));
+    let served = std::thread::Builder::new()
+        .name("playpen-suite-destination".into())
+        .spawn(move || {
+            // One connection at a time: the legs are driven in order, so nothing here needs to
+            // hold two.
+            while let Ok((socket, _)) = listener.accept() {
+                if done.load(Ordering::SeqCst) {
+                    return;
+                }
+                let session = match rustls::ServerConnection::new(Arc::clone(&config)) {
+                    Ok(session) => session,
+                    Err(_) => continue,
+                };
+                let mut tls = rustls::StreamOwned::new(session, socket);
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while head.len() < 64 * 1024 {
+                    match tls.read(&mut byte) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => head.push(byte[0]),
+                    }
+                    if head.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                // Recorded only if it is a head at all, so a client that connected and said
+                // nothing is not an upstream leg.
+                if head.ends_with(b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&head).into_owned();
+                    if let Ok(mut recording) = recording.lock() {
+                        recording.push(head);
+                    }
+                }
+                let _ = tls.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                );
+                let _ = tls.flush();
+            }
+        })
+        .map_err(|e| format!("the destination cannot serve: {e}"))?;
+    Ok(Destination {
+        addr,
+        root: root.pem(),
+        received,
+        stopping,
+        held: Some(held),
+        served: Some(served),
+    })
+}
+
+impl Destination {
+    fn authority(&self) -> String {
+        format!("localhost:{}", self.addr.port())
+    }
+
+    /// Every head received so far, and nothing of what a later leg sends.
+    fn received(&self) -> Vec<String> {
+        self.received
+            .lock()
+            .map(|received| received.clone())
+            .unwrap_or_default()
+    }
+
+    /// Forget what has arrived, so the outside half of the assertion is not mistaken for the
+    /// inside one: the same request is made outside first, and the destination records it too.
+    fn forget(&self) {
+        if let Ok(mut received) = self.received.lock() {
+            received.clear();
+        }
+    }
+}
+
+impl Drop for Destination {
+    /// Reclaimed with the row: the listener closes and the thread ends. Woken with a connection of
+    /// its own rather than by `shutdown`, which Linux honours on a listener and Darwin does not.
+    fn drop(&mut self) {
+        self.stopping.store(true, Ordering::SeqCst);
+        if self.held.is_some() {
+            let _ = TcpStream::connect(self.addr);
+        }
+        if let Some(served) = self.served.take() {
+            let _ = served.join();
+        }
+    }
+}
+
+/// `P-endpoint`, `P-open-bypass`, `N-endpoint` and `N-endpoint-no-leg` ([spec §17.2]): a live
+/// confined launch with one credential route, and a loopback TLS destination outside it.
+///
+/// `restricted` puts an endpoint rule set on the route, allowing [`ALLOWED_METHOD`] on
+/// [`PROXIED_PATH`] and nothing else.
+///
+/// The outside half is the same request made directly, which must succeed: a destination that is
+/// down, or one this host cannot verify, is a setup failure and not a boundary regression. What it
+/// recorded of that is then forgotten, so the inside half's record is the inside half's alone.
+///
+/// [spec §17.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#172-rows
+fn credential_route(row: &Row, restricted: bool) -> Verdict {
+    let Action::Request(legs) = row.action else {
+        return Verdict::Setup(format!("{:?} issues no request", row.action));
+    };
+    let destination = match destination() {
+        Ok(destination) => destination,
+        Err(why) => return Verdict::Setup(why),
+    };
+    let (method, path) = match restricted {
+        true => (DENIED_METHOD, PROXIED_PATH),
+        false => ("GET", PROXIED_PATH),
+    };
+    let fixture = common::Fixture::with_mode("read");
+    // The destination's root, where the launch's `SSL_CERT_FILE` can name it. Inside the policy
+    // directory, which goes with the fixture, so it is reclaimed even on a run killed before
+    // teardown.
+    let root = fixture.policy_dir.path().join("destination-root.pem");
+    if let Err(e) = fs::write(&root, &destination.root) {
+        return Verdict::Setup(format!("the destination's root {}: {e}", root.display()));
+    }
+    let endpoints = match restricted {
+        true => serde_json::json!(["suite-restricted"]),
+        false => serde_json::json!([]),
+    };
+    let policy = fixture.policy_named(
+        "credential-route.json",
+        &serde_json::json!({
+            "version": 1,
+            // Answers at once, and its stdin is drained: a minter is handed the scope on stdin.
+            "minters": {"m": {"command": [
+                common::os_bin("sh"), "-c",
+                format!(
+                    r#"cat >/dev/null; printf '{{"token":"{ROUTE_SECRET}","expires_at":"2099-01-01T00:00:00Z"}}'"#
+                ),
+            ]}},
+            "fragments": {"endpoints": {
+                "suite-restricted": [{"method": ALLOWED_METHOD, "path": PROXIED_PATH}],
+            }},
+            "workspaces": {"w": {"roots": [{"path": fixture.root(), "mode": "read"}]}},
+            "profiles": {"p": {
+                "workspaces": ["w"],
+                "toolchain": [],
+                "credentials": [{
+                    "host": "localhost",
+                    "path_prefix": ROUTE_PREFIX,
+                    "minter": "m",
+                    "delivery": {"env": ROUTE_DELIVERY},
+                    "endpoints": endpoints,
+                }],
+            }},
+        }),
+    );
+
+    // Outside: the same request, direct, with the destination's root as this process's only trust.
+    // It must succeed, whatever the row asserts inside.
+    let outside_op = request_op(&destination, Via::Direct, method, path);
+    let outside = Command::new(PROBE)
+        .args(["request", &outside_op])
+        // Outside there is no run and so no phantom. The destination answers whatever it is sent,
+        // so this half shows only that it is up and verifiable, which is what it is for.
+        .env(ROUTE_DELIVERY, "not-a-token")
+        .env("SSL_CERT_FILE", &root)
+        .env_remove("SSL_CERT_DIR")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run the probe");
+    let outside = match exchanged(&outside) {
+        Ok(answers) => match answers.first() {
+            Some(Ok(answer)) if answer.starts_with("HTTP/1.1 200 ") => Seen::Succeeded,
+            Some(Ok(answer)) => Seen::Failed {
+                cause: None,
+                detail: format!("the destination answered {answer:?}"),
+            },
+            Some(Err(why)) => Seen::Failed {
+                cause: None,
+                detail: why.clone(),
+            },
+            None => Seen::Failed {
+                cause: None,
+                detail: "the probe made no request".into(),
+            },
+        },
+        Err(why) => return Verdict::Setup(format!("outside: {why}")),
+    };
+    destination.forget();
+
+    // Inside: the legs the row drives, in one confined launch. `SSL_CERT_FILE` is set on **this
+    // launch** and never on the suite, and it *replaces* the store rather than extending it, so a
+    // broker trusting only this root cannot pass by having reached something else ([ADR 0030]).
+    let mut ops = vec![request_op(&destination, Via::Proxy, method, path)];
+    if legs == Legs::ProxiedAndBypassing {
+        ops.push(request_op(&destination, Via::Direct, "GET", BYPASSING_PATH));
+    }
+    let probe = fixture.probe();
+    let mut argv = vec![probe.to_str().expect("a UTF-8 probe path").to_owned()];
+    for op in &ops {
+        argv.push("request".to_owned());
+        argv.push(op.clone());
+    }
+    let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let inside = fixture
+        .run_under(&policy, &argv)
+        .env("SSL_CERT_FILE", &root)
+        .env_remove("SSL_CERT_DIR")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run playpen");
+    let answers = match exchanged(&inside) {
+        Ok(answers) if answers.len() == ops.len() => answers,
+        Ok(answers) => {
+            return Verdict::Fail(format!(
+                "the probe answered {} of {} requests: {answers:?}",
+                answers.len(),
+                ops.len()
+            ));
+        }
+        Err(why) => return Verdict::Fail(format!("inside: {why}")),
+    };
+    // What arrived, matched to the leg that sent it by its own request line rather than by arrival
+    // order: the two legs ask for two paths for exactly this.
+    let received = destination.received();
+    let arrived = |path: &str| {
+        received
+            .iter()
+            .find(|head| head.contains(&format!(" {path} HTTP/1.1\r\n")))
+            .cloned()
+    };
+    let seen = Exchanged {
+        proxied: Exchange {
+            answer: answers[0].clone(),
+            arrived: arrived(PROXIED_PATH),
+        },
+        bypassing: answers.get(1).map(|answer| Exchange {
+            answer: answer.clone(),
+            arrived: arrived(BYPASSING_PATH),
+        }),
+        detail: format!(
+            "answers {answers:?}; the destination received {received:?}; playpen {}, stderr {:?}",
+            inside.status,
+            String::from_utf8_lossy(&inside.stderr)
+        ),
+    };
+    judge_request(
+        row.expected,
+        Substitution {
+            secret: ROUTE_SECRET,
+            header: ROUTE_HEADER,
+        },
+        &outside,
+        &seen,
+    )
+}
+
+/// Which leg a request op takes, mirroring the probe's own argument.
+#[derive(Clone, Copy)]
+enum Via {
+    Proxy,
+    Direct,
+}
+
+/// One `request` operand for the probe: JSON, because a request takes more operands than a
+/// positional list could be read back from.
+fn request_op(destination: &Destination, via: Via, method: &str, path: &str) -> String {
+    serde_json::json!({
+        "via": match via { Via::Proxy => "proxy", Via::Direct => "direct" },
+        "method": method,
+        "authority": destination.authority(),
+        "path": path,
+        "header": ROUTE_HEADER,
+        // The variable, never the value: no token belongs on a command line, where the host's
+        // process table can read it.
+        "delivery": ROUTE_DELIVERY,
+    })
+    .to_string()
+}
+
+/// The answer each `request` verdict carried, in order. A probe that broke voids them all.
+fn exchanged(output: &Output) -> Result<Vec<Result<String, String>>, String> {
+    if !output.status.success() {
+        return Err(format!(
+            "the probe broke: {}, stderr {:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| {
+            let verdict: Value =
+                serde_json::from_str(line).map_err(|e| format!("verdict {line:?}: {e}"))?;
+            match verdict["ok"].as_bool() {
+                Some(true) => Ok(Ok(verdict["answer"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned())),
+                Some(false) => Ok(Err(verdict["detail"].as_str().unwrap_or(line).to_owned())),
+                None => Err(format!("verdict {line:?} has no `ok`")),
+            }
+        })
+        .collect()
 }
 
 /// What a toolchain row made: the root its toolchain grants, a file under it, and the targets
@@ -1229,6 +1640,13 @@ fn prepare(action: Action, home: &Path, root: &Path, made: &mut Made) -> Result<
         }
         Action::PullDenials => {
             return Err("pulling denials needs the probe forked, never launched directly".into());
+        }
+        Action::Request(_) => {
+            return Err(
+                "a credential route's own fixture builds its request ops, and the probe's root \
+                 has no route"
+                    .into(),
+            );
         }
         Action::Read(t) => each("read", target(t)?)?,
         Action::List(t) => each("list", target(t)?)?,

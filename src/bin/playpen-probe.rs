@@ -40,7 +40,45 @@ enum Action {
     /// Report this process's id, its group and its terminal's foreground group, then wait for
     /// one of [`waited`] and report it with how many arrived. Two verdicts, one per line.
     WaitSignal,
+    /// Issue one HTTPS request to a destination the harness stands up outside the launch, and
+    /// report the answer head it came back with.
+    Request(Box<Request>),
 }
+
+/// One HTTPS request, as JSON on the command line. A request takes more than one operand, and a
+/// row's fixture is the only thing that writes these, so the shape is a document rather than a
+/// positional list nothing could read back.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Request {
+    via: Via,
+    method: String,
+    /// `host:port`: the `CONNECT` target, the name TLS is verified against, and the `Host` header.
+    authority: String,
+    path: String,
+    /// The header the phantom is presented in, so a row can assert the secret arrived **in the
+    /// header the phantom came in**.
+    header: String,
+    /// The environment variable the phantom was delivered in. **Named rather than carried**: no
+    /// token belongs on a command line, where the host's process table can read it.
+    delivery: String,
+}
+
+/// Which leg a request takes. **A probe argument, never a host fact.** `NO_PROXY` holds
+/// `localhost`, so a probe that let its client infer the leg would take the bypassing one twice,
+/// and a row phrased on that would pass on a build where the proxy injected into everything.
+#[derive(serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum Via {
+    /// Dial what `HTTPS_PROXY` names and open a `CONNECT` to the authority.
+    Proxy,
+    /// Connect to the authority itself, around the proxy.
+    Direct,
+}
+
+/// How long a request waits on a peer before the probe gives up on it, so a destination that has
+/// stopped answering ends the row rather than the suite.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The signals `wait-signal` waits for: ones whose default action would terminate the probe.
 ///
@@ -66,7 +104,7 @@ fn waited() -> Vec<libc::c_int> {
 fn main() -> ExitCode {
     let Some(actions) = parse(std::env::args().skip(1)) else {
         eprintln!(
-            "usage: playpen-probe (read <path> | write <path> | list <path> | read-fd <fd> | look-up <service> (macOS) | fds | stdio)... | playpen-probe wait-signal"
+            "usage: playpen-probe (read <path> | write <path> | list <path> | read-fd <fd> | look-up <service> (macOS) | request <json> | fds | stdio)... | playpen-probe wait-signal"
         );
         return ExitCode::from(2);
     };
@@ -99,6 +137,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Option<Vec<Action>> {
             "fds" => Action::Fds,
             "stdio" => Action::Stdio,
             "wait-signal" => Action::WaitSignal,
+            "request" => Action::Request(Box::new(serde_json::from_str(&args.next()?).ok()?)),
             _ => return None,
         });
     }
@@ -156,7 +195,132 @@ fn verdict(action: &Action) -> String {
             format!(r#"{{"stdio":[{}]}}"#, ids.join(","))
         }
         Action::WaitSignal => unreachable!("wait-signal writes its own verdicts"),
+        Action::Request(request) => issue(request),
     }
+}
+
+/// Issue `request` and report the answer head it came back with, as the verdict's `answer`.
+///
+/// The roots are **the ones this process's environment names**, loaded the way
+/// `rustls-native-certs` loads them: `SSL_CERT_FILE` replaces the platform store outright, so this
+/// is the client that could verify nothing but a routed host while that variable named the bare
+/// session CA ([#140](https://github.com/firefly-engineering/playpen/issues/140)). Its succeeding
+/// on both legs is that fix asserted from inside a live launch.
+fn issue(request: &Request) -> String {
+    match issued(request) {
+        Ok(answer) => {
+            let answer = serde_json::Value::String(answer);
+            format!(r#"{{"ok":true,"answer":{answer}}}"#)
+        }
+        Err(why) => {
+            let detail = serde_json::Value::String(why);
+            format!(r#"{{"ok":false,"detail":{detail}}}"#)
+        }
+    }
+}
+
+fn issued(request: &Request) -> Result<String, String> {
+    use std::net::TcpStream;
+    use std::sync::Arc;
+
+    let host = request
+        .authority
+        .rsplit_once(':')
+        .map_or(request.authority.as_str(), |(host, _)| host)
+        .to_owned();
+    let token = std::env::var(&request.delivery)
+        .map_err(|_| format!("{} names no delivered token", request.delivery))?;
+
+    // Named rather than taken from process-global state, so the probe and the broker cannot
+    // disagree about which provider is in play.
+    let provider = rustls::crypto::aws_lc_rs::default_provider();
+    let mut roots = rustls::RootCertStore::empty();
+    let native = rustls_native_certs::load_native_certs();
+    for certificate in native.certs {
+        let _ = roots.add(certificate);
+    }
+    if roots.is_empty() {
+        return Err(format!(
+            "this process's environment names no trusted roots ({} errors loading them)",
+            native.errors.len()
+        ));
+    }
+    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| format!("protocol versions: {e}"))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    // The one protocol the broker speaks, offered so a client that would have chosen HTTP/2 does
+    // not.
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+
+    let socket = match request.via {
+        Via::Direct => TcpStream::connect(&request.authority)
+            .map_err(|e| format!("connect {}: {e}", request.authority))?,
+        Via::Proxy => {
+            let proxy = std::env::var("HTTPS_PROXY")
+                .map_err(|_| "HTTPS_PROXY names no proxy".to_owned())?;
+            let at = proxy.strip_prefix("http://").unwrap_or(&proxy).to_owned();
+            let mut socket =
+                TcpStream::connect(&at).map_err(|e| format!("connect the proxy {at}: {e}"))?;
+            socket
+                .set_read_timeout(Some(REQUEST_TIMEOUT))
+                .and_then(|()| socket.set_write_timeout(Some(REQUEST_TIMEOUT)))
+                .map_err(|e| format!("the proxy's timeouts: {e}"))?;
+            socket
+                .write_all(format!("CONNECT {} HTTP/1.1\r\n\r\n", request.authority).as_bytes())
+                .map_err(|e| format!("the CONNECT: {e}"))?;
+            let established = head(&mut socket)?;
+            if !established.starts_with("HTTP/1.1 200 ") {
+                return Err(format!(
+                    "the proxy did not establish a tunnel: {established:?}"
+                ));
+            }
+            socket
+        }
+    };
+    socket
+        .set_read_timeout(Some(REQUEST_TIMEOUT))
+        .and_then(|()| socket.set_write_timeout(Some(REQUEST_TIMEOUT)))
+        .map_err(|e| format!("the request's timeouts: {e}"))?;
+    let name = rustls::pki_types::ServerName::try_from(host.clone())
+        .map_err(|e| format!("{host} is not a server name: {e}"))?;
+    let session = rustls::ClientConnection::new(Arc::new(config), name)
+        .map_err(|e| format!("a TLS session: {e}"))?;
+    let mut tls = rustls::StreamOwned::new(session, socket);
+    tls.write_all(
+        format!(
+            "{} {} HTTP/1.1\r\nHost: {host}\r\n{}: {token}\r\nAccept: application/json\r\n\r\n",
+            request.method, request.path, request.header
+        )
+        .as_bytes(),
+    )
+    .map_err(|e| format!("the request: {e}"))?;
+    tls.flush().map_err(|e| format!("flush: {e}"))?;
+    let mut answer = Vec::new();
+    // To the end: every answer here is framed by `Connection: close`, so end of stream is end of
+    // response. A read that fails mid-answer is taken for what it delivered, and the row judges
+    // that.
+    let _ = tls.read_to_end(&mut answer);
+    Ok(String::from_utf8_lossy(&answer).into_owned())
+}
+
+/// One head — everything up to the blank line — read a byte at a time so nothing of what follows
+/// is consumed with it.
+fn head(from: &mut impl Read) -> Result<String, String> {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while head.len() < 64 * 1024 {
+        match from.read(&mut byte) {
+            Ok(0) => break,
+            Ok(_) => head.push(byte[0]),
+            Err(e) => return Err(format!("reading a head: {e}")),
+        }
+        if head.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    Ok(String::from_utf8_lossy(&head).into_owned())
 }
 
 /// Run `path` with no arguments and wait for it. Forked and `execve`d rather than spawned: the

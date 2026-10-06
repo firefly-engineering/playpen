@@ -578,9 +578,11 @@ login they share, an audit exclude rule on Linux emptying a denial trace that pl
 cannot see the rules behind, a profile-writable directory earlier on the host's `PATH` than a
 **shim**, the **run scratch** and `ephemeral` **provisioned areas** a **fault** leaves on
 disk, because the alternative is running the most failure-prone code in playpen on a process that
-has just declared itself broken, and a signal addressed to the whole job reaching the agent twice,
+has just declared itself broken, a signal addressed to the whole job reaching the agent twice,
 which is unclosable rather than unclosed — a receiver learns a signal's sender and never its
-target, so playpen cannot know the agent already has a copy — are the twelve so far.
+target, so playpen cannot know the agent already has a copy — and the **proxy**'s upstream trust
+store, which the launching environment names and whose provenance is stated outward rather than
+closed, are the thirteen so far.
 
 ## Supervisor
 

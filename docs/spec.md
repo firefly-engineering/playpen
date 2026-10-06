@@ -1606,6 +1606,21 @@ linuxbrew and `~/.local` follow the keg-list or coarse-root shapes.
 - **Batching.** There is one confined launch per **policy fixture**, loaded via `--policy`, with
   verdicts written as JSON on the probe's stdout. The exit code carries one bit: *the probe ran*
   or *the probe broke*.
+- **A destination a row needs is the harness's own.** A credential-route row runs against a
+  loopback TLS listener the harness stands up **outside** the launch and reclaims with the fixture.
+  Outside, because the two-part form wants what arrived observable from outside: a listener inside
+  the sandbox reporting on itself is the probe grading its own homework. It answers as `localhost`,
+  because route matching is an exact compare on the authority the `CONNECT` named and nothing in
+  the proxy can make a name resolve. The proxy is made to trust its root by `SSL_CERT_FILE` on
+  **that one launch** and never on the suite — per-suite would narrow every other row's upstream
+  trust and make one row's failure read as another's — and the store is *replaced* rather than
+  extended, so a proxy trusting only that root cannot pass by having reached something else. No
+  seam in the shipped source is reached to do it.
+- **No egress precondition.** Every route-bearing row runs on a loopback destination, so no
+  enforcement row needs a real network. `skip.host.no-egress` was named here before that was
+  settled and is gone, and no `Precondition::Egress` was ever written: a precondition variant no
+  row references is a dead arm that reads like coverage
+  ([ADR 0030](adr/0030-the-hosts-own-trust-store-is-what-the-host-says-it-is.md)).
 - **A single-platform assertion costs a named asymmetry.** A `both` assertion that proves
   inexpressible on one platform is a design bug to escalate, never a skip. The debt is owed
   whichever suite the assertion lives in: an asymmetry in process transparency is asserted in the
@@ -1637,15 +1652,15 @@ Row ids are provisional. The implementation owns the final ids.
 | `N-unix-socket` | negative | a decoy unix socket listening outside every grant is refused | both; skip `skip.host.landlock-below-abi-9` |
 | `N-errno-law` | negative | a denial errno is in the platform set, never `ENOENT` | both |
 | `N-nothing-granted` | negative | under an **empty** capability set — not even the floor — the canary's `exec` is denied with an errno in the platform set, never `ENOENT`. Judged by the kernel's errno, never by a refusal code | both |
-| `N-endpoint` | negative | a non-matching request to a credentialed host gets `403` + `broker.endpoint.denied` | both |
-| `N-endpoint-no-leg` | negative | for that request, **no upstream leg occurred** (instrumented upstream) | both |
+| `N-endpoint` | negative | a non-matching request to a credentialed host gets `403` + `broker.endpoint.denied`, *answered* rather than dropped. The rule set allows one method on the path the row then asks for with another, so what the denial turns on is the method | both |
+| `N-endpoint-no-leg` | negative | for that request, **no upstream leg occurred** (instrumented upstream). The denial is half of the assertion: a destination records nothing just as readily from a launch that never ran | both |
 | `P-canary` | positive | a dynamically linked OS binary exits 0 under the bare floor | both |
 | `P-denial-tree` | positive | a denial by a process the confined child **forked** is returned by the command `explain --run` prints; checked outside first against the log, found by the decoy's path. A log slower than a deadline is a setup failure | macOS (`n/a` Linux) |
 | `P-unshare` | positive | the **nested** `CLONE_NEWUSER` → `CLONE_NEWPID\|CLONE_NEWNET` sequence succeeds inside; checked outside first, else `skip.host.userns-restricted` | Linux (`n/a` macOS) |
-| `P-open-bypass` | positive | a request that bypasses the proxy arrives **unauthenticated** | both |
-| `P-manifest` | positive | "the manifest is true": every stated route authenticates through the proxy, every path is accessible at its stated mode, and nothing outside them is; skip `skip.host.no-egress` | both |
+| `P-open-bypass` | positive | asserted as a **pair** against one destination: the request through the proxy arrives authenticated, and the one that bypasses it arrives **unauthenticated**. Either half alone passes on a build the other catches — injecting into nothing, and a real secret having reached the child's environment. The probe chooses each leg explicitly, since `NO_PROXY` holds `localhost` | both |
+| `P-manifest` | positive | "the manifest is true": every stated route authenticates through the proxy, every path is accessible at its stated mode, and nothing outside them is | both |
 | `P-argv` | positive | the injected argv in `explain --json` matches the argv the child received | both |
-| `P-endpoint` | positive | a matching request reaches upstream authenticated, with the phantom stripped and the secret injected | both |
+| `P-endpoint` | positive | a matching request reaches upstream authenticated, with the secret arriving as **the whole of the header the phantom came in**. Also the assertion of [§18](#18-named-residuals)'s broker-upstream-roots residual: it points `SSL_CERT_FILE` at the destination's root on **that one launch** and passes only if the ambient variable was honoured | both |
 | `R-missing-cap` | refusal | a missing mechanism capability → `125` + code. No host lacks one, so the launch runs with its probe replaced by one offering nothing | both |
 | `R-incoherent-ws` | refusal | an incoherent workspace → `125` + code | both |
 | `R-ceiling` | refusal | a policy over the compiled-profile ceiling → `125` + `refusal.budget.exceeded`; asserts the code, never a path count | macOS (`n/a` Linux) |
@@ -1721,6 +1736,20 @@ exactly the information both ledgers exist to carry.
     it is the entry most likely to be mistaken for a bug, and pinned by a test that asserts the
     doubling
     ([ADR 0026](adr/0026-signal-origin-is-readable-on-linux-and-the-kill-target-is-readable-nowhere.md)).
+13. **The broker's upstream roots are the launching environment's to name.** `SSL_CERT_FILE` or
+    `SSL_CERT_DIR` in the *supervisor's own* environment **replaces** the platform search outright,
+    so whoever launches playpen decides what the broker verifies every destination against — with
+    no policy field, no flag and no build feature. The lever is kept rather than closed: that is
+    what those variables *mean* to every Unix TLS client, and whoever can set the supervisor's
+    environment already decides which executable mints every secret the broker holds and what that
+    executable trusts while minting it
+    ([ADR 0030](adr/0030-the-hosts-own-trust-store-is-what-the-host-says-it-is.md)). Its provenance
+    is **stated** in `playpen explain` and the run record, and not in the manifest: the agent
+    cannot act on the supervisor's trust basis. **`P-endpoint` is this entry's assertion** — the
+    row points the variable at a harness-side loopback destination's root on its own launch and
+    passes only if the ambient value was honoured, so the documentation and the measurement are one
+    observation. The child's own store is a different question and is closed rather than residual
+    ([§9.2](#92-set-entries)).
 
 ---
 
