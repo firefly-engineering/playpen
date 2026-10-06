@@ -300,8 +300,14 @@ impl Broker {
     /// The broker of a run with `routes`, delivering `phantom`, intercepting under `ca`.
     ///
     /// Upstream verification is the host's own trust store: playpen intercepts the agent's TLS and
-    /// must not weaken its own. A host with no usable roots is `refusal.proxy.ca` — there would be
-    /// nothing to verify a destination against, and the alternative is trusting whatever answers.
+    /// must not weaken its own. "The host's own" is what the host names, read environment-first:
+    /// `SSL_CERT_FILE` or `SSL_CERT_DIR` in the supervisor's environment, the names openssl, curl
+    /// and git read too, **replaces** the platform search outright. That lever is the launching
+    /// environment's, and a named residual ([ADR 0030]). A host with no usable roots is
+    /// `refusal.proxy.ca` — there would be nothing to verify a destination against, and the
+    /// alternative is trusting whatever answers.
+    ///
+    /// [ADR 0030]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0030-the-hosts-own-trust-store-is-what-the-host-says-it-is.md
     pub fn new(ca: Ca, phantom: Phantom, routes: Vec<Route>) -> Result<Self, Refusal> {
         let mut roots = rustls::RootCertStore::empty();
         let native = rustls_native_certs::load_native_certs();
@@ -325,8 +331,8 @@ impl Broker {
     ///
     /// A seam, so a test can stand up a destination of its own and show that a request reaches it
     /// with the phantom stripped and the secret injected. Every launch uses [`Broker::new`]: there
-    /// is no policy field and no flag that reaches this, because a proxy that could be told to
-    /// trust something else is a proxy that can be told to trust an attacker.
+    /// is no policy field and no flag that reaches this. The launching environment can still name
+    /// the store [`Broker::new`] reads, which is the host answering, not the policy.
     pub fn trusting(
         ca: Ca,
         phantom: Phantom,
