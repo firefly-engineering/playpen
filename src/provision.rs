@@ -861,16 +861,17 @@ mod tests {
             // property of one process running many tests, and never of a launch, which forks the
             // agent after claiming and means to hold the lock for the whole run. So the claim is
             // retried briefly rather than asserted on the first attempt.
-            let _again = reclaimed(state.path(), &policy);
+            let _again = reclaimed(&layout_of(state.path(), &policy));
         }
     }
 
     /// Claim the layout's areas, retrying for up to a second while the only thing in the way is a
-    /// lock a sibling test's fork is holding open.
-    fn reclaimed(state: &Path, policy: &Policy) -> Provisioned {
+    /// lock a sibling test's fork is holding open. A refused claim creates nothing of its own, so
+    /// retrying the same layout leaves the caller's paths — its scratch above all — unchanged.
+    fn reclaimed(layout: &Layout) -> Provisioned {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
         loop {
-            match layout_of(state, policy).provision() {
+            match layout.provision() {
                 Ok(provisioned) => return provisioned,
                 Err(refusal) if refusal.code == Code::AreaBusy => {
                     assert!(
@@ -907,7 +908,9 @@ mod tests {
         // A scratch that cannot be removed names itself. The directory is made unremovable by
         // taking write on its parent, which is what the kernel checks for an unlink.
         let layout = layout_of(state.path(), &policy);
-        let mut provisioned = layout.provision().expect("provisioned");
+        // Retried: the area is exclusive and the claim above is released, but a sibling test's
+        // fork can hold the released lock's descriptor open for as long as its own `exec` takes.
+        let mut provisioned = reclaimed(&layout);
         let scratch = layout.scratch();
         let parent = scratch.parent().expect("a parent").to_owned();
         let mode = std::fs::metadata(&parent).expect("metadata").permissions();
