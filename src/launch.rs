@@ -624,6 +624,13 @@ fn run(
             //
             // [#140]: https://github.com/firefly-engineering/playpen/issues/140
             let roots = proxy::Roots::host()?;
+            // Stated outward, because the launching environment decided it with no policy field
+            // and no flag ([ADR 0030], [spec §18]). Taken from the load's own answer rather than
+            // from a second look at the environment, which could disagree with it.
+            //
+            // [ADR 0030]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0030-the-hosts-own-trust-store-is-what-the-host-says-it-is.md
+            // [spec §18]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#18-named-residuals
+            record.upstream_roots(roots.provenance());
             let ca = proxy::ca()?;
             let certificate = layout.scratch().join(proxy::CA_FILE);
             ca.write(&certificate)?;

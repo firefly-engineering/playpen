@@ -49,6 +49,18 @@
       },
       "default": []
     },
+    "upstream_roots": {
+      "description": "Where the broker's upstream trust store would come from ([ADR 0030], [spec §18]): the\nlaunching environment, naming which variable, or the platform search.\n\n`None` where no route resolves, because then no broker runs and there is no upstream store\nto name. `explain` launches nothing, so this is what a launch from *this* environment would\nread, by the same reading a launch performs.\n\nAdditive, so a form written before this field existed still reads.\n\n[ADR 0030]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0030-the-hosts-own-trust-store-is-what-the-host-says-it-is.md\n[spec §18]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#18-named-residuals",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Provenance"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
     "env": {
       "description": "The constructed environment, by name ([spec §9.3]): outward only, since the agent can read\nits own `environ`.\n\n[spec §9.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#93-inward-and-outward",
       "type": "array",
@@ -339,6 +351,47 @@
       "required": [
         "method",
         "path"
+      ]
+    },
+    "Provenance": {
+      "description": "Where the broker's upstream trust store came from ([ADR 0030]).\n\nStated outward, in `explain` and the run record, because the launching environment decides it\nwith no policy field and no flag — which is what makes it a **named residual** ([spec §18]).\nAn operator who cannot see which lever was pulled cannot tell a store they chose from one a\nshell profile chose for them.\n\nNever inward: the manifest omits it, because the agent cannot change the supervisor's trust\nbasis, reach around it, or observe its effect ([ADR 0011]).\n\n[ADR 0030]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0030-the-hosts-own-trust-store-is-what-the-host-says-it-is.md\n[ADR 0011]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0011-the-manifest-is-a-generated-projection-and-playpen-states-facts-never-instructions.md\n[spec §18]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#18-named-residuals",
+      "oneOf": [
+        {
+          "description": "The supervisor's environment named the roots, and the platform search was not consulted.\n\nWhich variable is carried rather than the bare fact: \"the environment decided\" does not\ntell an operator which of the two to go and look at, and both can be set at once.",
+          "type": "object",
+          "properties": {
+            "ssl_cert_file": {
+              "description": "Whether `SSL_CERT_FILE` was set.",
+              "type": "boolean"
+            },
+            "ssl_cert_dir": {
+              "description": "Whether `SSL_CERT_DIR` named at least one directory.",
+              "type": "boolean"
+            },
+            "from": {
+              "type": "string",
+              "const": "environment"
+            }
+          },
+          "required": [
+            "from",
+            "ssl_cert_file",
+            "ssl_cert_dir"
+          ]
+        },
+        {
+          "description": "Neither variable named anything, so the platform store answered.",
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "string",
+              "const": "platform"
+            }
+          },
+          "required": [
+            "from"
+          ]
+        }
       ]
     },
     "ResolvedVar": {

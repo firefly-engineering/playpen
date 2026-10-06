@@ -6,6 +6,7 @@
 
 mod common;
 
+use std::path::PathBuf;
 use std::process::Output;
 
 use serde_json::Value;
@@ -481,6 +482,127 @@ fn explain_states_the_resolved_route_table_with_provenance_and_no_token() {
         "{routes}"
     );
     assert!(routes.contains("    unrestricted\n"), "{routes}");
+}
+
+/// A policy whose profile resolves `credentials`, for the route-table questions that do not care
+/// what a route says.
+fn policy_with(fx: &Fixture, name: &str, credentials: serde_json::Value) -> PathBuf {
+    fx.policy_named(
+        name,
+        &serde_json::json!({
+            "version": 1,
+            "minters": {"m": {"command": [
+                os_bin("sh"), "-c",
+                r#"cat >/dev/null; printf '{"token":"t","expires_at":"2027-01-01T00:00:00Z"}'"#,
+            ]}},
+            "workspaces": {"w": {"roots": [{"path": fx.root(), "mode": "readwrite"}]}},
+            "profiles": {"p": {
+                "workspaces": ["w"],
+                "toolchain": [],
+                "credentials": credentials,
+            }},
+        }),
+    )
+}
+
+/// `explain` states where the broker's upstream trust store comes from ([ADR 0030], [spec §18]):
+/// the launching environment, **naming which variable**, or the platform search.
+///
+/// The variables are named rather than summarised, because the operator's next action is to go and
+/// look at one of them. Both can be set at once, so both are reported when both are.
+///
+/// Absent with no route, in both forms: the broker exists only where a route does, so a run with
+/// no route has no upstream store for a provenance to be about.
+///
+/// `explain` launches nothing, so what it reports is what a launch from *this* environment would
+/// read — by the same reading a launch performs, never a second one that could disagree.
+///
+/// [ADR 0030]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0030-the-hosts-own-trust-store-is-what-the-host-says-it-is.md
+/// [spec §18]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#18-named-residuals
+#[test]
+fn explain_states_where_the_brokers_upstream_roots_come_from() {
+    let fx = Fixture::new();
+    let route = serde_json::json!([{
+        "host": "api.anthropic.com",
+        "path_prefix": "/",
+        "minter": "m",
+        "delivery": {"env": "CLAUDE_CODE_OAUTH_TOKEN"},
+    }]);
+    let policy = policy_with(&fx, "upstream.json", route);
+    let policy = policy.to_str().expect("utf-8");
+    // Named, but never read by `explain`, which loads no store: the provenance is about which
+    // lever was pulled, not about what the file holds.
+    let named = fx.root().join("roots.pem");
+    let dir = fx.root().join("roots.d");
+
+    // The host this suite runs on may well set these itself — NixOS does — so every case states
+    // both variables rather than trusting the ambient environment to be empty.
+    let run = |args: &[&str], file: Option<&PathBuf>, cert_dir: Option<&PathBuf>| -> String {
+        let mut command = fx.playpen(&["explain"]);
+        command.args(args);
+        match file {
+            Some(path) => command.env("SSL_CERT_FILE", path),
+            None => command.env_remove("SSL_CERT_FILE"),
+        };
+        match cert_dir {
+            Some(path) => command.env("SSL_CERT_DIR", path),
+            None => command.env_remove("SSL_CERT_DIR"),
+        };
+        let output = command.output().expect("playpen explain");
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).expect("utf-8")
+    };
+
+    // `SSL_CERT_FILE` alone: the environment decided, and the report says which one.
+    let json: Value = serde_json::from_str(&run(
+        &["p", "--policy", policy, "--json"],
+        Some(&named),
+        None,
+    ))
+    .expect("JSON");
+    assert_eq!(json["upstream_roots"]["from"], "environment");
+    assert_eq!(json["upstream_roots"]["ssl_cert_file"], true);
+    assert_eq!(json["upstream_roots"]["ssl_cert_dir"], false);
+    let human = run(&["p", "--policy", policy], Some(&named), None);
+    assert!(
+        human.contains("  upstream roots  the environment (SSL_CERT_FILE)\n"),
+        "{human}"
+    );
+
+    // Both: both named, so neither is mistaken for the only one in force.
+    let human = run(&["p", "--policy", policy], Some(&named), Some(&dir));
+    assert!(
+        human.contains("  upstream roots  the environment (SSL_CERT_FILE, SSL_CERT_DIR)\n"),
+        "{human}"
+    );
+    let json: Value = serde_json::from_str(&run(
+        &["p", "--policy", policy, "--json"],
+        Some(&named),
+        Some(&dir),
+    ))
+    .expect("JSON");
+    assert_eq!(json["upstream_roots"]["ssl_cert_dir"], true);
+
+    // Neither: the platform search answered.
+    let json: Value =
+        serde_json::from_str(&run(&["p", "--policy", policy, "--json"], None, None)).expect("JSON");
+    assert_eq!(json["upstream_roots"]["from"], "platform");
+    let human = run(&["p", "--policy", policy], None, None);
+    assert!(
+        human.contains("  upstream roots  the platform store\n"),
+        "{human}"
+    );
+
+    // No route, so no broker and no upstream store to name — however the environment is set.
+    let none = policy_with(&fx, "no-route.json", serde_json::json!([]));
+    let none = none.to_str().expect("utf-8");
+    let json: Value =
+        serde_json::from_str(&run(&["p", "--policy", none, "--json"], Some(&named), None))
+            .expect("JSON");
+    assert_eq!(json["upstream_roots"], Value::Null);
+    let human = run(&["p", "--policy", none], Some(&named), None);
+    assert!(!human.contains("upstream roots"), "{human}");
+    assert!(human.contains("  none, so no proxy runs\n"), "{human}");
 }
 
 /// A profile with no credential route states so, because "no route resolves, and so no proxy

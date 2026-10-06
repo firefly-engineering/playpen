@@ -1266,6 +1266,9 @@ The run record holds:
 - the resolved profile and the selection trace;
 - the capability set;
 - the route table, with provenance;
+- where the broker's upstream roots came from, naming which of `SSL_CERT_FILE` / `SSL_CERT_DIR`
+  was found, or the platform search; absent where no route resolved, since then no broker existed
+  ([ADR 0030](adr/0030-the-hosts-own-trust-store-is-what-the-host-says-it-is.md), [§18](#18-named-residuals));
 - the unix-socket regime that applied ([§6.3](#63-credential-oracles));
 - minted `expires_at` values, never tokens;
 - the child's pid, the supervisor's own pid, and timestamps;
@@ -1302,8 +1305,11 @@ reads it back out, and a surface whose job is to state facts must not report a c
 
 1. the **selection trace**;
 2. the resolved **capability set**: paths, network, environment and injected argv;
-3. the resolved **route table**, including endpoint rule sets, with fragment provenance, and the
-   unix-socket regime.
+3. the resolved **route table**, including endpoint rule sets, with fragment provenance, where the
+   broker's upstream roots would come from — naming which of `SSL_CERT_FILE` / `SSL_CERT_DIR` is
+   set, or the platform search, and absent where no route resolves
+   ([ADR 0030](adr/0030-the-hosts-own-trust-store-is-what-the-host-says-it-is.md),
+   [§18](#18-named-residuals)) — and the unix-socket regime.
 
 `explain` launches nothing. `explain --run <id>` replays a stored record and prints the exact
 platform command that pulls that run's denials — every process in its tree, not only the child —
@@ -1745,9 +1751,11 @@ exactly the information both ledgers exist to carry.
     environment already decides which executable mints every secret the broker holds and what that
     executable trusts while minting it
     ([ADR 0030](adr/0030-the-hosts-own-trust-store-is-what-the-host-says-it-is.md)). Its provenance
-    is to be **stated** in `playpen explain` and the run record
-    ([#141](https://github.com/firefly-engineering/playpen/issues/141), still owed), and in neither
-    case in the manifest: the agent cannot act on the supervisor's trust basis.
+    **is stated** in `playpen explain` and the run record, naming which of the two variables was
+    found, and in neither case in the manifest: the agent cannot act on the supervisor's trust
+    basis. The provenance and the store come from **one** read of the environment, so a run cannot
+    report having loaded one store while having loaded the other
+    ([#141](https://github.com/firefly-engineering/playpen/issues/141)).
     **`P-endpoint` is this entry's assertion** — the
     row points the variable at a harness-side loopback destination's root on its own launch and
     passes only if the ambient value was honoured, so the documentation and the measurement are one

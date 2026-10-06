@@ -24,6 +24,7 @@
 //! [ADR 0013]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0013-the-proxy-is-the-supervisors-and-the-two-confinements-are-independent.md
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -32,6 +33,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::code::Code;
@@ -216,6 +219,166 @@ pub struct Ca {
     leaves: Mutex<HashMap<String, Arc<Leaf>>>,
 }
 
+/// `SSL_CERT_FILE`: a file of PEM roots that replaces the platform search.
+const ENV_CERT_FILE: &str = "SSL_CERT_FILE";
+
+/// `SSL_CERT_DIR`: a `PATH`-separated list of directories of roots that replaces the platform
+/// search. A list, which is the whole reason [`CertPaths::load`] cannot be one call.
+const ENV_CERT_DIR: &str = "SSL_CERT_DIR";
+
+/// Where the broker's upstream trust store came from ([ADR 0030]).
+///
+/// Stated outward, in `explain` and the run record, because the launching environment decides it
+/// with no policy field and no flag — which is what makes it a **named residual** ([spec §18]).
+/// An operator who cannot see which lever was pulled cannot tell a store they chose from one a
+/// shell profile chose for them.
+///
+/// Never inward: the manifest omits it, because the agent cannot change the supervisor's trust
+/// basis, reach around it, or observe its effect ([ADR 0011]).
+///
+/// [ADR 0030]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0030-the-hosts-own-trust-store-is-what-the-host-says-it-is.md
+/// [ADR 0011]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0011-the-manifest-is-a-generated-projection-and-playpen-states-facts-never-instructions.md
+/// [spec §18]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#18-named-residuals
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "from", rename_all = "lowercase")]
+pub enum Provenance {
+    /// The supervisor's environment named the roots, and the platform search was not consulted.
+    ///
+    /// Which variable is carried rather than the bare fact: "the environment decided" does not
+    /// tell an operator which of the two to go and look at, and both can be set at once.
+    Environment {
+        /// Whether `SSL_CERT_FILE` was set.
+        ssl_cert_file: bool,
+        /// Whether `SSL_CERT_DIR` named at least one directory.
+        ssl_cert_dir: bool,
+    },
+    /// Neither variable named anything, so the platform store answered.
+    Platform,
+}
+
+impl Provenance {
+    /// What the supervisor's environment says, by the same reading that chooses the load.
+    ///
+    /// `explain` needs this without loading anything: it launches nothing, so there is no store to
+    /// have read, and what it reports is what a launch from this environment *would* get. It must
+    /// not be a second procedure — one that could answer differently from the one a launch
+    /// obeys is worse than no answer, since the report is what a reader trusts.
+    pub fn from_env() -> Self {
+        CertPaths::from_env().provenance()
+    }
+}
+
+/// The two variables that can replace the platform search, as **one** read of the environment.
+///
+/// Its own type so that a single read both chooses the load and states the provenance. Deriving
+/// the provenance from a *second* inspection would let the two disagree — the load taking one
+/// branch while the report named the other — and the report is the half a reader believes
+/// ([#141](https://github.com/firefly-engineering/playpen/issues/141)).
+struct CertPaths {
+    file: Option<PathBuf>,
+    dirs: Vec<PathBuf>,
+}
+
+impl CertPaths {
+    /// The supervisor's own environment, read once.
+    fn from_env() -> Self {
+        Self::read(
+            std::env::var_os(ENV_CERT_FILE),
+            std::env::var_os(ENV_CERT_DIR),
+        )
+    }
+
+    /// The reading, from two values rather than from the process, so a test can state a host
+    /// without writing a process-global every other test would see.
+    ///
+    /// Mirrors how `rustls-native-certs` reads the same two variables, which is the behaviour this
+    /// must not quietly change: `SSL_CERT_FILE` counts as set **even when empty**, while
+    /// `SSL_CERT_DIR`'s empty entries are dropped, so `SSL_CERT_DIR=""` names no directory at all.
+    fn read(file: Option<OsString>, dirs: Option<OsString>) -> Self {
+        Self {
+            file: file.map(PathBuf::from),
+            dirs: dirs
+                .map(|dirs| {
+                    std::env::split_paths(&dirs)
+                        .filter(|dir| !dir.as_os_str().is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    /// What these paths say about where the roots came from. Either variable naming anything is
+    /// enough to replace the platform search, so only "neither" is [`Provenance::Platform`].
+    fn provenance(&self) -> Provenance {
+        match (self.file.is_some(), !self.dirs.is_empty()) {
+            (false, false) => Provenance::Platform,
+            (ssl_cert_file, ssl_cert_dir) => Provenance::Environment {
+                ssl_cert_file,
+                ssl_cert_dir,
+            },
+        }
+    }
+
+    /// The roots these paths name, with how many could not be read at all — or `None` where they
+    /// name nothing, which is not this type's answer to give.
+    ///
+    /// **The platform search deliberately does not live here.** `load_native_certs` performs its
+    /// own read of the two variables, so a `CertPaths` that named nothing could not delegate to it
+    /// without answering from the *process* environment instead of from the values it was handed —
+    /// and [`CertPaths::provenance`] would then say `platform` over a store the environment had
+    /// chosen. That is not hypothetical: something in this crate's own dependency graph initialises
+    /// `SSL_CERT_DIR` inside the test process, so a `read(None, None)` that delegated would load
+    /// the environment's roots while reporting the platform's.
+    ///
+    /// [`Roots::host`] owns the fallback instead, where [`CertPaths::from_env`] has already
+    /// established that the environment names nothing.
+    ///
+    /// `load_certs_from_paths` takes **one** directory while `SSL_CERT_DIR` is a list, so each
+    /// entry is loaded in turn and the results merged. Both halves are merged: the certificates,
+    /// so a directory late in the list is not silently dropped, and the error counts, so the
+    /// number in a `refusal.proxy.ca` sentence still totals every root the host named and nothing
+    /// could use. Sorted and deduplicated afterwards, as the single call does internally, so a
+    /// root two entries both name is one root.
+    fn load(&self) -> Option<(Vec<CertificateDer<'static>>, usize)> {
+        if self.file.is_none() && self.dirs.is_empty() {
+            return None;
+        }
+        let mut certificates = Vec::new();
+        let mut errors = 0;
+        let mut merge = |loaded: rustls_native_certs::CertificateResult| {
+            certificates.extend(loaded.certs);
+            errors += loaded.errors.len();
+        };
+        if let Some(file) = &self.file {
+            merge(rustls_native_certs::load_certs_from_paths(Some(file), None));
+        }
+        for dir in &self.dirs {
+            merge(rustls_native_certs::load_certs_from_paths(None, Some(dir)));
+        }
+        // By the encoded bytes, which is how the single call orders them too: `CertificateDer` is
+        // not `Ord` itself, and a root is the same root iff its DER is.
+        certificates.sort_unstable_by(|a, b| a.as_ref().cmp(b.as_ref()));
+        certificates.dedup_by(|a, b| a.as_ref() == b.as_ref());
+        Some((certificates, errors))
+    }
+}
+
+/// `certificates` as PEM, in order, which is how a root is named on disk in both directions: the
+/// bundle the child's `SSL_CERT_FILE` points at, and the file a test hands to [`CertPaths`].
+///
+/// A root comes out of a platform store as DER — on macOS there is no PEM file to concatenate at
+/// all — so encoding is not a copy and the line ending is fixed rather than the platform's.
+fn encode_roots(certificates: &[CertificateDer<'static>]) -> String {
+    let mut pem = String::new();
+    for certificate in certificates {
+        pem.push_str(&pem::encode_config(
+            &pem::Pem::new("CERTIFICATE", certificate.as_ref()),
+            pem::EncodeConfig::new().set_line_ending(pem::LineEnding::LF),
+        ));
+    }
+    pem
+}
+
 /// The roots the run trusts upstream: **what the host says it trusts** ([ADR 0030]).
 ///
 /// Read once per launch and used twice, so the two can never disagree: the broker verifies every
@@ -223,8 +386,19 @@ pub struct Ca {
 /// A run whose supervisor was pointed at a different store gets a child consistent with what the
 /// broker itself trusts.
 ///
+/// The [`Provenance`] travels **with** the certificates for the same reason: a caller that loaded
+/// a store cannot report a different one, because it never held the two apart.
+///
+/// [`Provenance::from_env`] does answer without loading, for `explain`, which loads nothing and
+/// has nothing to be inconsistent with. That is a convention and not a structural guarantee —
+/// nothing stops a future caller asking it *instead of* reading the roots it did load. The
+/// guarantee is only that both come from one [`CertPaths`] on the path a launch takes.
+///
 /// [ADR 0030]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0030-the-hosts-own-trust-store-is-what-the-host-says-it-is.md
-pub struct Roots(Vec<CertificateDer<'static>>);
+pub struct Roots {
+    certificates: Vec<CertificateDer<'static>>,
+    provenance: Provenance,
+}
 
 impl Roots {
     /// The host's own, read the way every Unix TLS client reads them: `SSL_CERT_FILE` or
@@ -232,13 +406,30 @@ impl Roots {
     /// platform store answers where neither is set. That lever is the launching environment's, and
     /// a named residual ([ADR 0030]).
     ///
+    /// One [`CertPaths`] decides both halves: which store is loaded, and what the run reports
+    /// having loaded.
+    ///
     /// A host with no usable roots is `refusal.proxy.ca`: there would be nothing to verify a
     /// destination against, and the alternative is trusting whatever answers.
     ///
     /// [ADR 0030]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0030-the-hosts-own-trust-store-is-what-the-host-says-it-is.md
     pub fn host() -> Result<Self, Refusal> {
-        let native = rustls_native_certs::load_native_certs();
-        Self::usable(native.certs, native.errors.len())
+        let paths = CertPaths::from_env();
+        let provenance = paths.provenance();
+        // The platform search is reached here and nowhere else, and only where `from_env` found
+        // nothing named — which is exactly when `load_native_certs`' own read of the two variables
+        // finds nothing either, so the store it returns is the one `provenance` names. Anywhere
+        // else, that second read could answer for an environment this one did not see.
+        let (certificates, errors) = paths.load().unwrap_or_else(|| {
+            let native = rustls_native_certs::load_native_certs();
+            (native.certs, native.errors.len())
+        });
+        Self::usable(certificates, errors, provenance)
+    }
+
+    /// Where these roots came from, for `explain` and the run record.
+    pub fn provenance(&self) -> Provenance {
+        self.provenance
     }
 
     /// The roots among `certificates` the verification store will take, or `refusal.proxy.ca` where
@@ -250,7 +441,11 @@ impl Roots {
     ///
     /// "No usable roots" is therefore decided on the store and never on the count the loader
     /// returned: a host whose every certificate failed to parse has none, however many it named.
-    fn usable(certificates: Vec<CertificateDer<'static>>, errors: usize) -> Result<Self, Refusal> {
+    fn usable(
+        certificates: Vec<CertificateDer<'static>>,
+        errors: usize,
+        provenance: Provenance,
+    ) -> Result<Self, Refusal> {
         let mut store = rustls::RootCertStore::empty();
         let usable: Vec<CertificateDer<'static>> = certificates
             .into_iter()
@@ -265,14 +460,17 @@ impl Roots {
                 ),
             ));
         }
-        Ok(Self(usable))
+        Ok(Self {
+            certificates: usable,
+            provenance,
+        })
     }
 
     /// These roots as a store for upstream verification. Every one of them is usable, because
     /// [`Roots::host`] kept only those the store took.
     fn store(&self) -> rustls::RootCertStore {
         let mut roots = rustls::RootCertStore::empty();
-        for certificate in &self.0 {
+        for certificate in &self.certificates {
             let _ = roots.add(certificate.clone());
         }
         roots
@@ -280,9 +478,15 @@ impl Roots {
 
     /// Roots of a test's own naming, for one that stands up a destination with a root of its own.
     /// Never a launch's: [`Roots::host`] is the only thing a launch builds one from.
+    ///
+    /// Their provenance is [`Provenance::Platform`]: a test that named its own certificates did
+    /// not get them from the environment, and no test asserts a provenance through this.
     #[cfg(test)]
     fn of(certificates: Vec<CertificateDer<'static>>) -> Self {
-        Self(certificates)
+        Self {
+            certificates,
+            provenance: Provenance::Platform,
+        }
     }
 
     /// Write the bundle `SSL_CERT_FILE` names: these roots, then `ca`'s certificate.
@@ -296,13 +500,7 @@ impl Roots {
     ///
     /// [spec §6.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#62-the-broker
     pub fn bundle(&self, ca: &Ca, at: &Path) -> Result<(), Refusal> {
-        let mut bundle = String::new();
-        for certificate in &self.0 {
-            bundle.push_str(&pem::encode_config(
-                &pem::Pem::new("CERTIFICATE", certificate.as_ref()),
-                pem::EncodeConfig::new().set_line_ending(pem::LineEnding::LF),
-            ));
-        }
+        let mut bundle = encode_roots(&self.certificates);
         bundle.push_str(&ca.pem);
         std::fs::write(at, &bundle).map_err(|e| {
             Refusal::new(
@@ -1441,8 +1639,13 @@ mod tests {
 
         // The rest of the host's store still verifies destinations, so the run goes on — and the
         // child is pointed at the roots it can use and no others.
-        let roots = Roots::usable(vec![rubbish.clone(), usable.clone()], 0).expect("one usable");
-        assert_eq!(roots.0, vec![usable]);
+        let roots = Roots::usable(
+            vec![rubbish.clone(), usable.clone()],
+            0,
+            Provenance::Platform,
+        )
+        .expect("one usable");
+        assert_eq!(roots.certificates, vec![usable]);
         let session = ca().expect("a session CA");
         let at = dir.path().join(BUNDLE_FILE);
         roots.bundle(&session, &at).expect("the bundle");
@@ -1457,7 +1660,7 @@ mod tests {
         // named: the loader returned one, and this is still `refusal.proxy.ca`.
         // ...and so does one the loader could read nothing from at all; the sentence says which.
         for (certificates, errors) in [(vec![rubbish], 0), (Vec::new(), 3)] {
-            let refused = Roots::usable(certificates, errors)
+            let refused = Roots::usable(certificates, errors, Provenance::Platform)
                 .err()
                 .expect("no usable root");
             assert_eq!(refused.code, Code::ProxyCa);
@@ -1467,6 +1670,186 @@ mod tests {
                 refused.message()
             );
         }
+    }
+
+    /// One PEM file holding `certificates`, as a host names roots through `SSL_CERT_FILE`.
+    fn pem_file(at: &Path, certificates: &[&CertificateDer<'static>]) {
+        let owned: Vec<CertificateDer<'static>> =
+            certificates.iter().map(|c| (*c).clone()).collect();
+        std::fs::write(at, encode_roots(&owned)).expect("a PEM file");
+    }
+
+    /// Either variable naming anything replaces the platform search, so only "neither" is the
+    /// platform's — and the two are read exactly as `rustls-native-certs` reads them, which is the
+    /// behaviour this must not quietly change. The asymmetry is the crate's, not a slip:
+    /// `SSL_CERT_FILE` counts as set even when empty, while `SSL_CERT_DIR=""` names no directory.
+    #[test]
+    fn the_provenance_is_decided_by_which_of_the_two_variables_named_something() {
+        let cases: [(Option<&str>, Option<&str>, Provenance); 7] = [
+            (None, None, Provenance::Platform),
+            (
+                Some("/roots.pem"),
+                None,
+                Provenance::Environment {
+                    ssl_cert_file: true,
+                    ssl_cert_dir: false,
+                },
+            ),
+            (
+                None,
+                Some("/roots.d"),
+                Provenance::Environment {
+                    ssl_cert_file: false,
+                    ssl_cert_dir: true,
+                },
+            ),
+            (
+                Some("/roots.pem"),
+                Some("/roots.d"),
+                Provenance::Environment {
+                    ssl_cert_file: true,
+                    ssl_cert_dir: true,
+                },
+            ),
+            // Set but empty: the crate takes `SSL_CERT_FILE` as named regardless of its value, so
+            // this host is not the platform's however little the variable says.
+            (
+                Some(""),
+                None,
+                Provenance::Environment {
+                    ssl_cert_file: true,
+                    ssl_cert_dir: false,
+                },
+            ),
+            // ...and the other way for the list, whose empty entries are dropped: an empty
+            // `SSL_CERT_DIR` names nothing, so the platform still answers.
+            (None, Some(""), Provenance::Platform),
+            (
+                None,
+                Some("/a::/b"),
+                Provenance::Environment {
+                    ssl_cert_file: false,
+                    ssl_cert_dir: true,
+                },
+            ),
+        ];
+        for (file, dirs, expected) in cases {
+            let paths = CertPaths::read(file.map(OsString::from), dirs.map(OsString::from));
+            assert_eq!(
+                paths.provenance(),
+                expected,
+                "SSL_CERT_FILE={file:?} SSL_CERT_DIR={dirs:?}"
+            );
+        }
+
+        // The list's empty entries are dropped rather than carried as empty paths, which is what
+        // keeps `SSL_CERT_DIR=""` off the environment branch above.
+        let listed = CertPaths::read(None, Some(OsString::from("/a::/b")));
+        assert_eq!(
+            listed.dirs,
+            vec![PathBuf::from("/a"), PathBuf::from("/b")],
+            "an empty entry survived the split"
+        );
+    }
+
+    /// `SSL_CERT_DIR` is a list and `load_certs_from_paths` takes one directory, so every entry has
+    /// to be loaded in turn and merged. A build that honoured only the first would silently trust
+    /// fewer roots than the host named — and look like a clean refactor doing it.
+    ///
+    /// Both halves merge: the certificates, and the error counts, so the number in a
+    /// `refusal.proxy.ca` sentence still totals every root nothing could read.
+    #[test]
+    fn every_ssl_cert_dir_entry_is_loaded_and_a_root_two_name_is_one_root() {
+        let dir = tempfile::TempDir::new().expect("dir");
+        let (first, second, shared) = (issued("one.test"), issued("two.test"), issued("both.test"));
+        let (one, two) = (dir.path().join("one"), dir.path().join("two"));
+        for at in [&one, &two] {
+            std::fs::create_dir(at).expect("a roots directory");
+        }
+        // The shared root sits in both, so the dedup has something to do.
+        pem_file(&one.join("a.pem"), &[&first.root, &shared.root]);
+        pem_file(&two.join("b.pem"), &[&second.root, &shared.root]);
+
+        let listed = OsString::from(format!("{}:{}", one.display(), two.display()));
+        let paths = CertPaths::read(None, Some(listed));
+        let (certificates, errors) = paths.load().expect("paths that name two directories");
+
+        assert_eq!(errors, 0, "a readable directory reported an error");
+        let mut loaded: Vec<&[u8]> = certificates.iter().map(|c| c.as_ref()).collect();
+        loaded.sort_unstable();
+        let mut want: Vec<&[u8]> = [&first.root, &second.root, &shared.root]
+            .into_iter()
+            .map(|c| c.as_ref())
+            .collect();
+        want.sort_unstable();
+        assert_eq!(
+            loaded, want,
+            "the second entry was dropped, or the shared root arrived twice"
+        );
+
+        // Every entry is reached for its errors too, not only the first.
+        let missing = OsString::from(format!(
+            "{}:{}",
+            dir.path().join("absent-one").display(),
+            dir.path().join("absent-two").display()
+        ));
+        let (none, errors) = CertPaths::read(None, Some(missing))
+            .load()
+            .expect("paths that name two directories");
+        assert!(none.is_empty(), "a root came from nowhere");
+        assert_eq!(errors, 2, "only one unreadable entry was counted");
+    }
+
+    /// The provenance and the store come from **one** read, so they cannot disagree — which is the
+    /// whole point of [`CertPaths`] existing ([#141]).
+    ///
+    /// Observable rather than asserted in a comment, and the assertion is that the load used
+    /// **only the values it was handed**: paths naming one root load *exactly* that root, on a
+    /// process whose own `SSL_CERT_FILE`/`SSL_CERT_DIR` say something else entirely. A build whose
+    /// load re-read the environment would come back with the process's store instead, and the
+    /// provenance would be naming a store it had not loaded.
+    ///
+    /// That the process says something else is not arranged here and does not need to be: something
+    /// in this crate's dependency graph initialises `SSL_CERT_DIR`, so the test process always has
+    /// one. An ambient value is what makes this sharp rather than what weakens it.
+    ///
+    /// The platform branch is asserted as what it is — **absent**. [`CertPaths`] has no platform
+    /// answer to give, precisely so that naming nothing cannot be answered from a second read; the
+    /// fallback lives in [`Roots::host`], where `from_env` has established there is nothing to
+    /// disagree with.
+    ///
+    /// [#141]: https://github.com/firefly-engineering/playpen/issues/141
+    #[test]
+    fn the_provenance_names_the_store_that_was_actually_loaded() {
+        let dir = tempfile::TempDir::new().expect("dir");
+        let only = issued("only.test");
+        let at = dir.path().join("roots.pem");
+        pem_file(&at, &[&only.root]);
+
+        let named = CertPaths::read(Some(OsString::from(&at)), None);
+        let (certificates, errors) = named.load().expect("paths that name a file");
+        assert_eq!(
+            named.provenance(),
+            Provenance::Environment {
+                ssl_cert_file: true,
+                ssl_cert_dir: false,
+            }
+        );
+        assert_eq!(errors, 0);
+        assert_eq!(
+            certificates.iter().map(|c| c.as_ref()).collect::<Vec<_>>(),
+            vec![only.root.as_ref()],
+            "the load answered from the process environment, not from the paths it was given"
+        );
+
+        // Naming nothing has no answer here, which is the structural half of the same claim.
+        let unnamed = CertPaths::read(None, None);
+        assert_eq!(unnamed.provenance(), Provenance::Platform);
+        assert!(
+            unnamed.load().is_none(),
+            "a `CertPaths` that names nothing answered anyway, which it can only have done by \
+             reading the environment a second time"
+        );
     }
 
     /// The two variables name two different files, because only one of them is additive: pointed at

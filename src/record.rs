@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use crate::capability::{Access, CapabilitySet, PathGrant, Scope};
 use crate::code::Code;
 use crate::fault::Fault;
+use crate::proxy::Provenance;
 use crate::refusal::Refusal;
 use crate::select::Trace;
 
@@ -241,6 +242,21 @@ pub struct Record {
     /// [spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters
     #[serde(default)]
     pub credentials: Vec<RecordedCredential>,
+    /// Where the broker's upstream trust store came from ([ADR 0030], [spec §18]): the
+    /// supervisor's environment, naming which variable, or the platform search.
+    ///
+    /// A run-level fact rather than a per-route one: one store is read per launch and every
+    /// destination is verified against it, so hanging it off a route would state it once per
+    /// route and invite two routes to disagree.
+    ///
+    /// `None` where no broker existed — with no route resolving there is no upstream store to
+    /// have a provenance — and additive, so a record written before this field existed still
+    /// reads.
+    ///
+    /// [ADR 0030]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0030-the-hosts-own-trust-store-is-what-the-host-says-it-is.md
+    /// [spec §18]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#18-named-residuals
+    #[serde(default)]
+    pub upstream_roots: Option<Provenance>,
     /// What went wrong during teardown, one sentence each ([spec §4.2] step 18). **No teardown
     /// failure changes the exit status**, so this is the only place a revoker that did not run is
     /// ever reported: the caller already has the child's status, and overwriting it to say the
@@ -408,6 +424,7 @@ impl RunRecord {
             refusal: None,
             fault: None,
             credentials: Vec::new(),
+            upstream_roots: None,
             teardown: Vec::new(),
             lapsed: Vec::new(),
         };
@@ -457,6 +474,13 @@ impl RunRecord {
     /// What this run minted, by destination and expiry. The token is never among it.
     pub fn credentials(&mut self, credentials: Vec<RecordedCredential>) {
         self.record.credentials = credentials;
+    }
+
+    /// Where the broker's upstream roots came from. Written only for a run whose broker exists,
+    /// and taken from the [`Provenance`] the load itself produced rather than from a second look
+    /// at the environment.
+    pub fn upstream_roots(&mut self, provenance: Provenance) {
+        self.record.upstream_roots = Some(provenance);
     }
 
     /// One thing that went wrong tearing the run down ([spec §4.2] step 18). It is written to the

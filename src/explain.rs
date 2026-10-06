@@ -25,6 +25,7 @@ use crate::code::Code;
 use crate::launch::Host;
 use crate::policy::{Policy, coherence};
 use crate::provision::Layout;
+use crate::proxy;
 use crate::record::{self, Record, RunId};
 use crate::refusal::{OneLine, Refusal};
 use crate::resolve::{self, NetworkMode, Resolved};
@@ -299,7 +300,7 @@ fn render_resolved(resolved: &Resolved, out: &mut impl Write) -> io::Result<()> 
             )?;
         }
     }
-    render_routes(&resolved.routes, out)
+    render_routes(&resolved.routes, resolved.upstream_roots, out)
 }
 
 /// The resolved route table ([spec §14.2]): each route's destination, the minter that makes its
@@ -309,11 +310,23 @@ fn render_resolved(resolved: &Resolved, out: &mut impl Write) -> io::Result<()> 
 /// The line is always written, even with no route, because "no route resolves, and so no proxy
 /// runs" is the answer to a question an operator asks.
 ///
+/// `upstream_roots` is where the broker would verify destinations from ([ADR 0030]). It belongs
+/// here rather than beside the capability set because it is the *broker's* trust basis, and the
+/// broker exists only where a route does — so with no route there is nothing to state.
+///
 /// [spec §14.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#142-playpen-explain
-fn render_routes(routes: &[resolve::ResolvedRoute], out: &mut impl Write) -> io::Result<()> {
+/// [ADR 0030]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0030-the-hosts-own-trust-store-is-what-the-host-says-it-is.md
+fn render_routes(
+    routes: &[resolve::ResolvedRoute],
+    upstream_roots: Option<proxy::Provenance>,
+    out: &mut impl Write,
+) -> io::Result<()> {
     writeln!(out, "routes")?;
     if routes.is_empty() {
         return writeln!(out, "  none, so no proxy runs");
+    }
+    if let Some(provenance) = upstream_roots {
+        writeln!(out, "  upstream roots  {}", render_provenance(provenance))?;
     }
     for route in routes {
         let line = format!(
@@ -338,6 +351,31 @@ fn render_routes(routes: &[resolve::ResolvedRoute], out: &mut impl Write) -> io:
         }
     }
     Ok(())
+}
+
+/// Where the broker's upstream roots came from, as one phrase ([ADR 0030]).
+///
+/// The variables are **named**, not summarised as "the environment": an operator who has to find
+/// out which of the two is set has been told only that something is.
+///
+/// [ADR 0030]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0030-the-hosts-own-trust-store-is-what-the-host-says-it-is.md
+fn render_provenance(provenance: proxy::Provenance) -> String {
+    match provenance {
+        proxy::Provenance::Platform => "the platform store".to_owned(),
+        proxy::Provenance::Environment {
+            ssl_cert_file,
+            ssl_cert_dir,
+        } => {
+            let named: Vec<&str> = [
+                ("SSL_CERT_FILE", ssl_cert_file),
+                ("SSL_CERT_DIR", ssl_cert_dir),
+            ]
+            .into_iter()
+            .filter_map(|(name, set)| set.then_some(name))
+            .collect();
+            format!("the environment ({})", named.join(", "))
+        }
+    }
 }
 
 /// The selection trace, one step a line.

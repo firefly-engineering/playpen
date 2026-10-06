@@ -397,6 +397,19 @@ pub struct Resolved {
     /// [spec §14.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#142-playpen-explain
     #[serde(default)]
     pub routes: Vec<ResolvedRoute>,
+    /// Where the broker's upstream trust store would come from ([ADR 0030], [spec §18]): the
+    /// launching environment, naming which variable, or the platform search.
+    ///
+    /// `None` where no route resolves, because then no broker runs and there is no upstream store
+    /// to name. `explain` launches nothing, so this is what a launch from *this* environment would
+    /// read, by the same reading a launch performs.
+    ///
+    /// Additive, so a form written before this field existed still reads.
+    ///
+    /// [ADR 0030]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0030-the-hosts-own-trust-store-is-what-the-host-says-it-is.md
+    /// [spec §18]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#18-named-residuals
+    #[serde(default)]
+    pub upstream_roots: Option<crate::proxy::Provenance>,
     /// The constructed environment, by name ([spec §9.3]): outward only, since the agent can read
     /// its own `environ`.
     ///
@@ -515,6 +528,7 @@ impl Resolved {
                 from: BUILT_IN.into(),
             },
             routes: Vec::new(),
+            upstream_roots: None,
             env: env
                 .iter()
                 .map(|var| ResolvedVar {
@@ -542,8 +556,13 @@ impl Resolved {
     /// This resolved form with the route table [`routes`] read from the policy. Separate for the
     /// same reason as the argv: the capability set and the environment are what a boundary is,
     /// and the route table is what the broker inside it will serve.
+    ///
+    /// The upstream-roots provenance is set here and only here, because it exists exactly when the
+    /// broker does: a route table decides whether a proxy runs at all, so one place deciding both
+    /// cannot report a trust store for a run that would have no broker to use it.
     #[must_use]
     pub fn with_routes(mut self, routes: Vec<ResolvedRoute>) -> Self {
+        self.upstream_roots = (!routes.is_empty()).then(crate::proxy::Provenance::from_env);
         self.routes = routes;
         self
     }

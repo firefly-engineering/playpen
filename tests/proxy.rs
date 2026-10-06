@@ -87,6 +87,82 @@ fn no_route_means_no_proxy_and_no_proxy_variable() {
     }
 }
 
+/// The run record states where the broker's upstream trust store came from ([ADR 0030],
+/// [spec §14.1], [spec §18]): the supervisor's environment, naming which variable, or the platform
+/// search. It is the launching environment's lever, reachable by no policy field and no flag, which
+/// is what makes it a named residual worth recording.
+///
+/// Measured from the record of a **live launch**, not from a resolved form: the provenance has to be
+/// the one the broker's own load produced, and only a launch performs that load.
+///
+/// `None` with no route, because then no broker exists to have a trust store at all.
+///
+/// [ADR 0030]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0030-the-hosts-own-trust-store-is-what-the-host-says-it-is.md
+/// [spec §14.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#141-the-run-record
+/// [spec §18]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#18-named-residuals
+#[test]
+fn the_record_states_where_the_brokers_upstream_roots_came_from() {
+    let fx = Fixture::new();
+    let routed = with_routes(&fx, one_route());
+
+    // The host this suite runs on may set these itself, so each launch states both rather than
+    // trusting the ambient environment. The bundle the broker builds is the host's roots plus the
+    // session CA, so a store naming nothing usable would refuse — these point at the host's own.
+    let launch = |policy: &std::path::Path, file: Option<String>| -> serde_json::Value {
+        let before = fx.run_ids();
+        let mut command = fx.run_under(policy, &[&os_bin("true")]);
+        match &file {
+            Some(path) => command.env("SSL_CERT_FILE", path),
+            None => command.env_remove("SSL_CERT_FILE"),
+        };
+        command.env_remove("SSL_CERT_DIR");
+        let output = command.output().expect("playpen");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let id = fx
+            .run_ids()
+            .into_iter()
+            .find(|id| !before.contains(id))
+            .expect("a record");
+        fx.record(&id)["upstream_roots"].clone()
+    };
+
+    // Neither variable set: the platform store answered.
+    assert_eq!(launch(&routed, None)["from"], "platform");
+
+    // `SSL_CERT_FILE` set: the environment decided, and the record says which variable. The file
+    // is a bundle a previous launch built, so it holds roots the store will take — the provenance
+    // is about which lever was pulled, but the launch still has to succeed to be recorded.
+    let bundle = fx.root().join("host-roots.pem");
+    {
+        let mut command = fx.run_under(&routed, &[&os_bin("sh"), "-c", "cat \"$SSL_CERT_FILE\""]);
+        let output = command.output().expect("playpen");
+        assert!(output.status.success(), "{output:?}");
+        std::fs::write(&bundle, &output.stdout).expect("a bundle of this host's roots");
+    }
+    let named = launch(&routed, Some(bundle.display().to_string()));
+    assert_eq!(named["from"], "environment");
+    assert_eq!(named["ssl_cert_file"], true);
+    assert_eq!(named["ssl_cert_dir"], false);
+
+    // No route, so no broker: nothing to state, however the environment is set.
+    let unrouted = fx.policy_named(
+        "no-route.json",
+        &json!({
+            "version": 1,
+            "workspaces": {"w": {"roots": [{"path": fx.root(), "mode": "readwrite"}]}},
+            "profiles": {"p": {"workspaces": ["w"], "toolchain": [], "credentials": []}},
+        }),
+    );
+    assert_eq!(
+        launch(&unrouted, Some(bundle.display().to_string())),
+        serde_json::Value::Null
+    );
+}
+
 /// `SSL_CERT_FILE` means the same thing inside the boundary as outside — **the roots this process
 /// trusts** — so it names a bundle of the host's own roots *and* the session CA. A Rust client on
 /// `rustls-native-certs` reads the variable as a *replacement* and consults nothing else once it is
