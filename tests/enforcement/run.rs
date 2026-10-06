@@ -1276,11 +1276,19 @@ fn descendant_denied(row: &Row) -> Verdict {
 #[cfg(target_os = "macos")]
 const LOG_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How far back the outside half looks for the decoy's denial, as `log show --last` takes it. Its
+/// own reach, never the window `explain` printed: a window cut too narrow is the command's defect
+/// and must fail the row, where a window shared with the outside half reads as a host that never
+/// logged the denial ([#142](https://github.com/firefly-engineering/playpen/issues/142)). The
+/// decoy's path is unique to this run, so reaching back further admits nothing else.
+#[cfg(target_os = "macos")]
+const LOG_LOOKBACK: &str = "5m";
+
 /// A confined shell forks the probe, which is denied a read of a decoy outside every grant. The
-/// outside half is the platform's log showing that denial at all, found by the decoy's path; the
-/// inside half is the command `explain --run` prints returning it, from a process that is not the
-/// child ([#124](https://github.com/firefly-engineering/playpen/issues/124)). An error is a
-/// fixture that could not be made, before either half could be observed.
+/// outside half is the platform's log showing that denial at all, found by the decoy's path over
+/// [`LOG_LOOKBACK`]; the inside half is the command `explain --run` prints returning it, from a
+/// process that is not the child ([#124](https://github.com/firefly-engineering/playpen/issues/124)).
+/// An error is a fixture that could not be made, before either half could be observed.
 #[cfg(target_os = "macos")]
 fn pull_denials() -> Result<(Seen, Seen), String> {
     let failed = |detail: String| Seen::Failed {
@@ -1332,16 +1340,14 @@ fn pull_denials() -> Result<(Seen, Seen), String> {
         return Err(format!("no denials command or pid: {replay}"));
     };
 
-    // Outside: the same window, found by the decoy's path rather than by anything the run set.
-    let (window, _) = command
-        .split_once(" --predicate ")
-        .ok_or_else(|| format!("no predicate in {command}"))?;
-    let sandbox = |range: &str, needle: &str| {
+    // Outside: found by the decoy's path over the harness's own reach, nothing the run set.
+    let sandbox = |needle: &str| {
         format!(
-            "{range} --predicate 'sender == \"Sandbox\" AND eventMessage CONTAINS \"{needle}\"'"
+            "/usr/bin/log show --last {LOG_LOOKBACK} --predicate 'sender == \"Sandbox\" AND \
+             eventMessage CONTAINS \"{needle}\"'"
         )
     };
-    let by_path = sandbox(window, &path);
+    let by_path = sandbox(&path);
     let deadline = std::time::Instant::now() + LOG_DEADLINE;
     loop {
         // A `log show` that fails is polled again, not taken as the answer: the deadline decides.
@@ -1351,9 +1357,9 @@ fn pull_denials() -> Result<(Seen, Seen), String> {
         }
         if std::time::Instant::now() > deadline {
             // What the probe itself reported tells a read that was never denied from a denial
-            // never logged; the decoy's name over the last minutes, rather than by its path in the
-            // run's window, tells a denial logged under another path, operation or time from none.
-            let by_name = sandbox("/usr/bin/log show --last 5m", &name);
+            // never logged; the decoy's name alone tells one logged under another path or
+            // operation from none.
+            let by_name = sandbox(&name);
             let never = format!(
                 "the log never showed `{denied}` within {LOG_DEADLINE:?}; the probe reported \
                  {:?}; `{by_path}` last showed {shown:?}; `{by_name}` shows {:?}",

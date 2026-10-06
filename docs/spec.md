@@ -1316,7 +1316,11 @@ in `--json`, beside the record's own fields):
 
 - **macOS**: `/usr/bin/log show --start '<launched>' --end '<ended>' --predicate 'sender ==
   "Sandbox" AND eventMessage CONTAINS "playpen-run-<run id>"'`, the window widened to whole
-  seconds and given in UTC, and `--end` omitted for a run with no end. The backend attaches the
+  seconds and by five more either side, and given in UTC, and `--end` omitted for a run with no
+  end. The margin is for the unified log's own clock, which stamps a denial from a different time
+  base from the wall clock the record reads, and on a CI runner logged a descendant's denial
+  before the record's launch time
+  ([#142](https://github.com/firefly-engineering/playpen/issues/142)). The backend attaches the
   run's **denial tag**, `playpen-run-<run id>`, to the profile's default deny, and the kernel logs
   it with every denial in the confined tree, whatever the denied process's pid
   ([#124](https://github.com/firefly-engineering/playpen/issues/124)); the record holds the tag
