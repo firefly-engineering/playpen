@@ -240,9 +240,9 @@ pub struct Record {
     /// [spec §14.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#145---trace-denials
     #[serde(default)]
     pub denial_trace: Option<PathBuf>,
-    /// Why this run's trace is **unverified**: the self-test that brackets the run failed on its
-    /// second pass, so the trace is presented as incomplete rather than as complete
-    /// ([spec §14.5]). `None` on a run that was not traced, and on one whose trace was vouched
+    /// Why this run's trace is **unverified**: on Linux the self-test that brackets the run failed
+    /// on its second pass, and on macOS the log stream did not last the run, so the trace is
+    /// presented as incomplete rather than as complete ([spec §14.5]). `None` on a run that was not traced, and on one whose trace was vouched
     /// for.
     #[serde(default)]
     pub denial_trace_unverified: Option<String>,

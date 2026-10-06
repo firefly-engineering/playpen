@@ -1472,7 +1472,7 @@ pub fn as_playpen_tracing(
         argv,
         host,
         playpen::mechanism::Mechanism::probe,
-        move |file, workspace| playpen::trace::open_with(facts(rung), file, workspace),
+        move |file, workspace, _| playpen::trace::open_with(facts(rung), file, workspace),
     )
 }
 
@@ -1545,7 +1545,7 @@ pub fn as_playpen_offering_nothing(
         host,
         || Mechanism::new("a mechanism offering nothing", &[]),
         // This row refuses at step 7's first check, so the trace's seam is never reached.
-        |_, _| panic!("no flag asked for a trace"),
+        |_, _, _| panic!("no flag asked for a trace"),
     )
 }
 

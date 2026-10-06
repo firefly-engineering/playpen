@@ -105,7 +105,7 @@ pub fn main(
     args: impl IntoIterator<Item = OsString>,
     host: Host,
     probe: impl FnOnce() -> Mechanism,
-    open_trace: impl FnOnce(&Path, &Path) -> Result<trace::Tracing, Refusal>,
+    open_trace: impl FnOnce(&Path, &Path, &RunId) -> Result<trace::Tracing, Refusal>,
 ) -> i32 {
     // Parsing has no effect, so it can come first. `explain` and `check` launch nothing
     // ([spec §14.2], [spec §10.5]), so they open no record and push no run out of the ring, and nor
@@ -175,7 +175,7 @@ fn invoke(
     host: Host,
     record: &mut RunRecord,
     probe: impl FnOnce() -> Mechanism,
-    open_trace: impl FnOnce(&Path, &Path) -> Result<trace::Tracing, Refusal>,
+    open_trace: impl FnOnce(&Path, &Path, &RunId) -> Result<trace::Tracing, Refusal>,
 ) -> Result<i32, Refusal> {
     // `run` resolves no context of its own, so `PLAYPEN_PROFILE` is not one of its inputs.
     let Host {
@@ -243,7 +243,7 @@ fn shim_main(
     argv: &[OsString],
     host: Host,
     probe: impl FnOnce() -> Mechanism,
-    open_trace: impl FnOnce(&Path, &Path) -> Result<trace::Tracing, Refusal>,
+    open_trace: impl FnOnce(&Path, &Path, &RunId) -> Result<trace::Tracing, Refusal>,
 ) -> i32 {
     // Re-entry comes first, before anything is opened or recorded: inside an existing boundary the
     // shim `exec`s the target and never re-sandboxes, so there is no run of its own to record.
@@ -282,7 +282,7 @@ fn shim_invoke(
     host: Host,
     record: &mut RunRecord,
     probe: impl FnOnce() -> Mechanism,
-    open_trace: impl FnOnce(&Path, &Path) -> Result<trace::Tracing, Refusal>,
+    open_trace: impl FnOnce(&Path, &Path, &RunId) -> Result<trace::Tracing, Refusal>,
 ) -> Result<i32, Refusal> {
     let Host {
         cwd,
@@ -546,7 +546,7 @@ fn run(
     record: &mut RunRecord,
     probe: impl FnOnce() -> Mechanism,
     floor_self_test: impl FnOnce() -> Result<(), Refusal>,
-    open_trace: impl FnOnce(&Path, &Path) -> Result<trace::Tracing, Refusal>,
+    open_trace: impl FnOnce(&Path, &Path, &RunId) -> Result<trace::Tracing, Refusal>,
 ) -> Result<i32, Refusal> {
     let Context {
         explicit,
@@ -631,7 +631,7 @@ fn run(
     let mut tracing = match &traced_into {
         None => None,
         Some(file) => {
-            let tracing = open_trace(file, state.ok_or_else(record::no_state)?)?;
+            let tracing = open_trace(file, state.ok_or_else(record::no_state)?, record.id())?;
             record.tracing(tracing.file());
             Some(tracing)
         }
@@ -961,7 +961,7 @@ mod tests {
             &mut record,
             probe,
             floor_self_test,
-            |_, _| panic!("no flag asked for a trace"),
+            |_, _, _| panic!("no flag asked for a trace"),
         )
         .expect_err("the launch refuses");
         (refusal, record.record().capabilities.is_some())

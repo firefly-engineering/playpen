@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::code::Code;
+use crate::record::RunId;
 use crate::refusal::Refusal;
 
 /// The Landlock ABI that first logs a denial at all ([spec §14.5]).
@@ -153,7 +154,7 @@ impl Facts {
 /// `workspace` is a directory playpen owns, where the self-test can make the file it is denied.
 ///
 /// This is the one [`crate::launch`] calls on every launch.
-pub fn open(file: &Path, workspace: &Path) -> Result<Tracing, Refusal> {
+pub fn open(file: &Path, workspace: &Path, _run: &RunId) -> Result<Tracing, Refusal> {
     open_with(Facts::probed(), file, workspace)
 }
 
@@ -1085,7 +1086,7 @@ mod tests {
     #[test]
     fn this_host_answers_the_ladder() {
         let dir = tempdir();
-        match open(&dir.join("trace"), &dir) {
+        match open(&dir.join("trace"), &dir, &RunId::allocate().expect("id")) {
             Ok(tracing) => assert!(tracing.file().exists()),
             Err(refusal) => assert!(
                 matches!(
