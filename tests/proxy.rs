@@ -20,6 +20,22 @@ use common::{Fixture, os_bin};
 /// [spec §9.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#92-set-entries
 const PROXY_NAMES: [&str; 4] = ["HTTPS_PROXY", "NO_PROXY", "no_proxy", "NODE_USE_ENV_PROXY"];
 
+/// The certificate pair, which shares the proxy's condition ([spec §9.2]): two disjoint TLS stacks
+/// live inside one boundary, and only one of the two variables is additive.
+///
+/// [spec §9.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#92-set-entries
+const CA_NAMES: [&str; 2] = ["SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS"];
+
+/// One credential route on `api.anthropic.com`, minted by the fixture's own minter.
+fn one_route() -> serde_json::Value {
+    json!([{
+        "host": "api.anthropic.com",
+        "path_prefix": "/",
+        "minter": "m",
+        "delivery": {"env": "CLAUDE_CODE_OAUTH_TOKEN"},
+    }])
+}
+
 /// A policy whose profile `p` has `credentials`, minted by a minter that answers at once.
 fn with_routes(fx: &Fixture, credentials: serde_json::Value) -> PathBuf {
     fx.policy_named(
@@ -66,9 +82,77 @@ fn no_route_means_no_proxy_and_no_proxy_variable() {
     let fx = Fixture::new();
     let policy = with_routes(&fx, json!([]));
     let env = environ(&fx, &policy);
-    for name in PROXY_NAMES {
-        assert!(!env.contains_key(name), "{name} is set: {env:?}");
+    for name in PROXY_NAMES.iter().chain(&CA_NAMES) {
+        assert!(!env.contains_key(*name), "{name} is set: {env:?}");
     }
+}
+
+/// `SSL_CERT_FILE` means the same thing inside the boundary as outside — **the roots this process
+/// trusts** — so it names a bundle of the host's own roots *and* the session CA. A Rust client on
+/// `rustls-native-certs` reads the variable as a *replacement* and consults nothing else once it is
+/// set, so the bare session CA there would leave it unable to verify any host playpen did not route
+/// ([#140]).
+///
+/// `NODE_EXTRA_CA_CERTS` keeps naming the bare certificate, because it is *additive*: pointed at
+/// the bundle it would have Node re-add every root it already has.
+///
+/// Both files are the run scratch's, and go with it.
+///
+/// [#140]: https://github.com/firefly-engineering/playpen/issues/140
+#[test]
+fn the_child_is_pointed_at_a_bundle_and_at_the_bare_session_ca() {
+    let fx = Fixture::new();
+    let policy = with_routes(&fx, one_route());
+    // One launch: what the two variables name, and a copy of each file where this can read it.
+    let output = fx
+        .run_under(
+            &policy,
+            &[
+                &os_bin("sh"),
+                "-c",
+                "set -e\n\
+                 echo \"$TMPDIR\"\n\
+                 echo \"$SSL_CERT_FILE\"\n\
+                 echo \"$NODE_EXTRA_CA_CERTS\"\n\
+                 cp \"$SSL_CERT_FILE\" bundle.pem\n\
+                 cp \"$NODE_EXTRA_CA_CERTS\" ca.pem\n",
+            ],
+        )
+        .output()
+        .expect("playpen");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let named: Vec<PathBuf> = String::from_utf8(output.stdout)
+        .expect("utf-8")
+        .lines()
+        .map(PathBuf::from)
+        .collect();
+    let [scratch, replacing, additive] = <[PathBuf; 3]>::try_from(named).expect("three paths");
+    // Two different files, both the run's own.
+    assert_ne!(replacing, additive);
+    assert_eq!(replacing.parent(), Some(scratch.as_path()));
+    assert_eq!(additive.parent(), Some(scratch.as_path()));
+
+    let read = |name: &str| std::fs::read_to_string(fx.root().join(name)).expect(name);
+    let (bundle, ca) = (read("bundle.pem"), read("ca.pem"));
+    let certificates = |pem: &str| pem.matches("BEGIN CERTIFICATE").count();
+    // The bare certificate is one certificate, and never the key beside it.
+    assert_eq!(certificates(&ca), 1, "{ca}");
+    assert!(!ca.contains("PRIVATE KEY"), "the CA's key was written");
+    // The bundle is the host's roots and then that certificate: more than the CA alone, and the CA
+    // is where it ends.
+    assert!(
+        certificates(&bundle) > certificates(&ca),
+        "the bundle holds no host root: {} certificates",
+        certificates(&bundle)
+    );
+    assert!(bundle.ends_with(&ca), "the session CA is not in the bundle");
+    assert!(!bundle.contains("PRIVATE KEY"), "a key is in the bundle");
+    // Both are the scratch's, and the scratch goes at teardown.
+    assert!(!scratch.exists(), "the run scratch outlived the run");
 }
 
 /// With a route, every client is pointed at the proxy — `HTTPS_PROXY` is global, because
@@ -76,15 +160,7 @@ fn no_route_means_no_proxy_and_no_proxy_variable() {
 #[test]
 fn a_route_points_every_client_at_the_proxy() {
     let fx = Fixture::new();
-    let policy = with_routes(
-        &fx,
-        json!([{
-            "host": "api.anthropic.com",
-            "path_prefix": "/",
-            "minter": "m",
-            "delivery": {"env": "CLAUDE_CODE_OAUTH_TOKEN"},
-        }]),
-    );
+    let policy = with_routes(&fx, one_route());
     let env = environ(&fx, &policy);
     for name in PROXY_NAMES {
         assert!(env.contains_key(name), "{name} is not set: {env:?}");
@@ -155,15 +231,7 @@ fn a_non_routed_host_gets_an_opaque_tunnel() {
     });
 
     let fx = Fixture::new();
-    let policy = with_routes(
-        &fx,
-        json!([{
-            "host": "api.anthropic.com",
-            "path_prefix": "/",
-            "minter": "m",
-            "delivery": {"env": "CLAUDE_CODE_OAUTH_TOKEN"},
-        }]),
-    );
+    let policy = with_routes(&fx, one_route());
     // The child prints where it was pointed, then waits, so the proxy is up while this runs.
     let live = Live::start(&fx, &policy, r#"echo "$HTTPS_PROXY"; exec sleep 30"#);
     let proxy = live
@@ -198,15 +266,7 @@ fn a_non_routed_host_gets_an_opaque_tunnel() {
 #[test]
 fn the_proxy_stops_with_the_run() {
     let fx = Fixture::new();
-    let policy = with_routes(
-        &fx,
-        json!([{
-            "host": "api.anthropic.com",
-            "path_prefix": "/",
-            "minter": "m",
-            "delivery": {"env": "CLAUDE_CODE_OAUTH_TOKEN"},
-        }]),
-    );
+    let policy = with_routes(&fx, one_route());
     let proxy = {
         let live = Live::start(&fx, &policy, r#"echo "$HTTPS_PROXY"; exec sleep 30"#);
         let proxy = live

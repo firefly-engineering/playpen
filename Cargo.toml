@@ -36,6 +36,10 @@ rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "
 # Upstream verification is the host's own trust store: playpen intercepts the agent's TLS and must
 # not weaken its own.
 rustls-native-certs = "0.8"
+# The child's `SSL_CERT_FILE` names a bundle of the host's roots and the session CA, and a root
+# comes out of the platform store as DER, so building it means encoding rather than copying. Only
+# the encoder is used; already in the tree behind `rcgen`, so this costs no crate.
+pem = "4"
 # A real incremental HTTP/1.1 parser. The proxy reads a request head to find the header the phantom
 # came in; a pattern over bytes would be a parser with corner cases instead of a parser.
 httparse = "1"

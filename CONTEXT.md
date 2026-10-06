@@ -76,7 +76,18 @@ _Avoid_: coarse root (for this shape), keg fragment.
 The single ephemeral writable directory playpen provisions per run and exposes as `TMPDIR`. A
 property of the run, not of a workspace, so it is not a **provisioned area** — nothing outside
 the run can refer to it. The host's own temp is unreachable. It also holds what playpen writes
-for the run and only for the run: the **manifest** and the proxy's ephemeral CA.
+for the run and only for the run: the **manifest**, the proxy's ephemeral CA, and the **trust
+bundle** derived from the host's own store.
+
+## Trust bundle
+
+The roots a confined process trusts, written into the **run scratch**: the host's own roots
+followed by the proxy's ephemeral CA certificate. Derived from the host's store rather than
+authored, and built from the same read the **proxy** verifies destinations against, so what the
+agent trusts cannot drift from what the supervisor does. It exists because the two names a **set
+entry** writes for TLS roots do not mean the same thing — one replaces a client's store and one
+adds to it — so the replacing one must name every root, not just the session CA. Only certificates
+go in; the CA's private key is still written nowhere.
 
 ## Provisioned area
 
@@ -266,8 +277,11 @@ An environment variable playpen *writes* rather than passes. Playpen's own are m
 **refusal**: `TMPDIR`, `PLAYPEN_MANIFEST` and `PLAYPEN_ACTIVE` unconditionally; and, wherever a
 **proxy** exists — iff a **credential route** resolves — `HTTPS_PROXY`, `NO_PROXY` (both
 spellings), `NODE_USE_ENV_PROXY`, and the CA pair `SSL_CERT_FILE` + `NODE_EXTRA_CA_CERTS`, a pair
-because two disjoint TLS stacks live inside one boundary. All are reserved names in every run,
-whether written or not, as are the **kind**'s own entries.
+because two disjoint TLS stacks live inside one boundary. The pair names *two* files, because only
+one of the two is additive: `NODE_EXTRA_CA_CERTS` adds the session CA to roots the client already
+has, so it names the certificate alone, while `SSL_CERT_FILE` replaces them and so names the
+**trust bundle**. All are reserved names in every run, whether written or not, as are the
+**kind**'s own entries.
 
 **Policy** may author set entries too, with literal values, and they win over floor pass-through.
 Attached to the **profile**, never a workspace, since merging per-workspace values would silently

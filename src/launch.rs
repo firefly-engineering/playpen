@@ -618,13 +618,22 @@ fn run(
         true => (None, None),
         false => {
             let bound = proxy::bind()?;
+            // Read once, and used twice: the broker verifies destinations against these, and the
+            // bundle the child's `SSL_CERT_FILE` names holds them beside the session CA, so what
+            // the child trusts cannot drift from what the supervisor does ([#140]).
+            //
+            // [#140]: https://github.com/firefly-engineering/playpen/issues/140
+            let roots = proxy::Roots::host()?;
             let ca = proxy::ca()?;
             let certificate = layout.scratch().join(proxy::CA_FILE);
             ca.write(&certificate)?;
+            let bundle = layout.scratch().join(proxy::BUNDLE_FILE);
+            roots.bundle(&ca, &bundle)?;
             let phantom = proxy::Phantom::random()?;
             let set = proxy::Set {
                 addr: bound.addr(),
                 ca: certificate,
+                bundle,
                 phantom: phantom.clone(),
                 deliveries: credentials
                     .iter()
@@ -632,7 +641,7 @@ fn run(
                     .collect(),
             };
             let routes = credentials.iter().map(minter::Minting::route).collect();
-            let serving = std::sync::Arc::new(proxy::Broker::new(ca, phantom, routes)?);
+            let serving = std::sync::Arc::new(proxy::Broker::new(ca, phantom, routes, &roots)?);
             (Some((bound, serving)), Some(set))
         }
     };

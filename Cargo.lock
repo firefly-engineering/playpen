@@ -1532,6 +1532,7 @@ dependencies = [
  "libc",
  "mach2",
  "nono",
+ "pem 4.0.0",
  "rcgen",
  "rustls",
  "rustls-native-certs",

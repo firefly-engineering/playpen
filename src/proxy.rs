@@ -60,6 +60,12 @@ pub const FROM: &str = "broker";
 /// the key beside it that never leaves the supervisor.
 pub const CA_FILE: &str = "broker-ca.pem";
 
+/// What the trust bundle is called in the run scratch, beside [`CA_FILE`]: the host's own roots
+/// followed by the session CA's certificate. Derived from the host's store rather than authored,
+/// and public for the same reason the certificate is — every certificate in it is already public,
+/// and no key is.
+pub const BUNDLE_FILE: &str = "broker-roots.pem";
+
 /// The one protocol the broker speaks. Offered on both legs, so a client that would have chosen
 /// HTTP/2 chooses this instead rather than speaking something the broker would mangle.
 const ALPN: &[u8] = b"http/1.1";
@@ -88,8 +94,11 @@ pub const NO_PROXY: &str = "localhost,127.0.0.1,::1";
 pub struct Set {
     /// Where the proxy is listening, which `HTTPS_PROXY` is rendered from.
     pub addr: SocketAddr,
-    /// The session CA's certificate in the run scratch, which both certificate variables name.
+    /// The session CA's certificate in the run scratch, which `NODE_EXTRA_CA_CERTS` names.
     pub ca: PathBuf,
+    /// The trust bundle in the run scratch — the host's own roots and the session CA — which
+    /// `SSL_CERT_FILE` names.
+    pub bundle: PathBuf,
     /// The session phantom, which every route's delivery variable carries. **Never a real
     /// secret**: there is no mode in which one enters the sandbox's environment ([spec §7.3]).
     ///
@@ -114,10 +123,28 @@ impl Set {
             // [ADR 0012]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0012-the-environment-is-constructed-and-exactly-one-author-writes-each-name.md
             ("NODE_USE_ENV_PROXY".to_owned(), "1".to_owned()),
         ];
-        // Both names, because `git` and `curl` read one and Bun reads the other ([ADR 0012]).
-        let ca = self.ca.to_string_lossy().into_owned();
-        entries.push(("SSL_CERT_FILE".to_owned(), ca.clone()));
-        entries.push(("NODE_EXTRA_CA_CERTS".to_owned(), ca));
+        // Both names, because `git` and `curl` read one and Bun reads the other ([ADR 0012]) —
+        // and they name **two different files**, because only one of them is additive.
+        //
+        // `SSL_CERT_FILE` *replaces* the default CA file wherever it is read, and a Rust client on
+        // `rustls-native-certs` consults nothing else once it is set, so the bare session CA there
+        // would leave such a client unable to verify any host playpen did not route. It names the
+        // bundle, which means inside the boundary what it means outside: the roots this process
+        // trusts.
+        //
+        // `NODE_EXTRA_CA_CERTS` is *extra* — the session CA joins Node's own bundled roots — so it
+        // names the bare certificate. Pointed at the bundle it would have Node re-add every host
+        // root it already has ([spec §9.2]).
+        //
+        // [spec §9.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#92-set-entries
+        entries.push((
+            "SSL_CERT_FILE".to_owned(),
+            self.bundle.to_string_lossy().into_owned(),
+        ));
+        entries.push((
+            "NODE_EXTRA_CA_CERTS".to_owned(),
+            self.ca.to_string_lossy().into_owned(),
+        ));
         for delivery in &self.deliveries {
             entries.push((delivery.clone(), self.phantom.as_str().to_owned()));
         }
@@ -187,6 +214,90 @@ pub struct Ca {
     pem: String,
     certificate: CertificateDer<'static>,
     leaves: Mutex<HashMap<String, Arc<Leaf>>>,
+}
+
+/// The roots the run trusts upstream: **what the host says it trusts** ([ADR 0030]).
+///
+/// Read once per launch and used twice, so the two can never disagree: the broker verifies every
+/// destination against them, and the bundle the child's `SSL_CERT_FILE` names is built from them.
+/// A run whose supervisor was pointed at a different store gets a child consistent with what the
+/// broker itself trusts.
+///
+/// [ADR 0030]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0030-the-hosts-own-trust-store-is-what-the-host-says-it-is.md
+pub struct Roots(Vec<CertificateDer<'static>>);
+
+impl Roots {
+    /// The host's own, read the way every Unix TLS client reads them: `SSL_CERT_FILE` or
+    /// `SSL_CERT_DIR` in the *supervisor's* environment **replaces** the platform search, and the
+    /// platform store answers where neither is set. That lever is the launching environment's, and
+    /// a named residual ([ADR 0030]).
+    ///
+    /// A host with no usable roots is `refusal.proxy.ca`: there would be nothing to verify a
+    /// destination against, and the alternative is trusting whatever answers.
+    ///
+    /// [ADR 0030]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0030-the-hosts-own-trust-store-is-what-the-host-says-it-is.md
+    pub fn host() -> Result<Self, Refusal> {
+        let native = rustls_native_certs::load_native_certs();
+        if native.certs.is_empty() {
+            return Err(Refusal::new(
+                Code::ProxyCa,
+                format!(
+                    "the broker cannot verify destinations: this host offers no trusted roots \
+                     ({} errors loading them)",
+                    native.errors.len()
+                ),
+            ));
+        }
+        Ok(Self(native.certs))
+    }
+
+    /// These roots as a store for upstream verification. A certificate the store will not take is
+    /// dropped rather than refused: the host named it, and one root it cannot parse is not a reason
+    /// to decline a run the rest can verify.
+    fn store(&self) -> rustls::RootCertStore {
+        let mut roots = rustls::RootCertStore::empty();
+        for certificate in &self.0 {
+            let _ = roots.add(certificate.clone());
+        }
+        roots
+    }
+
+    /// Roots of a test's own naming, for one that stands up a destination with a root of its own.
+    /// Never a launch's: [`Roots::host`] is the only thing a launch builds one from.
+    #[cfg(test)]
+    fn of(certificates: Vec<CertificateDer<'static>>) -> Self {
+        Self(certificates)
+    }
+
+    /// Write the bundle `SSL_CERT_FILE` names: these roots, then `ca`'s certificate.
+    ///
+    /// The host's half is **encoded**, not copied. A root comes out of the platform store as DER —
+    /// on macOS there is no PEM file to concatenate at all — so the bundle has to be built on both
+    /// platforms or the variable would mean two different things again.
+    ///
+    /// Only certificates go in. The session CA's private key is still written nowhere
+    /// ([spec §6.2]).
+    ///
+    /// [spec §6.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#62-the-broker
+    pub fn bundle(&self, ca: &Ca, at: &Path) -> Result<(), Refusal> {
+        let mut bundle = String::new();
+        for certificate in &self.0 {
+            bundle.push_str(&pem::encode_config(
+                &pem::Pem::new("CERTIFICATE", certificate.as_ref()),
+                pem::EncodeConfig::new().set_line_ending(pem::LineEnding::LF),
+            ));
+        }
+        bundle.push_str(&ca.pem);
+        std::fs::write(at, &bundle).map_err(|e| {
+            Refusal::new(
+                Code::ProxyCa,
+                format!(
+                    "the broker cannot write its trust bundle {}: {e}",
+                    at.display()
+                ),
+            )
+        })
+    }
 }
 
 /// One host's leaf: the chain a client is served, and the key that proves it.
@@ -389,42 +500,30 @@ pub struct Broker {
 }
 
 impl Broker {
-    /// The broker of a run with `routes`, delivering `phantom`, intercepting under `ca`.
+    /// The broker of a run with `routes`, delivering `phantom`, intercepting under `ca`, verifying
+    /// every destination against `roots`.
     ///
     /// Upstream verification is the host's own trust store: playpen intercepts the agent's TLS and
-    /// must not weaken its own. "The host's own" is what the host names, read environment-first:
-    /// `SSL_CERT_FILE` or `SSL_CERT_DIR` in the supervisor's environment, the names openssl, curl
-    /// and git read too, **replaces** the platform search outright. That lever is the launching
-    /// environment's, and a named residual ([ADR 0030]). A host with no usable roots is
-    /// `refusal.proxy.ca` — there would be nothing to verify a destination against, and the
-    /// alternative is trusting whatever answers.
+    /// must not weaken its own. [`Roots::host`] is the only thing that makes one, and what "the
+    /// host's own" means is stated there. The roots are handed in rather than loaded here because
+    /// the bundle the child is pointed at is built from the same read ([#140]).
     ///
-    /// [ADR 0030]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0030-the-hosts-own-trust-store-is-what-the-host-says-it-is.md
-    pub fn new(ca: Ca, phantom: Phantom, routes: Vec<Route>) -> Result<Self, Refusal> {
-        let mut roots = rustls::RootCertStore::empty();
-        let native = rustls_native_certs::load_native_certs();
-        for certificate in native.certs {
-            let _ = roots.add(certificate);
-        }
-        if roots.is_empty() {
-            return Err(Refusal::new(
-                Code::ProxyCa,
-                format!(
-                    "the broker cannot verify destinations: this host offers no trusted roots \
-                     ({} errors loading them)",
-                    native.errors.len()
-                ),
-            ));
-        }
-        Self::trusting(ca, phantom, routes, roots)
+    /// [#140]: https://github.com/firefly-engineering/playpen/issues/140
+    pub fn new(
+        ca: Ca,
+        phantom: Phantom,
+        routes: Vec<Route>,
+        roots: &Roots,
+    ) -> Result<Self, Refusal> {
+        Self::trusting(ca, phantom, routes, roots.store())
     }
 
-    /// As [`Broker::new`], against `roots` rather than the host's own.
+    /// As [`Broker::new`], against a store built here rather than from [`Roots`].
     ///
     /// A seam, so a test can stand up a destination of its own and show that a request reaches it
     /// with the phantom stripped and the secret injected. Every launch uses [`Broker::new`]: there
     /// is no policy field and no flag that reaches this. The launching environment can still name
-    /// the store [`Broker::new`] reads, which is the host answering, not the policy.
+    /// the store [`Roots::host`] reads, which is the host answering, not the policy.
     pub fn trusting(
         ca: Ca,
         phantom: Phantom,
@@ -1097,11 +1196,13 @@ fn splice(client: TcpStream, upstream: TcpStream) {
 mod tests {
     use super::*;
 
-    /// A broker with `routes`, its own session CA and its own phantom.
+    /// A broker with `routes`, its own session CA and its own phantom, against the host's roots as
+    /// a launch has them.
     fn brokering(routes: Vec<Route>) -> Arc<Broker> {
         let ca = ca().expect("a session CA");
         let phantom = Phantom::random().expect("a phantom");
-        Arc::new(Broker::new(ca, phantom, routes).expect("a broker"))
+        let roots = Roots::host().expect("the host's roots");
+        Arc::new(Broker::new(ca, phantom, routes, &roots).expect("a broker"))
     }
 
     /// A broker with no route at all: every host gets an opaque tunnel.
@@ -1183,6 +1284,149 @@ mod tests {
             let _ = tls.flush();
         });
         (addr, root.der().clone(), seen)
+    }
+
+    /// A self-signed root and the leaf for one host it issued: what a root a client has to trust
+    /// looks like, and what the destination behind it serves.
+    struct Issued {
+        root: CertificateDer<'static>,
+        chain: Vec<CertificateDer<'static>>,
+        key: Vec<u8>,
+    }
+
+    /// A root of its own, and the leaf for `host` it issues.
+    fn issued(host: &str) -> Issued {
+        let root_key = rcgen::KeyPair::generate().expect("a root key");
+        let mut root_params = rcgen::CertificateParams::new(Vec::new()).expect("root params");
+        root_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Constrained(0));
+        let root = root_params.self_signed(&root_key).expect("a root");
+        let leaf_key = rcgen::KeyPair::generate().expect("a leaf key");
+        let leaf = rcgen::CertificateParams::new(vec![host.to_owned()])
+            .expect("leaf params")
+            .signed_by(
+                &leaf_key,
+                &rcgen::Issuer::from_params(&root_params, &root_key),
+            )
+            .expect("a leaf");
+        Issued {
+            root: root.der().clone(),
+            chain: vec![leaf.der().clone(), root.der().clone()],
+            key: leaf_key.serialize_der(),
+        }
+    }
+
+    /// A TLS listener on loopback serving `chain` proved by `key`, which answers one request and
+    /// closes. Returns where it is listening.
+    fn serving_tls(chain: Vec<CertificateDer<'static>>, key: Vec<u8>) -> SocketAddr {
+        let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(provider()))
+            .with_safe_default_protocol_versions()
+            .expect("versions")
+            .with_no_client_auth()
+            .with_single_cert(chain, PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key)))
+            .expect("a server certificate");
+        config.alpn_protocols = vec![ALPN.to_vec()];
+        let listener = TcpListener::bind((INTERFACE, 0)).expect("a listener");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            let Ok((socket, _)) = listener.accept() else {
+                return;
+            };
+            let session = rustls::ServerConnection::new(Arc::new(config)).expect("a session");
+            let mut tls = rustls::StreamOwned::new(session, socket);
+            let _ = read_head(&mut tls);
+            let _ = tls
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+            let _ = tls.flush();
+        });
+        addr
+    }
+
+    /// Whether a client trusting **only** what the PEM `bundle` holds can verify `addr` as
+    /// `localhost`: one client config, built the way a tool that reads `SSL_CERT_FILE` as a
+    /// replacement builds it.
+    fn verified_by(bundle: &str, addr: SocketAddr) -> Result<(), String> {
+        let mut roots = rustls::RootCertStore::empty();
+        for certificate in pem::parse_many(bundle).expect("the bundle is PEM") {
+            assert_eq!(certificate.tag(), "CERTIFICATE", "the bundle holds a key");
+            roots
+                .add(CertificateDer::from(certificate.contents().to_vec()))
+                .expect("a root the store takes");
+        }
+        let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(provider()))
+            .with_safe_default_protocol_versions()
+            .expect("versions")
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        config.alpn_protocols = vec![ALPN.to_vec()];
+        let socket = TcpStream::connect(addr).map_err(|e| format!("connect: {e}"))?;
+        let session = rustls::ClientConnection::new(
+            Arc::new(config),
+            rustls::pki_types::ServerName::try_from("localhost").expect("a name"),
+        )
+        .map_err(|e| format!("a session: {e}"))?;
+        let mut tls = rustls::StreamOwned::new(session, socket);
+        tls.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .map_err(|e| format!("the handshake: {e}"))?;
+        tls.flush().map_err(|e| format!("flush: {e}"))?;
+        let mut answer = Vec::new();
+        let _ = tls.read_to_end(&mut answer);
+        match String::from_utf8_lossy(&answer).starts_with("HTTP/1.1 200 OK") {
+            true => Ok(()),
+            false => Err(format!("answered {:?}", String::from_utf8_lossy(&answer))),
+        }
+    }
+
+    /// `SSL_CERT_FILE` means the same thing inside the boundary as outside — **the roots this
+    /// process trusts** — so it names a bundle of the host's own roots *and* the session CA. A
+    /// client that reads the variable as a replacement, which `rustls-native-certs` does, can then
+    /// verify a routed host against the session CA and a non-routed one against a host root
+    /// ([#140]).
+    ///
+    /// [#140]: https://github.com/firefly-engineering/playpen/issues/140
+    #[test]
+    fn the_bundle_verifies_both_a_session_leaf_and_a_host_root() {
+        let dir = tempfile::TempDir::new().expect("dir");
+        // A host root, standing for the platform store's, with a destination it signed: the
+        // non-routed host an opaque tunnel reaches.
+        let host = issued("localhost");
+        let roots = Roots::of(vec![host.root.clone()]);
+        let session = ca().expect("a session CA");
+        let at = dir.path().join(BUNDLE_FILE);
+        roots.bundle(&session, &at).expect("the bundle");
+        let bundle = std::fs::read_to_string(&at).expect("the bundle");
+
+        // Every certificate and no key, the host's roots first and the session CA last.
+        let held = pem::parse_many(&bundle).expect("PEM");
+        assert_eq!(held.len(), 2, "the host's root and the session CA");
+        assert_eq!(held[0].contents(), host.root.as_ref());
+        assert_eq!(held[1].contents(), session.certificate.as_ref());
+        assert!(!bundle.contains("PRIVATE KEY"), "a key is in the bundle");
+
+        // A routed host, as the proxy serves it: a leaf the session CA issued.
+        let leaf = session.leaf("localhost").expect("a leaf");
+        let routed = serving_tls(leaf.chain.clone(), leaf.key.clone());
+        assert_eq!(verified_by(&bundle, routed), Ok(()));
+        // A non-routed host, as the opaque tunnel reaches it: its own certificate, chaining to a
+        // host root. This is what the bare session CA lost.
+        let direct = serving_tls(host.chain, host.key);
+        assert_eq!(verified_by(&bundle, direct), Ok(()));
+    }
+
+    /// The two variables name two different files, because only one of them is additive: pointed at
+    /// the bundle, `NODE_EXTRA_CA_CERTS` would have Node re-add every root it already has.
+    #[test]
+    fn the_additive_variable_names_the_bare_ca_and_the_replacing_one_the_bundle() {
+        let set = Set {
+            addr: SocketAddr::from((INTERFACE, 1)),
+            ca: PathBuf::from("/scratch").join(CA_FILE),
+            bundle: PathBuf::from("/scratch").join(BUNDLE_FILE),
+            phantom: Phantom::random().expect("a phantom"),
+            deliveries: vec!["CLAUDE_CODE_OAUTH_TOKEN".to_owned()],
+        };
+        let entries: HashMap<String, String> = set.entries().into_iter().collect();
+        assert_eq!(entries["SSL_CERT_FILE"], "/scratch/broker-roots.pem");
+        assert_eq!(entries["NODE_EXTRA_CA_CERTS"], "/scratch/broker-ca.pem");
+        assert_ne!(entries["SSL_CERT_FILE"], entries["NODE_EXTRA_CA_CERTS"]);
     }
 
     /// `P-endpoint` without rule sets ([spec §17.2]): a request through the proxy reaches upstream

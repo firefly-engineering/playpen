@@ -355,9 +355,11 @@ The cost is stated: a first launch under a new profile has no MCP auth and no hi
 ### 5.7 Run scratch
 
 There is one ephemeral writable directory per run, exposed as `TMPDIR`. It belongs to the run,
-not to any workspace, so it is not a provisioned area. It holds the **manifest** and the proxy
-CA's certificate. The host's own temp, including macOS's `/var/folders/…` reached through
-`confstr`, is unreachable.
+not to any workspace, so it is not a provisioned area. It holds the **manifest**, the proxy
+CA's certificate, and the **trust bundle** that certificate is written into beside the host's own
+roots — derived from the host's store rather than authored, and reclaimed with the scratch like the
+certificate. The host's own temp, including macOS's `/var/folders/…` reached through `confstr`, is
+unreachable.
 
 ---
 
@@ -383,8 +385,16 @@ The **proxy** exists **iff at least one credential route resolves**. When it exi
 - **TLS is terminated only for routed hosts.** You cannot strip a phantom through a tunnel you
   cannot read. Every other host gets an **opaque `CONNECT`, with no check**.
 - The interception CA is **ephemeral, in-memory, and per-session**. Its private key never leaves
-  the supervisor. Its certificate, which is public, is written into the run scratch and named by
-  both `SSL_CERT_FILE` and `NODE_EXTRA_CA_CERTS`.
+  the supervisor. Its certificate, which is public, is written into the run scratch, and written
+  again into a **trust bundle** there after the host's own roots. `NODE_EXTRA_CA_CERTS` names the
+  bare certificate and `SSL_CERT_FILE` names the bundle, because only the first of those two
+  variables is additive ([§9.2](#92-set-entries)).
+- **The upstream store and the child's bundle are one read.** The roots the broker verifies
+  destinations against are read once per launch, and the bundle's host half is built from that same
+  read, so a run whose supervisor was pointed at a different store
+  ([ADR 0030](adr/0030-the-hosts-own-trust-store-is-what-the-host-says-it-is.md)) hands the child a
+  store consistent with what the broker itself trusts. A host with no usable roots is
+  `refusal.proxy.ca`, which is the same path that already refuses.
 - **A TLS-interception failure is a refusal**, never a fallback to an opaque tunnel.
 - **A dead proxy tears the run down.** Every client points at it, and a loud end beats credentials
   lapsing silently.
@@ -788,13 +798,25 @@ share one condition ([ADR 0020](adr/0020-playpen-claims-credential-confinement-o
 | `HTTPS_PROXY` | `http://127.0.0.1:<port>` | iff a route resolves |
 | `NO_PROXY`, `no_proxy` | `localhost,127.0.0.1,::1` (enumerated, never CIDR) | iff a route resolves |
 | `NODE_USE_ENV_PROXY` | `1` | iff a route resolves |
-| `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS` | the CA certificate in the run scratch | iff a route resolves |
+| `SSL_CERT_FILE` | the trust bundle in the run scratch: the host's own roots, then the CA certificate | iff a route resolves |
+| `NODE_EXTRA_CA_CERTS` | the bare CA certificate in the run scratch | iff a route resolves |
 | each route's `delivery.env` | the session phantom | iff that route resolves |
 | the kind's state-dir redirect | the agent state directory | always ([§12](#12-the-kind-table)) |
 | the kind's suppression entries | per kind | always ([§12](#12-the-kind-table)) |
 
 - **The CA pair covers two TLS stacks in one boundary.** Both flagship binaries are Bun and
   honour `NODE_EXTRA_CA_CERTS`, while `git` and `curl` read `SSL_CERT_FILE`.
+- **The pair names two files, because only one of the two is additive.** `NODE_EXTRA_CA_CERTS` is
+  *extra*: the session CA joins Node's own bundled roots, so it names the bare certificate, and
+  pointed at the bundle it would have Node re-add every root it already has. `SSL_CERT_FILE`
+  *replaces* the default CA file wherever it is read, and a Rust client on `rustls-native-certs`
+  consults nothing else once it is set, so the bare certificate there would leave it unable to
+  verify any host playpen did not route — and a non-routed host gets an opaque tunnel and presents
+  its own real certificate ([§6.2](#62-the-broker)). So `SSL_CERT_FILE` names the bundle, and means
+  inside the boundary what it means outside: **the roots this process trusts**. openssl was correct
+  by accident before — `SSL_CERT_DIR` is never written, so its default directory survived — and
+  playpen still does not write `SSL_CERT_DIR`, which would paper over the openssl case and do
+  nothing for the Rust one.
 - **`NODE_USE_ENV_PROXY=1`** makes Node-written stdio MCP servers, and children on Bun ≥ 1.4.0,
   proxy their `node:http` and `fetch` traffic. Without it they go direct, bypass the broker, and
   fail to authenticate, while the agent itself works
