@@ -129,6 +129,12 @@ pub enum Precondition {
     /// `brew --prefix` names a prefix whose `Cellar` and `opt` can be written, so a keg can be
     /// manufactured beside another.
     Homebrew,
+    /// The kernel offers the Landlock right that gates a pathname-socket `connect()`
+    /// (`FS_RESOLVE_UNIX`, ABI 9). Below it the surface is unenforceable and a **named residual**
+    /// ([spec §6.3]), so the row is skipped by name rather than moved somewhere weaker.
+    ///
+    /// [spec §6.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#63-credential-oracles
+    LandlockResolveUnix,
 }
 
 impl Precondition {
@@ -138,6 +144,7 @@ impl Precondition {
             Precondition::HomeWritable => "skip.host.home-not-writable",
             Precondition::Nix => "skip.host.no-nix",
             Precondition::Homebrew => "skip.host.no-homebrew",
+            Precondition::LandlockResolveUnix => "skip.host.landlock-below-abi-9",
         }
     }
 
@@ -152,9 +159,26 @@ impl Precondition {
             Precondition::Homebrew => homebrew_prefix().is_some_and(|prefix| {
                 writable(&prefix.join("Cellar")) && writable(&prefix.join("opt"))
             }),
+            // playpen's own probe, which is the one a launch makes: the backend's stops at an ABI
+            // it knows.
+            #[cfg(target_os = "linux")]
+            Precondition::LandlockResolveUnix => {
+                playpen::mechanism::landlock_abi().is_ok_and(|abi| abi >= RESOLVE_UNIX_ABI)
+            }
+            // A row needing this is scoped to Linux, so it is `n/a` elsewhere and never reaches
+            // the probe.
+            #[cfg(not(target_os = "linux"))]
+            Precondition::LandlockResolveUnix => false,
         }
     }
 }
+
+/// The Landlock ABI that first offers `FS_RESOLVE_UNIX`, which is what gates a pathname-socket
+/// `connect()` ([spec §6.3]).
+///
+/// [spec §6.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#63-credential-oracles
+#[cfg(target_os = "linux")]
+pub const RESOLVE_UNIX_ABI: libc::c_long = 9;
 
 /// Homebrew's prefix, as `brew` reports it.
 pub fn homebrew_prefix() -> Option<std::path::PathBuf> {
@@ -281,6 +305,15 @@ pub enum Action {
     Connect(Listening),
     /// playpen is invoked so that it refuses, and leaves what it leaves behind.
     Refuse(Invocation),
+    /// Two traced launches, asserted as a **pair**: one whose channel self-test passes on both
+    /// passes, whose trace is vouched for, and one whose second pass is silent, whose trace is
+    /// marked unverified ([spec §14.5]).
+    ///
+    /// The pair is what keeps it from being vacuous. "The record says unverified" alone would
+    /// pass on a build that marked every trace unverified, which is the trace nobody would read.
+    ///
+    /// [spec §14.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#145---trace-denials
+    TraceBrackets,
     /// `playpen check` of a policy whose one root is absent: first with the filesystem, then with
     /// `--no-filesystem` ([spec §10.5]).
     ///
@@ -376,7 +409,9 @@ impl Action {
             | Action::LookUp(_)
             | Action::Signal(_)
             | Action::Connect(_) => fixture == Fixture::ProbeRoot,
-            Action::Refuse(_) | Action::CheckDocument => fixture == Fixture::Outside,
+            Action::Refuse(_) | Action::CheckDocument | Action::TraceBrackets => {
+                fixture == Fixture::Outside
+            }
             Action::PullDenials => fixture == Fixture::DescendantDenied,
             Action::ManifestIsTrue => fixture == Fixture::Manifest,
             Action::ArgvMatches => fixture == Fixture::Shim,
@@ -449,6 +484,24 @@ pub enum Signalled {
 pub enum Listening {
     /// An abstract unix socket the suite listens on, under a name of its own (Linux).
     DecoyAbstractSocket,
+    /// A **pathname** unix socket the suite listens on, in a directory of its own outside every
+    /// grant: the shape every unix-socket **credential oracle** is reached by — `ssh-agent`,
+    /// `gpg-agent`, a password manager's agent, `docker.sock` ([spec §6.3]).
+    ///
+    /// [spec §6.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#63-credential-oracles
+    DecoyUnixSocket,
+}
+
+impl Listening {
+    /// The probe verb that reaches it. A pathname socket and an abstract one are different
+    /// address families to the kernel and different verbs to the probe, so the row's own value
+    /// decides rather than the fixture guessing.
+    pub fn verb(self) -> &'static str {
+        match self {
+            Listening::DecoyAbstractSocket => "connect-abstract",
+            Listening::DecoyUnixSocket => "connect-unix",
+        }
+    }
 }
 
 /// An invocation playpen refuses.
@@ -489,12 +542,107 @@ pub enum Invocation {
     ///
     /// [spec §11.7]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#117-self-integrity
     WritablePolicy,
+    /// `playpen run --trace-denials <file>` on a denial-trace ladder made to fail at this rung
+    /// ([spec §14.5]). The flag is refused and the run is not: dropping it would leave a run
+    /// playpen launches.
+    ///
+    /// The ladder itself is the shipped one. What is replaced is the facts it reads — the suite
+    /// re-runs itself as playpen with [`playpen::trace::open_with`] — because a host with all
+    /// four preconditions can provoke none of the six refusals, and a row that cannot run is not
+    /// an assertion ([ADR 0016]).
+    ///
+    /// [spec §14.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#145---trace-denials
+    /// [ADR 0016]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0016-the-suite-defines-the-backend-and-an-assertion-that-can-pass-vacuously-is-a-defect.md
+    TraceDenials(Rung),
     /// `playpen run` under a profile whose toolchain is [`OVER_CEILING`] roots, which compiles to
     /// a Seatbelt profile over macOS's ceiling ([spec §15.3]). The count is generous, never the
     /// assertion: a macOS that raised the ceiling would launch, and the row would fail saying so.
     ///
     /// [spec §15.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#153-the-compiled-profile-ceiling
     OverCeiling,
+}
+
+/// Which rung of the denial trace's precondition ladder is made to fail ([spec §14.5]), or made
+/// to fail only on the pass that *brackets* the run.
+///
+/// The rungs are ordered as the ladder is, and each names the one thing an operator would act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rung {
+    /// Landlock ABI below 7, where a denial is first logged at all.
+    KernelAbi,
+    /// Landlock compiled in and disabled at boot, which the version query answers `EOPNOTSUPP`
+    /// for where absence answers `ENOSYS`.
+    LandlockInactive,
+    /// A pin that does not pass `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON`, which upstream nono is.
+    BackendNoLogging,
+    /// A journal the invoking user cannot read.
+    NoJournalAccess,
+    /// The channel self-test's own denial leaves no record at all.
+    ChannelSilent,
+    /// It leaves one only on `_TRANSPORT=kernel`, the kernel's shared print rate limit.
+    ChannelLossy,
+    /// The channel delivers before the launch and is silent after it: the run launches, and its
+    /// trace is marked **unverified** rather than presented as complete. Not a refusal, so no
+    /// code: the row that uses it is a positive.
+    SilentAfterTheRun,
+}
+
+impl Rung {
+    /// Every rung, so that a new one is a row rather than a thing nothing exercises.
+    pub const ALL: &[Rung] = &[
+        Rung::KernelAbi,
+        Rung::LandlockInactive,
+        Rung::BackendNoLogging,
+        Rung::NoJournalAccess,
+        Rung::ChannelSilent,
+        Rung::ChannelLossy,
+        Rung::SilentAfterTheRun,
+    ];
+
+    /// The name this rung is passed to the re-run playpen under, and the suffix of its row id.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Rung::KernelAbi => "kernel-abi",
+            Rung::LandlockInactive => "landlock-inactive",
+            Rung::BackendNoLogging => "backend-no-logging",
+            Rung::NoJournalAccess => "no-journal-access",
+            Rung::ChannelSilent => "channel-silent",
+            Rung::ChannelLossy => "channel-lossy",
+            Rung::SilentAfterTheRun => "silent-after-the-run",
+        }
+    }
+
+    /// The rung of this name, or `None` where nothing goes by it.
+    pub fn parse(name: &str) -> Option<Rung> {
+        Rung::ALL.iter().copied().find(|rung| rung.name() == name)
+    }
+
+    /// The code the flag is refused under when this rung fails, and `None` for the one rung that
+    /// is not a refusal at all.
+    pub const fn code(self) -> Option<Code> {
+        match self {
+            Rung::KernelAbi => Some(Code::TraceKernelAbi),
+            Rung::LandlockInactive => Some(Code::TraceLandlockInactive),
+            Rung::BackendNoLogging => Some(Code::TraceBackendNoLogging),
+            Rung::NoJournalAccess => Some(Code::TraceNoJournalAccess),
+            Rung::ChannelSilent => Some(Code::TraceChannelSilent),
+            Rung::ChannelLossy => Some(Code::TraceChannelLossy),
+            Rung::SilentAfterTheRun => None,
+        }
+    }
+
+    /// The row id that asserts it.
+    pub const fn row(self) -> &'static str {
+        match self {
+            Rung::KernelAbi => "R-trace-denials/kernel-abi",
+            Rung::LandlockInactive => "R-trace-denials/landlock-inactive",
+            Rung::BackendNoLogging => "R-trace-denials/backend-no-logging",
+            Rung::NoJournalAccess => "R-trace-denials/no-journal-access",
+            Rung::ChannelSilent => "R-trace-denials/channel-silent",
+            Rung::ChannelLossy => "R-trace-denials/channel-lossy",
+            Rung::SilentAfterTheRun => "R-trace-denials/unverified",
+        }
+    }
 }
 
 /// Roots enough to put a profile over the compiled-profile ceiling, each named by
@@ -578,6 +726,13 @@ pub enum Expected {
     ///
     /// [spec §6.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#64-broker-denial
     Brokered(Code),
+    /// A traced run whose bracketing self-test passes leaves a trace it vouches for, and one
+    /// whose second pass is silent leaves a trace marked unverified — in the run record and in
+    /// the trace file itself ([spec §14.5]). Neither launch refuses: the trace is an account of
+    /// the run, not a verdict on it.
+    ///
+    /// [spec §14.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#145---trace-denials
+    TraceBracketed,
     /// Succeeds outside; inside the request **is denied** and the destination records no request at
     /// all, so the secret was never sent to a destination a rule refused ([spec §7.6]).
     ///
@@ -597,9 +752,10 @@ impl Expected {
             | Expected::Closed
             | Expected::Brokered(_)
             | Expected::NoUpstreamLeg => Class::Negative,
-            Expected::Succeeds | Expected::Authenticated | Expected::OnlyThroughTheProxy => {
-                Class::Positive
-            }
+            Expected::Succeeds
+            | Expected::Authenticated
+            | Expected::OnlyThroughTheProxy
+            | Expected::TraceBracketed => Class::Positive,
             Expected::Recorded(_) | Expected::RecordedAt(..) | Expected::Unexamined(_) => {
                 Class::Refusal
             }
@@ -760,6 +916,10 @@ pub fn judge(expected: Expected, outside: &Seen, inside: &Seen) -> Verdict {
              errno cannot carry"
                 .into(),
         ),
+        (Expected::TraceBracketed, _) => Verdict::Setup(
+            "a bracketed trace is judged by what two runs' records hold, not by a call's errno"
+                .into(),
+        ),
     }
 }
 
@@ -856,6 +1016,9 @@ pub fn judge_request(
         }
     };
     match expected {
+        Expected::TraceBracketed => Verdict::Setup(
+            "a bracketed trace is judged by what two runs' records hold, not by a request".into(),
+        ),
         Expected::Authenticated => authenticated(&seen.proxied),
         Expected::OnlyThroughTheProxy => {
             match authenticated(&seen.proxied) {
@@ -985,6 +1148,73 @@ pub fn judge_refusal(expected: Expected, declined: &Declined) -> Verdict {
         Some(recorded) => Verdict::Fail(format!(
             "the run record holds refusal {recorded:?}, not {code}: {detail}"
         )),
+    }
+}
+
+/// What one traced launch left behind, as seen from outside.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Traced {
+    pub status: Option<i32>,
+    /// Whether the run record names a trace file at all.
+    pub traced: bool,
+    /// Why the record says the trace is unverified, if it says so.
+    pub unverified: Option<String>,
+    /// Whether the trace file itself says so too: the operator may never read the record.
+    pub file_says_unverified: bool,
+    /// What was observed, for the report.
+    pub detail: String,
+}
+
+/// Both halves of the bracketing assertion: a run whose self-test passes twice, and one whose
+/// second pass is silent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bracketed {
+    pub vouched: Traced,
+    pub silenced: Traced,
+}
+
+/// `R-trace-denials/unverified`: a failed post-run self-test marks the trace unverified, and a
+/// passing one does not. Asserted as a pair, because "the record says unverified" alone would
+/// pass on a build that said so of every trace ([spec §14.5]).
+///
+/// [spec §14.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#145---trace-denials
+pub fn judge_bracket(expected: Expected, bracketed: &Bracketed) -> Verdict {
+    if expected != Expected::TraceBracketed {
+        return Verdict::Setup(format!("{expected:?} is not a bracketed trace's assertion"));
+    }
+    let Bracketed { vouched, silenced } = bracketed;
+    // Outside first: a run whose channel delivers on both passes must launch and be traced, or
+    // there is nothing for the other half to differ from.
+    for (half, run) in [("vouched", vouched), ("silenced", silenced)] {
+        if run.status != Some(0) {
+            return Verdict::Setup(format!(
+                "the {half} run did not launch and exit 0, so the flag refused rather than                  tracing: {}",
+                run.detail
+            ));
+        }
+        if !run.traced {
+            return Verdict::Setup(format!(
+                "the {half} run's record names no trace file: {}",
+                run.detail
+            ));
+        }
+    }
+    if vouched.unverified.is_some() {
+        return Verdict::Fail(format!(
+            "a trace whose self-test passed on both passes was still marked unverified: {}",
+            vouched.detail
+        ));
+    }
+    match &silenced.unverified {
+        None => Verdict::Fail(format!(
+            "a trace whose post-run self-test found nothing was presented as complete: {}",
+            silenced.detail
+        )),
+        Some(_) if !silenced.file_says_unverified => Verdict::Fail(format!(
+            "the record says the trace is unverified and the trace itself does not: {}",
+            silenced.detail
+        )),
+        Some(_) => Verdict::Pass,
     }
 }
 

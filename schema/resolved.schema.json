@@ -61,6 +61,14 @@
       ],
       "default": null
     },
+    "unix_socket_regime": {
+      "description": "Which regime would deny a unix-socket **credential oracle** on this host ([spec §6.3]).\n\nBeside the route table rather than beside the capability set, because it is a fact about\n*credentials* reachable without one crossing the boundary. Stated outward only — here and\nin the run record, never in the manifest — because it maps what is worth attacking.\n\n`explain` launches nothing, so this is what a launch from *this* host would apply, by the\nsame probe a launch makes. Additive, so a form written before this field existed still\nreads.\n\n[spec §6.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#63-credential-oracles",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
     "env": {
       "description": "The constructed environment, by name ([spec §9.3]): outward only, since the agent can read\nits own `environ`.\n\n[spec §9.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#93-inward-and-outward",
       "type": "array",

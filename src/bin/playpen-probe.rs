@@ -28,6 +28,11 @@ enum Action {
     /// Connect to the abstract unix socket of this name (Linux).
     #[cfg(target_os = "linux")]
     ConnectAbstract(String),
+    /// Connect to the pathname unix socket at this path: what a **credential oracle** is reached
+    /// by ([spec §6.3]).
+    ///
+    /// [spec §6.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#63-credential-oracles
+    ConnectUnix(String),
     /// Read an inherited descriptor to the end, without opening anything.
     ReadFd(libc::c_int),
     /// Look the Mach service up by name in the bootstrap namespace.
@@ -131,6 +136,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Option<Vec<Action>> {
             "signal" => Action::Signal(args.next()?.parse().ok()?),
             #[cfg(target_os = "linux")]
             "connect-abstract" => Action::ConnectAbstract(args.next()?),
+            "connect-unix" => Action::ConnectUnix(args.next()?),
             "read-fd" => Action::ReadFd(args.next()?.parse().ok()?),
             #[cfg(target_os = "macos")]
             "look-up" => Action::LookUp(args.next()?),
@@ -178,6 +184,7 @@ fn verdict(action: &Action) -> String {
             SocketAddr::from_abstract_name(name.as_bytes())
                 .and_then(|addr| UnixStream::connect_addr(&addr))
         }),
+        Action::ConnectUnix(path) => io_verdict(std::os::unix::net::UnixStream::connect(path)),
         Action::ReadFd(fd) => io_verdict(read_fd(*fd)),
         #[cfg(target_os = "macos")]
         Action::LookUp(service) => look_up(service),

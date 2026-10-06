@@ -224,6 +224,35 @@ pub struct Record {
     /// still reads: it holds none, and its denials are found by the child's pid alone.
     #[serde(default)]
     pub denial_tag: Option<String>,
+    /// Which regime denied a unix-socket **credential oracle** on this host ([spec §6.3]).
+    ///
+    /// Recorded **outward only** — here and in `playpen explain`, never in the manifest — because
+    /// it maps what is worth attacking. Additive, so a record written before the regime was
+    /// stated still reads.
+    ///
+    /// [spec §6.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#63-credential-oracles
+    #[serde(default)]
+    pub unix_socket_regime: Option<String>,
+    /// The file `--trace-denials` wrote this run's denials into, where the flag was given and
+    /// every precondition held ([spec §14.5]). A flag that was refused leaves none: the refusal
+    /// is the record of it.
+    ///
+    /// [spec §14.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#145---trace-denials
+    #[serde(default)]
+    pub denial_trace: Option<PathBuf>,
+    /// Why this run's trace is **unverified**: the self-test that brackets the run failed on its
+    /// second pass, so the trace is presented as incomplete rather than as complete
+    /// ([spec §14.5]). `None` on a run that was not traced, and on one whose trace was vouched
+    /// for.
+    #[serde(default)]
+    pub denial_trace_unverified: Option<String>,
+    /// The Landlock domain the child's tree was confined by, learned from the journal while
+    /// tracing. It is what a later query filters on, because a domain covers every process in the
+    /// tree where a pid covers one ([spec §14.2]).
+    ///
+    /// [spec §14.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#142-playpen-explain
+    #[serde(default)]
+    pub landlock_domain: Option<String>,
     /// The status playpen exited with after the child ran.
     pub status: Option<i32>,
     pub refusal: Option<RecordedRefusal>,
@@ -420,6 +449,10 @@ impl RunRecord {
             supervisor_pid: Some(unsafe { libc::getpid() }),
             ended_at_unix_ms: None,
             denial_tag: None,
+            unix_socket_regime: None,
+            denial_trace: None,
+            denial_trace_unverified: None,
+            landlock_domain: None,
             status: None,
             refusal: None,
             fault: None,
@@ -481,6 +514,30 @@ impl RunRecord {
     /// at the environment.
     pub fn upstream_roots(&mut self, provenance: Provenance) {
         self.record.upstream_roots = Some(provenance);
+    }
+
+    /// Which regime denied a unix-socket credential oracle, stated outward ([spec §6.3]). Taken
+    /// from the probe's own answer rather than from a second look at the kernel, so what is
+    /// recorded is what applied.
+    ///
+    /// [spec §6.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#63-credential-oracles
+    pub fn unix_socket_regime(&mut self, regime: &crate::mechanism::Regime) {
+        self.record.unix_socket_regime = Some(regime.stated().to_owned());
+    }
+
+    /// The file this run's denials are being traced into ([spec §14.5]). Written before the fork,
+    /// because a run that dies without teardown still has a trace worth finding.
+    ///
+    /// [spec §14.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#145---trace-denials
+    pub fn tracing(&mut self, file: &Path) {
+        self.record.denial_trace = Some(file.to_path_buf());
+    }
+
+    /// How the trace ended: the domain it was filtered by, and why it is unverified if it is
+    /// ([spec §14.5]). A teardown write, so it changes no exit status.
+    pub fn traced(&mut self, domain: Option<&str>, unverified: Option<String>) {
+        self.record.landlock_domain = domain.map(str::to_owned);
+        self.record.denial_trace_unverified = unverified;
     }
 
     /// One thing that went wrong tearing the run down ([spec §4.2] step 18). It is written to the

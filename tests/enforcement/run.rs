@@ -26,10 +26,10 @@ use tempfile::{NamedTempFile, TempDir};
 
 use crate::common::{self, PROBE};
 use crate::row::{
-    Action, Cause, Checked, Declined, Exchange, Exchanged, Expected, Fixture, Invocation, Legs,
-    Listening, MERGED_TYPO, OVER_CEILING, Outcome, Row, Seen, Services, Signalled, Substitution,
-    Target, Verdict, applies, judge, judge_refusal, judge_request, judge_unexamined,
-    over_ceiling_name,
+    Action, Bracketed, Cause, Checked, Declined, Exchange, Exchanged, Expected, Fixture,
+    Invocation, Legs, Listening, MERGED_TYPO, OVER_CEILING, Outcome, Row, Rung, Seen, Services,
+    Signalled, Substitution, Target, Traced, Verdict, applies, judge, judge_bracket, judge_refusal,
+    judge_request, judge_unexamined, over_ceiling_name,
 };
 use playpen::refusal::EXIT_REFUSED;
 
@@ -1422,6 +1422,7 @@ fn refusal(row: &Row) -> Verdict {
     match row.action {
         Action::Refuse(invocation) => judge_refusal(row.expected, &decline(invocation)),
         Action::CheckDocument => judge_unexamined(row.expected, &check_document()),
+        Action::TraceBrackets => judge_bracket(row.expected, &bracketed()),
         action => Verdict::Setup(format!(
             "{action:?} runs under a boundary, and a refusal has none"
         )),
@@ -1431,6 +1432,95 @@ fn refusal(row: &Row) -> Verdict {
 /// The first argument that makes the suite run as playpen on a mechanism that offers nothing
 /// ([`as_playpen_offering_nothing`]). The second stands in for `XDG_STATE_HOME`.
 pub const AS_PLAYPEN_OFFERING_NOTHING: &str = "--as-playpen-offering-nothing";
+
+/// The first argument that makes the suite run as playpen with the denial trace's ladder reading
+/// facts of the row's choosing ([`as_playpen_tracing`]). The second names the [`Rung`] that
+/// fails, the third stands in for `XDG_STATE_HOME`.
+pub const AS_PLAYPEN_TRACING: &str = "--as-playpen-tracing";
+
+/// The suite, re-run as playpen with the **real** denial-trace ladder reading the facts `rung`
+/// describes ([spec §14.5]). Everything else is what `src/main.rs` does.
+///
+/// Only the facts are replaced, never the ladder: its order, its codes and its sentences are the
+/// shipped ones, and a host with all four preconditions could provoke none of them otherwise.
+///
+/// [spec §14.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#145---trace-denials
+#[cfg(target_os = "linux")]
+pub fn as_playpen_tracing(
+    mut args: impl Iterator<Item = OsString>,
+    cwd: std::io::Result<PathBuf>,
+) -> i32 {
+    let named = args.next().expect("the rung the ladder fails at");
+    let named = named.to_str().expect("a UTF-8 rung");
+    // `NO_RUNG` is the other half of the bracketing pair: every precondition holds, both passes
+    // of the self-test deliver, and the trace is vouched for.
+    let rung = match named {
+        NO_RUNG => None,
+        named => Some(Rung::parse(named).expect("a rung of the ladder")),
+    };
+    let state = playpen::record::state_dir(args.next(), None);
+    let argv = std::iter::once(OsString::from("playpen")).chain(args);
+    let host = playpen::launch::Host {
+        cwd,
+        policies: playpen::policy::SearchPath::of(Vec::new()),
+        state,
+        profile: None,
+        executable: std::env::current_exe(),
+        env: Vec::new(),
+    };
+    playpen::launch::main(
+        argv,
+        host,
+        playpen::mechanism::Mechanism::probe,
+        move |file, workspace| playpen::trace::open_with(facts(rung), file, workspace),
+    )
+}
+
+/// The facts the ladder reads for `rung`: everything above it holds, and this one does not.
+///
+/// A delivering channel is spelled with an empty domain, which a record carrying no `domain=`
+/// field would also give: what the self-test is asked is whether the channel delivers, and the
+/// domain is only what keeps its own denial out of the run's trace.
+#[cfg(target_os = "linux")]
+fn facts(rung: Option<Rung>) -> playpen::trace::Facts {
+    use playpen::trace::{Channel, Facts};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let delivers = || Channel::Delivers {
+        domain: String::new(),
+    };
+    let mut facts = Facts {
+        abi: Ok(playpen::trace::LOGGING_ABI),
+        backend_logs: true,
+        readable: Box::new(|| Ok(())),
+        channel: std::sync::Arc::new(move |_| delivers()),
+    };
+    match rung {
+        None => {}
+        Some(Rung::KernelAbi) => facts.abi = Ok(playpen::trace::LOGGING_ABI - 1),
+        Some(Rung::LandlockInactive) => facts.abi = Err(libc::EOPNOTSUPP),
+        Some(Rung::BackendNoLogging) => facts.backend_logs = false,
+        Some(Rung::NoJournalAccess) => {
+            facts.readable = Box::new(|| Err("no journal files were opened".to_string()));
+        }
+        Some(Rung::ChannelSilent) => facts.channel = std::sync::Arc::new(|_| Channel::Silent),
+        Some(Rung::ChannelLossy) => facts.channel = std::sync::Arc::new(|_| Channel::Lossy),
+        // The channel delivers on the pass that opens the trace and is silent on the pass that
+        // brackets it, which is the flood that made journald drop its audit input mid-run.
+        Some(Rung::SilentAfterTheRun) => {
+            let passes = AtomicUsize::new(0);
+            facts.channel =
+                std::sync::Arc::new(move |_| match passes.fetch_add(1, Ordering::Relaxed) {
+                    0 => delivers(),
+                    _ => Channel::Silent,
+                });
+        }
+    }
+    facts
+}
+
+/// The rung name that fails nothing: the vouched half of [`Bracketed`].
+pub const NO_RUNG: &str = "none";
 
 /// The suite, re-run by [`decline`], as playpen: what `src/main.rs` does, with the state directory
 /// from `args` rather than the environment, and the mechanism probe replaced by one that offers
@@ -1450,9 +1540,13 @@ pub fn as_playpen_offering_nothing(
         executable: std::env::current_exe(),
         env: Vec::new(),
     };
-    playpen::launch::main(argv, host, || {
-        Mechanism::new("a mechanism offering nothing", &[])
-    })
+    playpen::launch::main(
+        argv,
+        host,
+        || Mechanism::new("a mechanism offering nothing", &[]),
+        // This row refuses at step 7's first check, so the trace's seam is never reached.
+        |_, _| panic!("no flag asked for a trace"),
+    )
 }
 
 /// Invoke playpen as `invocation` says, with the fixture's own state directory handed to it,
@@ -1534,6 +1628,18 @@ fn decline(invocation: Invocation) -> Declined {
             command.arg(&policy).arg("--").arg(canary_path());
             command
         }
+        // The real ladder, reading facts no host would present ([spec §14.5]).
+        #[cfg(target_os = "linux")]
+        Invocation::TraceDenials(rung) => {
+            let trace = fixture.policy_dir.path().join("denials.trace");
+            as_playpen_tracing_command(&fixture, rung.name(), &trace)
+        }
+        #[cfg(not(target_os = "linux"))]
+        Invocation::TraceDenials(_) => {
+            // A row carrying this is scoped to Linux, so it is `n/a` elsewhere and never gets
+            // here; the arm exists so the match is exhaustive on either platform.
+            fixture.playpen(&["run"])
+        }
         Invocation::StateReachable => {
             let inside = fixture.root().join("state");
             runs = inside.join("playpen/runs");
@@ -1561,6 +1667,80 @@ fn decline(invocation: Invocation) -> Declined {
         text,
         recorded,
         detail: format!("{}, stderr {stderr:?}", output.status),
+    }
+}
+
+/// The suite, re-run as playpen with `--trace-denials <trace>` and the ladder reading `rung`'s
+/// facts. `fixture` owns the policy and the state directory, so the run's record is where
+/// [`decline`] and [`traced`] look for it.
+fn as_playpen_tracing_command(fixture: &common::Fixture, rung: &str, trace: &Path) -> Command {
+    let suite = std::env::current_exe().expect("the suite's own executable");
+    let mut command = Command::new(suite);
+    command
+        .arg(AS_PLAYPEN_TRACING)
+        .arg(rung)
+        .arg(fixture.state_home())
+        .args([
+            "run",
+            "--profile",
+            "p",
+            "--agent",
+            "claude",
+            "--trace-denials",
+        ])
+        .arg(trace)
+        .arg("--policy")
+        .arg(&fixture.policy)
+        .args([OsStr::new("--"), canary_path().as_os_str()])
+        .current_dir(fixture.root());
+    command
+}
+
+/// Both halves of the bracketing assertion, each a traced launch of the canary: one whose channel
+/// self-test delivers on both passes, and one that is silent on the second ([spec §14.5]).
+///
+/// [spec §14.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#145---trace-denials
+fn bracketed() -> Bracketed {
+    Bracketed {
+        vouched: traced(NO_RUNG),
+        silenced: traced(Rung::SilentAfterTheRun.name()),
+    }
+}
+
+/// One traced launch, and what it left in its record and in its trace file.
+fn traced(rung: &str) -> Traced {
+    let fixture = common::Fixture::with_mode("read");
+    let trace = fixture.policy_dir.path().join("denials.trace");
+    let output = as_playpen_tracing_command(&fixture, rung, &trace)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run playpen");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // The record is the run's own, found by the one record the fixture's ring holds: this
+    // launch does not refuse, so there is no refusal line naming its id.
+    let record = fs::read_dir(fixture.runs())
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .find_map(|path| {
+            let bytes = fs::read(&path).ok()?;
+            serde_json::from_slice::<Record>(&bytes).ok()
+        });
+    let written = fs::read_to_string(&trace).unwrap_or_default();
+    Traced {
+        status: output.status.code(),
+        traced: record
+            .as_ref()
+            .is_some_and(|record| record.denial_trace.is_some()),
+        unverified: record
+            .as_ref()
+            .and_then(|record| record.denial_trace_unverified.clone()),
+        // The operator may never read the record, so the file says it too.
+        file_says_unverified: written.contains("# playpen: unverified:"),
+        detail: format!("{}, stderr {stderr:?}, trace {written:?}", output.status),
     }
 }
 
@@ -1739,6 +1919,12 @@ enum Running {
     Socket {
         _listener: std::os::unix::net::UnixListener,
     },
+    /// A pathname socket, with the directory it was bound in: both go on drop, so a killed run
+    /// costs one stale directory under the host temp and never a permanent one.
+    PathSocket {
+        _listener: std::os::unix::net::UnixListener,
+        _dir: TempDir,
+    },
 }
 
 impl Drop for Running {
@@ -1751,6 +1937,7 @@ impl Drop for Running {
             }
             #[cfg(target_os = "linux")]
             Running::Socket { .. } => {}
+            Running::PathSocket { .. } => {}
         }
     }
 }
@@ -1791,6 +1978,26 @@ fn listen(listening: Listening) -> Result<(Running, String), String> {
         }
         #[cfg(not(target_os = "linux"))]
         Listening::DecoyAbstractSocket => Err("abstract unix sockets exist on Linux only".into()),
+        Listening::DecoyUnixSocket => {
+            use std::os::unix::net::UnixListener;
+            // A directory of its own under the host temp, which no grant reaches (`N-hosttemp`),
+            // so the socket is outside every grant however the fixture's root moves.
+            let dir = TempDir::new().map_err(|e| format!("decoy socket directory: {e}"))?;
+            let path = dir.path().join("oracle.sock");
+            let listener = UnixListener::bind(&path)
+                .map_err(|e| format!("decoy unix socket {}: {e}", path.display()))?;
+            let name = path
+                .to_str()
+                .ok_or_else(|| format!("decoy unix socket {} is not UTF-8", path.display()))?
+                .to_owned();
+            Ok((
+                Running::PathSocket {
+                    _listener: listener,
+                    _dir: dir,
+                },
+                name,
+            ))
+        }
     }
 }
 
@@ -1908,6 +2115,9 @@ fn prepare(action: Action, home: &Path, root: &Path, made: &mut Made) -> Result<
         Action::Refuse(_) | Action::CheckDocument => {
             return Err("a refusal has no boundary for the probe to run under".into());
         }
+        Action::TraceBrackets => {
+            return Err("a bracketed trace drives two launches of its own, never the probe".into());
+        }
         Action::ArgvMatches => {
             return Err("a shim's argv is read from the child's own stdout, not the probe".into());
         }
@@ -1959,7 +2169,7 @@ fn prepare(action: Action, home: &Path, root: &Path, made: &mut Made) -> Result<
         Action::Connect(listening) => {
             let (running, name) = listen(listening)?;
             peer = Some(running);
-            vec![["connect-abstract".to_owned(), name]]
+            vec![[listening.verb().to_owned(), name]]
         }
     };
     Ok(Prepared {

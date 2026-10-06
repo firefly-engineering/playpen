@@ -1333,9 +1333,16 @@ in `--json`, beside the record's own fields):
   (`denial_tag`). A record written before runs were tagged holds none, and its command filters on
   `"(<pid>)"` instead, which matches the child's own denials only. `/usr/bin/log` by path, because
   `log` is a zsh builtin.
-- **Linux**: none yet (`null`). The query filters by Landlock domain id, which covers the whole
-  tree, and the record does not hold it yet
-  ([#98](https://github.com/firefly-engineering/playpen/issues/98)).
+- **Linux**: `journalctl --no-pager -o cat --since=@<launched> _TRANSPORT=audit
+  --until=@<ended> | grep -F 'domain=<id>'`, with `--until` omitted for a run with no end. The
+  filter is the Landlock **domain id**, which covers the whole confined tree where a pid covers
+  one process; the journal has no field holding it, so the filter is a fixed string the operator
+  runs, as macOS's `CONTAINS` predicate is. No clock margin, unlike macOS: journald stamps an
+  entry from `CLOCK_REALTIME`, the same clock the record's timestamps come from.
+  - The record holds a domain id only for a run that was **traced** ([§14.5](#145---trace-denials)):
+    the id is learnt by reading the journal, which an untraced run never does. So an untraced
+    run's command is `null`, which is the honest answer rather than a query that would return
+    every run's denials.
 
 A run that never launched has no command. The run id appears on every refusal line, and
 `explain --list` lists recent runs, most recent first. A run the ring does not hold, or an id that
@@ -1728,6 +1735,13 @@ exactly the information both ledgers exist to carry.
    `GET …/info/refs?service=git-receive-pack` matches, because the query string is never matched.
 7. **An operator-written refreshing minter racing a host-level agent** over a single-use login.
 8. **A Linux audit exclude rule** emptying the denial trace, with rules playpen cannot read.
+9. **Unix-socket credential oracles on Linux below Landlock ABI 9.** `FS_RESOLVE_UNIX`, which
+   gates a pathname-socket `connect()`, does not exist before it, so the surface is
+   unenforceable rather than unenforced ([§6.3](#63-credential-oracles)). Refusing every launch
+   on an older kernel would be refusing the host rather than the boundary, so the regime that
+   applied is recorded **outward only** — the run record and `playpen explain`, never the
+   manifest, because it maps what is worth attacking — and `N-unix-socket` is skipped by name as
+   `skip.host.landlock-below-abi-9`.
 9. **A profile-writable directory earlier on the host's `PATH`** than the shim can shadow it for
    the next host-side invocation. Keeping `PATH` order safe is the operator's responsibility.
 10. **Unix-socket credential oracles on Linux below Landlock ABI 9.** `ssh-agent`, `gpg-agent` and

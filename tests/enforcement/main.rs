@@ -31,9 +31,19 @@ use tempfile::TempDir;
 fn main() {
     // Re-run by `R-missing-cap` as playpen: its inputs are read here, as `src/main.rs` reads them.
     let mut args = std::env::args_os().skip(1);
-    if args.next().as_deref() == Some(OsStr::new(run::AS_PLAYPEN_OFFERING_NOTHING)) {
-        let status = run::as_playpen_offering_nothing(args, std::env::current_dir());
-        std::process::exit(status);
+    match args.next() {
+        Some(arg) if arg == OsStr::new(run::AS_PLAYPEN_OFFERING_NOTHING) => {
+            let status = run::as_playpen_offering_nothing(args, std::env::current_dir());
+            std::process::exit(status);
+        }
+        // Re-run by the `R-trace-denials` rows as playpen, with the denial trace's ladder reading
+        // the facts the row names.
+        #[cfg(target_os = "linux")]
+        Some(arg) if arg == OsStr::new(run::AS_PLAYPEN_TRACING) => {
+            let status = run::as_playpen_tracing(args, std::env::current_dir());
+            std::process::exit(status);
+        }
+        _ => {}
     }
     let checks: &[(&str, fn())] = &[
         ("row_ids_are_unique", row_ids_are_unique),

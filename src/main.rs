@@ -16,6 +16,7 @@ fn main() {
         std::env::args_os(),
         host,
         playpen::mechanism::Mechanism::probe,
+        playpen::trace::open,
     );
     std::process::exit(status);
 }

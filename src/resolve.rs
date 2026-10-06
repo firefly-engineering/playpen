@@ -410,6 +410,19 @@ pub struct Resolved {
     /// [spec §18]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#18-named-residuals
     #[serde(default)]
     pub upstream_roots: Option<crate::proxy::Provenance>,
+    /// Which regime would deny a unix-socket **credential oracle** on this host ([spec §6.3]).
+    ///
+    /// Beside the route table rather than beside the capability set, because it is a fact about
+    /// *credentials* reachable without one crossing the boundary. Stated outward only — here and
+    /// in the run record, never in the manifest — because it maps what is worth attacking.
+    ///
+    /// `explain` launches nothing, so this is what a launch from *this* host would apply, by the
+    /// same probe a launch makes. Additive, so a form written before this field existed still
+    /// reads.
+    ///
+    /// [spec §6.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#63-credential-oracles
+    #[serde(default)]
+    pub unix_socket_regime: Option<String>,
     /// The constructed environment, by name ([spec §9.3]): outward only, since the agent can read
     /// its own `environ`.
     ///
@@ -529,6 +542,7 @@ impl Resolved {
             },
             routes: Vec::new(),
             upstream_roots: None,
+            unix_socket_regime: Some(crate::mechanism::Regime::probe().stated().to_owned()),
             env: env
                 .iter()
                 .map(|var| ResolvedVar {

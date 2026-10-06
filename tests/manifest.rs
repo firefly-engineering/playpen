@@ -94,6 +94,65 @@ fn the_manifest_omits_the_environment_and_provenance() {
     }
 }
 
+/// The manifest does **not** state which regime denied a unix-socket **credential oracle**
+/// ([spec §6.3]): that is recorded outward only, in the run record and `explain`, because it maps
+/// what is worth attacking — an agent told "unenforced below Landlock ABI 9" has been told where
+/// to look.
+///
+/// What keeps it from passing vacuously is the other half, asserted here too: the regime *is* in
+/// the record and in `explain`, so a build that stated it nowhere would fail rather than pass.
+///
+/// [spec §6.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#63-credential-oracles
+#[test]
+fn the_unix_socket_regime_is_stated_outward_and_never_in_the_manifest() {
+    let fx = Fixture::new();
+    let output = fx
+        .run(&[&os_bin("sh"), "-c", r#"cat "$PLAYPEN_MANIFEST""#])
+        .output()
+        .expect("playpen");
+    assert!(output.status.success(), "{output:?}");
+    let manifest = String::from_utf8(output.stdout).expect("utf-8");
+    for absent in [
+        "unix_socket_regime",
+        "unix sockets",
+        "FS_RESOLVE_UNIX",
+        "residual",
+        "Seatbelt",
+    ] {
+        assert!(
+            !manifest.contains(absent),
+            "{absent} is in the manifest:\n{manifest}"
+        );
+    }
+
+    // Outward, it is stated: `explain` says it of this host, and the record says it of the run.
+    let explained = fx
+        .playpen(&["explain", "p", "--json", "--policy"])
+        .arg(&fx.policy)
+        .output()
+        .expect("playpen");
+    assert!(explained.status.success(), "{explained:?}");
+    let resolved: serde_json::Value =
+        serde_json::from_slice(&explained.stdout).expect("the resolved form");
+    let regime = resolved["unix_socket_regime"]
+        .as_str()
+        .expect("explain states the regime");
+    assert!(
+        regime.starts_with("enforced by") || regime.starts_with("unenforced:"),
+        "{regime}"
+    );
+    // `explain` opens no record of its own, so the only run this fixture has is the launch above.
+    let ids = fx.run_ids();
+    let [id] = ids.as_slice() else {
+        panic!("one launch, one record: {ids:?}")
+    };
+    assert_eq!(
+        fx.record(id)["unix_socket_regime"].as_str(),
+        Some(regime),
+        "the record and explain disagree about the regime"
+    );
+}
+
 /// The manifest states the route table but **not** where the broker's upstream roots came from
 /// ([ADR 0011], [ADR 0030]): the agent cannot change the supervisor's trust basis, reach around it,
 /// or observe its effect, so a fact it can act on this is not. It is stated outward, in `explain`

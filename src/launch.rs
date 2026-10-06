@@ -34,6 +34,7 @@ use crate::refusal::{EXIT_REFUSED, Refusal};
 use crate::resolve;
 use crate::select;
 use crate::self_test;
+use crate::trace;
 
 #[derive(Debug, Parser)]
 #[command(name = "playpen")]
@@ -61,6 +62,12 @@ struct RunArgs {
     agent: String,
     #[arg(long)]
     policy: Option<PathBuf>,
+    /// Tail the kernel's denial log for this run into this file ([spec §14.5]). Where the
+    /// platform cannot provide a trace, the **flag** is refused and the run is not.
+    ///
+    /// [spec §14.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#145---trace-denials
+    #[arg(long)]
+    trace_denials: Option<PathBuf>,
     /// Everything after `--`, passed through verbatim.
     #[arg(last = true, required = true, value_parser = clap::value_parser!(OsString))]
     argv: Vec<OsString>,
@@ -91,11 +98,14 @@ pub struct Host {
 ///
 /// `probe` is [`Mechanism::probe`] in every launch; it is a parameter so the suite's
 /// `R-missing-cap` row can launch on a mechanism that lacks a capability, which no host it runs
-/// on does.
+/// on does. `open_trace` is [`trace::open`] for the same reason: a host with all four of the
+/// trace's preconditions can provoke none of its six refusals, so the suite's `R-trace-denials`
+/// row replaces the ladder wholesale.
 pub fn main(
     args: impl IntoIterator<Item = OsString>,
     host: Host,
     probe: impl FnOnce() -> Mechanism,
+    open_trace: impl FnOnce(&Path, &Path) -> Result<trace::Tracing, Refusal>,
 ) -> i32 {
     // Parsing has no effect, so it can come first. `explain` and `check` launch nothing
     // ([spec §14.2], [spec §10.5]), so they open no record and push no run out of the ring, and nor
@@ -110,7 +120,7 @@ pub fn main(
     //
     // [spec §11.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#113-shims
     if let Some(name) = args.first().and_then(shim_name) {
-        return shim_main(&name, &args[0], &args[1..], host, probe);
+        return shim_main(&name, &args[0], &args[1..], host, probe, open_trace);
     }
     let parsed = match Cli::try_parse_from(args) {
         Ok(Cli {
@@ -148,7 +158,7 @@ pub fn main(
         Ok(record) => record,
         Err(refusal) => return refuse(&refusal, Some(&run)),
     };
-    match invoke(parsed, host, &mut record, probe) {
+    match invoke(parsed, host, &mut record, probe, open_trace) {
         Ok(status) => {
             record.finish(status);
             status
@@ -165,6 +175,7 @@ fn invoke(
     host: Host,
     record: &mut RunRecord,
     probe: impl FnOnce() -> Mechanism,
+    open_trace: impl FnOnce(&Path, &Path) -> Result<trace::Tracing, Refusal>,
 ) -> Result<i32, Refusal> {
     // `run` resolves no context of its own, so `PLAYPEN_PROFILE` is not one of its inputs.
     let Host {
@@ -179,6 +190,7 @@ fn invoke(
         profile,
         agent,
         policy,
+        trace_denials,
         argv,
     } = parsed.map_err(|err| usage_refusal(&err))?;
     // Step 2 ends with the kind, which is part of the invocation; step 3 locates the policy.
@@ -197,6 +209,7 @@ fn invoke(
             env_profile: None,
             kind,
             shim: None,
+            trace: trace_denials,
         },
         &policy_file,
         &loaded,
@@ -208,6 +221,7 @@ fn invoke(
         record,
         probe,
         self_test::floor,
+        open_trace,
     )
 }
 
@@ -229,6 +243,7 @@ fn shim_main(
     argv: &[OsString],
     host: Host,
     probe: impl FnOnce() -> Mechanism,
+    open_trace: impl FnOnce(&Path, &Path) -> Result<trace::Tracing, Refusal>,
 ) -> i32 {
     // Re-entry comes first, before anything is opened or recorded: inside an existing boundary the
     // shim `exec`s the target and never re-sandboxes, so there is no run of its own to record.
@@ -248,7 +263,7 @@ fn shim_main(
         Ok(record) => record,
         Err(refusal) => return refuse(&refusal, Some(&run)),
     };
-    match shim_invoke(name, argv0, argv, host, &mut record, probe) {
+    match shim_invoke(name, argv0, argv, host, &mut record, probe, open_trace) {
         Ok(status) => {
             record.finish(status);
             status
@@ -267,6 +282,7 @@ fn shim_invoke(
     host: Host,
     record: &mut RunRecord,
     probe: impl FnOnce() -> Mechanism,
+    open_trace: impl FnOnce(&Path, &Path) -> Result<trace::Tracing, Refusal>,
 ) -> Result<i32, Refusal> {
     let Host {
         cwd,
@@ -317,6 +333,9 @@ fn shim_invoke(
                 cwd.as_deref().ok(),
                 &env,
             )?),
+            // A shim takes no option of playpen's, so it never traces: the flag would have to
+            // have come from the caller's argv, which belongs to the target.
+            trace: None,
         },
         &policy_file,
         &loaded,
@@ -328,6 +347,7 @@ fn shim_invoke(
         record,
         probe,
         self_test::floor,
+        open_trace,
     )
 }
 
@@ -483,6 +503,11 @@ struct Context {
     /// The link playpen was invoked through, which self-integrity holds unwritable beside the
     /// executable and the policy.
     shim: Option<PathBuf>,
+    /// Where `--trace-denials` writes, where it was given ([spec §14.5]). Never for a shim: a
+    /// shim takes no option of playpen's.
+    ///
+    /// [spec §14.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#145---trace-denials
+    trace: Option<PathBuf>,
 }
 
 fn refuse(refusal: &Refusal, run: Option<&RunId>) -> i32 {
@@ -502,12 +527,12 @@ fn usage_refusal(err: &clap::Error) -> Refusal {
     Refusal::new(Code::InvocationUsage, message)
 }
 
-/// `probe` and `floor_self_test` are [`Mechanism::probe`] and [`self_test::floor`] in every
-/// launch; they are parameters so a test can show that each one's refusal stops the launch before
-/// the real child is forked.
+/// `probe`, `floor_self_test` and `open_trace` are [`Mechanism::probe`], [`self_test::floor`]
+/// and [`trace::open`] in every launch; they are parameters so a test can show that each one's
+/// refusal stops the launch before the real child is forked.
 #[expect(
     clippy::too_many_arguments,
-    reason = "step 7's two checks are each a seam a test replaces"
+    reason = "step 7's three checks are each a seam a test replaces"
 )]
 fn run(
     context: Context,
@@ -521,12 +546,14 @@ fn run(
     record: &mut RunRecord,
     probe: impl FnOnce() -> Mechanism,
     floor_self_test: impl FnOnce() -> Result<(), Refusal>,
+    open_trace: impl FnOnce(&Path, &Path) -> Result<trace::Tracing, Refusal>,
 ) -> Result<i32, Refusal> {
     let Context {
         explicit,
         env_profile,
         kind,
         shim,
+        trace: traced_into,
     } = context;
     // Step 4.
     let inputs = select::Inputs {
@@ -589,6 +616,26 @@ fn run(
     // capability is named as such rather than surfacing as a canary that could not be confined.
     probe().require(mechanism::REQUIRED)?;
     floor_self_test()?;
+    // Which regime denied a unix-socket credential oracle, stated outward only ([spec §6.3]).
+    // Not a capability a profile can require: below Landlock ABI 9 the surface is unenforceable,
+    // so it is a named residual rather than a refusal of the host.
+    //
+    // [spec §6.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#63-credential-oracles
+    record.unix_socket_regime(&mechanism::Regime::probe());
+    // Step 7's third check, and the only one a flag asks for: the denial trace's preconditions,
+    // each refusing **the flag** by its own code ([spec §14.5]). Before step 9, so a refusal here
+    // leaves no scratch behind, and the self-test's own throwaway file lives in playpen's state
+    // directory rather than in a run scratch that does not exist yet.
+    //
+    // [spec §14.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#145---trace-denials
+    let mut tracing = match &traced_into {
+        None => None,
+        Some(file) => {
+            let tracing = open_trace(file, state.ok_or_else(record::no_state)?)?;
+            record.tracing(tracing.file());
+            Some(tracing)
+        }
+    };
     // Step 9. Removed again when this returns: at teardown, or on any refusal from here on.
     let mut provisioned = layout.provision()?;
     // Step 10: every credential this profile's routes resolve, minted unconfined on the host
@@ -703,6 +750,13 @@ fn run(
     // secret in the handle the proxy already holds, so nothing of the child's environment moves —
     // what the child holds is the phantom.
     let renewing = std::cell::RefCell::new(None);
+    // The trace follows from the moment there is a child, and from the launch time rather than
+    // from now, so a denial between the fork and the follow is in the trace rather than lost to
+    // the race ([spec §14.5]).
+    //
+    // [spec §14.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#145---trace-denials
+    let launched = std::time::SystemTime::now();
+    let tracing = std::cell::RefCell::new(tracing.take());
     let status = child::run_confined(
         &caps,
         argv,
@@ -715,6 +769,9 @@ fn run(
                 *serving.borrow_mut() = Some(bound.serve(broker, pid));
             }
             *renewing.borrow_mut() = Some(minter::renew(&loaded.policy, &credentials));
+            if let Some(tracing) = tracing.borrow_mut().as_mut() {
+                tracing.follow(pid, launched);
+            }
         },
         |fault| record.borrow_mut().fault(fault),
     );
@@ -742,6 +799,18 @@ fn run(
     minter::revoke_all(&loaded.policy, &credentials, &mut record.borrow_mut());
     if let Some(mut serving) = serving.into_inner() {
         serving.stop();
+    }
+    // Step 18.4: stop the tail and bracket the run with the second self-test. A failure here
+    // marks the trace **unverified** in the record and in the trace itself, and changes no exit
+    // status — the trace is an account of the run, not a verdict on it.
+    if let Some(mut tracing) = tracing.into_inner() {
+        let unverified = tracing.stop();
+        record
+            .borrow_mut()
+            .traced(tracing.domain(), unverified.clone());
+        if let Some(why) = unverified {
+            record.borrow_mut().torn_down(why);
+        }
     }
     // Last: the ephemeral areas and the run scratch. Removed here rather than left to the drop at
     // the end of this function, so what could not be removed reaches the record while it is still
@@ -878,6 +947,9 @@ mod tests {
                 env_profile: None,
                 kind: kind::require("claude").expect("a known kind"),
                 shim: None,
+                // No flag, so the trace's own seam is never reached: these tests are about the
+                // two checks that run on every launch.
+                trace: None,
             },
             &policy,
             &loaded,
@@ -889,6 +961,7 @@ mod tests {
             &mut record,
             probe,
             floor_self_test,
+            |_, _| panic!("no flag asked for a trace"),
         )
         .expect_err("the launch refuses");
         (refusal, record.record().capabilities.is_some())

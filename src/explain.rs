@@ -300,7 +300,12 @@ fn render_resolved(resolved: &Resolved, out: &mut impl Write) -> io::Result<()> 
             )?;
         }
     }
-    render_routes(&resolved.routes, resolved.upstream_roots, out)
+    render_routes(
+        &resolved.routes,
+        resolved.upstream_roots,
+        resolved.unix_socket_regime.as_deref(),
+        out,
+    )
 }
 
 /// The resolved route table ([spec §14.2]): each route's destination, the minter that makes its
@@ -319,8 +324,17 @@ fn render_resolved(resolved: &Resolved, out: &mut impl Write) -> io::Result<()> 
 fn render_routes(
     routes: &[resolve::ResolvedRoute],
     upstream_roots: Option<proxy::Provenance>,
+    unix_socket_regime: Option<&str>,
     out: &mut impl Write,
 ) -> io::Result<()> {
+    // Before the routes, and whatever the routes are: a unix-socket credential oracle hands out
+    // the means with no secret crossing the boundary, so it is reachable on a profile that
+    // resolves no route at all ([spec §6.3]).
+    //
+    // [spec §6.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#63-credential-oracles
+    if let Some(regime) = unix_socket_regime {
+        writeln!(out, "unix sockets  {}", OneLine(regime))?;
+    }
     writeln!(out, "routes")?;
     if routes.is_empty() {
         return writeln!(out, "  none, so no proxy runs");
@@ -445,46 +459,66 @@ fn json(value: &impl serde::Serialize, out: &mut impl Write) -> io::Result<()> {
 fn render_run(replay: &Replay, out: &mut impl Write) -> io::Result<()> {
     let record = replay.record;
     let known = |value: Option<String>| value.unwrap_or_else(|| "-".into());
-    let fields = [
-        ("run", record.run.clone()),
-        ("started", timestamp(record.started_at_unix_ms)),
-        ("kind", known(record.kind.clone())),
-        (
-            "policy",
-            known(record.policy.as_ref().map(|p| p.display().to_string())),
-        ),
-        ("profile", known(record.profile.clone())),
-        ("launched", known(record.launched_at_unix_ms.map(timestamp))),
-        ("pid", known(record.pid.map(|pid| pid.to_string()))),
-        ("ended", known(record.ended_at_unix_ms.map(timestamp))),
-        (
-            "status",
-            known(record.status.map(|status| status.to_string())),
-        ),
-        (
-            "refusal",
-            known(
-                record
-                    .refusal
-                    .as_ref()
-                    .map(|r| format!("{}: {}", r.code, r.message)),
+    let fields =
+        [
+            ("run", record.run.clone()),
+            ("started", timestamp(record.started_at_unix_ms)),
+            ("kind", known(record.kind.clone())),
+            (
+                "policy",
+                known(record.policy.as_ref().map(|p| p.display().to_string())),
             ),
-        ),
-        // A crash is not a refusal, and a surface whose job is to state facts must not report it
-        // as one ([ADR 0024]).
-        //
-        // [ADR 0024]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0024-a-status-playpen-cannot-learn-is-a-fault-and-not-a-refusal.md
-        (
-            "fault",
-            known(
-                record
-                    .fault
-                    .as_ref()
-                    .map(|f| format!("{}: {}", f.code, f.message)),
+            ("profile", known(record.profile.clone())),
+            ("launched", known(record.launched_at_unix_ms.map(timestamp))),
+            ("pid", known(record.pid.map(|pid| pid.to_string()))),
+            ("ended", known(record.ended_at_unix_ms.map(timestamp))),
+            (
+                "status",
+                known(record.status.map(|status| status.to_string())),
             ),
-        ),
-        ("denials", known(replay.denials.clone())),
-    ];
+            (
+                "refusal",
+                known(
+                    record
+                        .refusal
+                        .as_ref()
+                        .map(|r| format!("{}: {}", r.code, r.message)),
+                ),
+            ),
+            // A crash is not a refusal, and a surface whose job is to state facts must not report it
+            // as one ([ADR 0024]).
+            //
+            // [ADR 0024]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0024-a-status-playpen-cannot-learn-is-a-fault-and-not-a-refusal.md
+            (
+                "fault",
+                known(
+                    record
+                        .fault
+                        .as_ref()
+                        .map(|f| format!("{}: {}", f.code, f.message)),
+                ),
+            ),
+            ("denials", known(replay.denials.clone())),
+            // Which regime denied a unix-socket credential oracle, stated outward only: never in the
+            // manifest, because it maps what is worth attacking ([spec §6.3]).
+            //
+            // [spec §6.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#63-credential-oracles
+            ("regime", known(record.unix_socket_regime.clone())),
+            (
+                "trace",
+                known(record.denial_trace.as_ref().map(
+                    |file| match &record.denial_trace_unverified {
+                        // A trace the bracketing self-test could not vouch for says so here too:
+                        // presented as complete, it would read as "nothing was denied"
+                        // ([spec §14.5]).
+                        //
+                        // [spec §14.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#145---trace-denials
+                        Some(why) => format!("{} (unverified: {why})", file.display()),
+                        None => file.display().to_string(),
+                    },
+                )),
+            ),
+        ];
     for (name, value) in fields {
         writeln!(out, "{name:<9} {}", OneLine(&value))?;
     }
@@ -567,12 +601,40 @@ fn denials(record: &Record) -> Option<String> {
     Some(command)
 }
 
-/// On Linux the query waits on the Landlock domain id, which covers the child's whole tree where a
-/// pid does not, and which the record does not hold yet
-/// ([#98](https://github.com/firefly-engineering/playpen/issues/98)).
+/// On Linux the query filters on the Landlock **domain id**, which covers the child's whole tree
+/// where a pid does not ([spec §14.2]). The record holds one only for a run that was traced: the
+/// id is learned by reading the journal, and a run that asked for no trace never read it, so
+/// `null` there is the honest answer rather than a command that would return everything.
+///
+/// The id is printed into a shell command, so it is used only when it reads as one — a Landlock
+/// domain id is hex — and an edited or damaged record yields no command rather than an injection.
+///
+/// The filter is a **fixed string** the operator runs, which is what macOS's `CONTAINS` predicate
+/// is too: the journal has no field holding the domain, so there is nowhere to match on. It is not
+/// the tokenizer rule of [`crate::trace`], which governs what *playpen* reads a record with.
+///
+/// No clock margin, unlike macOS: journald stamps an entry from `CLOCK_REALTIME`, the same clock
+/// the record's own timestamps come from, so the window needs no widening
+/// ([#142](https://github.com/firefly-engineering/playpen/issues/142) was about the unified log's
+/// separate time base).
+///
+/// [spec §14.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#142-playpen-explain
 #[cfg(target_os = "linux")]
-fn denials(_record: &Record) -> Option<String> {
-    None
+fn denials(record: &Record) -> Option<String> {
+    let domain = record.landlock_domain.as_ref()?;
+    if domain.is_empty() || !domain.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let launched = record.launched_at_unix_ms?;
+    let mut command = format!(
+        "journalctl --no-pager -o cat --since=@{} _TRANSPORT=audit",
+        launched / 1000
+    );
+    if let Some(ended) = record.ended_at_unix_ms {
+        command += &format!(" --until=@{}", ended.div_ceil(1000));
+    }
+    command += &format!(" | grep -F 'domain={domain}'");
+    Some(command)
 }
 
 /// One line per run: its id, when it started, the kind and profile, and how it ended.
@@ -664,6 +726,47 @@ mod tests {
             "refusal": null,
         }))
         .expect("a record")
+    }
+
+    /// A traced run is queried by its **Landlock domain**, which every process in its tree is
+    /// confined by, where a pid is one process ([spec §14.2]).
+    ///
+    /// [spec §14.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#142-playpen-explain
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_traced_runs_denials_are_queried_by_its_landlock_domain() {
+        let mut record = ran(
+            Some(82276),
+            Some(1_791_186_693_069),
+            Some(1_791_186_693_200),
+        );
+        record.landlock_domain = Some("195ba459b".into());
+        let expected = concat!(
+            "journalctl --no-pager -o cat --since=@1791186693 _TRANSPORT=audit",
+            " --until=@1791186694 | grep -F 'domain=195ba459b'",
+        );
+        assert_eq!(denials(&record).as_deref(), Some(expected));
+    }
+
+    /// A run that asked for no trace never read the journal, so it learnt no domain, and the
+    /// honest answer is no command rather than one that would return every run's denials.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_untraced_runs_denials_have_no_command() {
+        let record = ran(Some(82276), Some(1_791_186_693_069), None);
+        assert_eq!(denials(&record), None);
+    }
+
+    /// The domain is printed into a shell command, so a record that does not read as one yields
+    /// no command rather than an injection.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_domain_that_is_not_a_domain_yields_no_command() {
+        for forged in ["", "'; rm -rf /; '", "195ba459b'"] {
+            let mut record = ran(Some(82276), Some(1_791_186_693_069), None);
+            record.landlock_domain = Some(forged.into());
+            assert_eq!(denials(&record), None, "{forged:?}");
+        }
     }
 
     /// A tagged run is queried by its tag, which every process in its tree logs its denials with,

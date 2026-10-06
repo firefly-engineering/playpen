@@ -7,8 +7,50 @@ use playpen::code::Code;
 
 use crate::row::{
     Action, Asymmetry, BOTH, Class, Decision, Expected, Fixture, Invocation, Legs, Listening, Os,
-    POLICY_SPAN_SITES, Platform, Precondition, Row, Scope, Services, Signalled, Target,
+    POLICY_SPAN_SITES, Platform, Precondition, Row, Rung, Scope, Services, Signalled, Target,
 };
+
+/// Linux only, under the denial-visibility asymmetry: macOS yields a trace with zero
+/// preconditions, where Linux has three and a channel self-test. Partly permanent — macOS's
+/// channel is certifiable *a priori* and Linux's only *a posteriori* ([spec §15.4] item 4).
+///
+/// [spec §15.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#154-named-asymmetries
+const TRACING: Platform = Platform {
+    scope: Scope::Only(Os::Linux, Asymmetry::DenialVisibility),
+    requires: &[],
+};
+
+/// What every `R-trace-denials` row rests on.
+const TRACE_FROM: &[Decision] = &[
+    Decision::Adr(7),
+    Decision::Adr(16),
+    Decision::Issue(32),
+    Decision::Issue(34),
+    Decision::Issue(98),
+    Decision::Issue(99),
+];
+
+/// One refusal row per rung of the ladder, each naming the precondition that failed: "the kernel
+/// is too old", "the backend does not ask for logging" and "you are not in `wheel`" are three
+/// different things an operator acts on differently, so one row asserting "it refused somehow"
+/// would be the collapse the codes exist to prevent.
+///
+/// The code comes from the rung rather than from a literal beside it, so the two cannot drift —
+/// and a rung that refuses nothing cannot be written as a refusal row at all.
+const fn rung(rung: Rung) -> Row {
+    let Some(code) = rung.code() else {
+        panic!("a refusal row's rung refuses under a code")
+    };
+    Row {
+        id: rung.row(),
+        class: Class::Refusal,
+        platform: TRACING,
+        fixture: Fixture::Outside,
+        action: Action::Refuse(Invocation::TraceDenials(rung)),
+        expected: Expected::Recorded(code),
+        from: TRACE_FROM,
+    }
+}
 
 /// Both platforms, for a row that puts a decoy in the caller's home when the host lacks the real
 /// target.
@@ -196,6 +238,54 @@ pub const ROWS: &[Row] = &[
         action: Action::Connect(Listening::DecoyAbstractSocket),
         expected: Expected::Denial,
         from: &[Decision::Adr(16), Decision::Issue(55), Decision::Issue(121)],
+    },
+    // A unix-socket **credential oracle** performs a credentialed operation for whoever reaches
+    // it, so the means escapes with no secret crossing the boundary ([spec §6.3]). On Linux this
+    // is Landlock's `FS_RESOLVE_UNIX` right, which the fork's probe negotiates from ABI 9; below
+    // it the surface is unenforceable and the row is skipped by name.
+    //
+    // Scoped to Linux only for now, which spec §17.2 has as `both`: the macOS half is fork
+    // change 1 ([#95]), and until it lands a `both` row would fail there for a reason that is
+    // true — upstream nono's `AllowAll` grants every unix socket — and that this row cannot fix.
+    // Widening it to `Scope::Both` is #95's last step.
+    //
+    // [#95]: https://github.com/firefly-engineering/playpen/issues/95
+    Row {
+        id: "N-unix-socket",
+        class: Class::Negative,
+        platform: Platform {
+            scope: Scope::Only(Os::Linux, Asymmetry::UnixSocket),
+            requires: &[Precondition::LandlockResolveUnix],
+        },
+        fixture: Fixture::ProbeRoot,
+        action: Action::Connect(Listening::DecoyUnixSocket),
+        expected: Expected::Denial,
+        from: &[
+            Decision::Adr(16),
+            Decision::Adr(22),
+            Decision::Issue(95),
+            Decision::Issue(96),
+        ],
+    },
+    // `--trace-denials` refuses the **flag** and not the run, naming which precondition failed
+    // ([spec §14.5]). The ladder is the shipped one; what the row replaces is the facts it reads,
+    // because a host with all four preconditions can provoke none of these.
+    rung(Rung::KernelAbi),
+    rung(Rung::LandlockInactive),
+    rung(Rung::BackendNoLogging),
+    rung(Rung::NoJournalAccess),
+    rung(Rung::ChannelSilent),
+    rung(Rung::ChannelLossy),
+    // And the half that is not a refusal: a channel that delivered before the launch and is
+    // silent after it marks the trace unverified rather than presenting it as complete.
+    Row {
+        id: Rung::SilentAfterTheRun.row(),
+        class: Class::Positive,
+        platform: TRACING,
+        fixture: Fixture::Outside,
+        action: Action::TraceBrackets,
+        expected: Expected::TraceBracketed,
+        from: TRACE_FROM,
     },
     // A denial by any process in the run's tree is found by the command `explain --run` prints,
     // not only the confined child's own.
