@@ -1493,7 +1493,7 @@ fn facts(rung: Option<Rung>) -> playpen::trace::Facts {
         abi: Ok(playpen::trace::LOGGING_ABI),
         backend_logs: true,
         readable: Box::new(|| Ok(())),
-        channel: std::sync::Arc::new(move |_| delivers()),
+        self_test: std::sync::Arc::new(move |_| delivers()),
     };
     match rung {
         None => {}
@@ -1503,13 +1503,13 @@ fn facts(rung: Option<Rung>) -> playpen::trace::Facts {
         Some(Rung::NoJournalAccess) => {
             facts.readable = Box::new(|| Err("no journal files were opened".to_string()));
         }
-        Some(Rung::ChannelSilent) => facts.channel = std::sync::Arc::new(|_| Channel::Silent),
-        Some(Rung::ChannelLossy) => facts.channel = std::sync::Arc::new(|_| Channel::Lossy),
+        Some(Rung::ChannelSilent) => facts.self_test = std::sync::Arc::new(|_| Channel::Silent),
+        Some(Rung::ChannelLossy) => facts.self_test = std::sync::Arc::new(|_| Channel::Lossy),
         // The channel delivers on the pass that opens the trace and is silent on the pass that
         // brackets it, which is the flood that made journald drop its audit input mid-run.
         Some(Rung::SilentAfterTheRun) => {
             let passes = AtomicUsize::new(0);
-            facts.channel =
+            facts.self_test =
                 std::sync::Arc::new(move |_| match passes.fetch_add(1, Ordering::Relaxed) {
                     0 => delivers(),
                     _ => Channel::Silent,

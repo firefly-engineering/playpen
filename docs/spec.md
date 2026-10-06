@@ -1337,8 +1337,10 @@ in `--json`, beside the record's own fields):
   --until=@<ended> | grep -F 'domain=<id>'`, with `--until` omitted for a run with no end. The
   filter is the Landlock **domain id**, which covers the whole confined tree where a pid covers
   one process; the journal has no field holding it, so the filter is a fixed string the operator
-  runs, as macOS's `CONTAINS` predicate is. No clock margin, unlike macOS: journald stamps an
-  entry from `CLOCK_REALTIME`, the same clock the record's timestamps come from.
+  runs, as macOS's `CONTAINS` predicate is. The window is cut to whole seconds, which is the
+  resolution `--since` and `--until` take, and needs no **skew** margin beyond that, unlike macOS:
+  journald stamps an entry from `CLOCK_REALTIME`, the same clock the record's timestamps come
+  from, where the unified log has a time base of its own.
   - The record holds a domain id only for a run that was **traced** ([§14.5](#145---trace-denials)):
     the id is learnt by reading the journal, which an untraced run never does. So an untraced
     run's command is `null`, which is the honest answer rather than a query that would return
@@ -1735,18 +1737,16 @@ exactly the information both ledgers exist to carry.
    `GET …/info/refs?service=git-receive-pack` matches, because the query string is never matched.
 7. **An operator-written refreshing minter racing a host-level agent** over a single-use login.
 8. **A Linux audit exclude rule** emptying the denial trace, with rules playpen cannot read.
-9. **Unix-socket credential oracles on Linux below Landlock ABI 9.** `FS_RESOLVE_UNIX`, which
-   gates a pathname-socket `connect()`, does not exist before it, so the surface is
-   unenforceable rather than unenforced ([§6.3](#63-credential-oracles)). Refusing every launch
-   on an older kernel would be refusing the host rather than the boundary, so the regime that
-   applied is recorded **outward only** — the run record and `playpen explain`, never the
-   manifest, because it maps what is worth attacking — and `N-unix-socket` is skipped by name as
-   `skip.host.landlock-below-abi-9`.
 9. **A profile-writable directory earlier on the host's `PATH`** than the shim can shadow it for
    the next host-side invocation. Keeping `PATH` order safe is the operator's responsibility.
 10. **Unix-socket credential oracles on Linux below Landlock ABI 9.** `ssh-agent`, `gpg-agent` and
-    kindred sockets are reachable if their path is known. Recorded outward only
-    ([§6.3](#63-credential-oracles)); the residual closes as kernels move.
+    kindred sockets are reachable if their path is known: `FS_RESOLVE_UNIX`, which gates a
+    pathname-socket `connect()`, does not exist before that ABI, so the surface is
+    *unenforceable* rather than unenforced — refusing every launch on an older kernel would be
+    refusing the host rather than the boundary. Recorded outward only
+    ([§6.3](#63-credential-oracles)), and `N-unix-socket` is skipped by name as
+    `skip.host.landlock-below-abi-9` rather than moved somewhere weaker. The residual closes as
+    kernels move.
 11. **The run scratch and `ephemeral` areas a fault leaves on disk.** A run that ends by `SIGABRT`
     ([§11.6](#116-process-transparency)) runs no teardown. The credential half needs none: the
     proxy is hosted in the supervisor rather than detached, so process death *is* the credential

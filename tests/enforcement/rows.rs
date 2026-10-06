@@ -244,18 +244,20 @@ pub const ROWS: &[Row] = &[
     // is Landlock's `FS_RESOLVE_UNIX` right, which the fork's probe negotiates from ABI 9; below
     // it the surface is unenforceable and the row is skipped by name.
     //
-    // Scoped to Linux only for now, which spec §17.2 has as `both`: the macOS half is fork
-    // change 1 ([#95]), and until it lands a `both` row would fail there for a reason that is
-    // true — upstream nono's `AllowAll` grants every unix socket — and that this row cannot fix.
-    // Widening it to `Scope::Both` is #95's last step.
+    // `both`, as spec §17.2 has it, and skipped on macOS by name until fork change 1 lands
+    // ([#95]). Not `Scope::Only(Os::Linux, …)`: asymmetry #1 favours macOS, where this surface is
+    // denied on every version, so `n/a` there would state the ledger backwards.
     //
     // [#95]: https://github.com/firefly-engineering/playpen/issues/95
     Row {
         id: "N-unix-socket",
         class: Class::Negative,
         platform: Platform {
-            scope: Scope::Only(Os::Linux, Asymmetry::UnixSocket),
-            requires: &[Precondition::LandlockResolveUnix],
+            scope: Scope::Both,
+            requires: &[
+                Precondition::LandlockResolveUnix,
+                Precondition::BackendDeniesUnixSockets,
+            ],
         },
         fixture: Fixture::ProbeRoot,
         action: Action::Connect(Listening::DecoyUnixSocket),
@@ -263,6 +265,10 @@ pub const ROWS: &[Row] = &[
         from: &[
             Decision::Adr(16),
             Decision::Adr(22),
+            // A blanket socket allowance the backend emits on its own initiative is a violation
+            // of the seam rather than a property of the platform, which is what both halves of
+            // this row's fork change are correcting.
+            Decision::Adr(29),
             Decision::Issue(95),
             Decision::Issue(96),
         ],

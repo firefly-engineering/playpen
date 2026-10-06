@@ -23,9 +23,14 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::code::Code;
 use crate::refusal::Refusal;
 
-/// The Landlock ABI that first logs a denial at all ([spec §14.5]). Public because the suite's
-/// `R-trace-denials` rows build their facts around it, and an ABI they spelled themselves could
-/// drift from the one the ladder compares against.
+/// The Landlock ABI that first logs a denial at all ([spec §14.5]).
+///
+/// Spelled, where [`crate::mechanism`] reads the `FS_RESOLVE_UNIX` ABI out of the `landlock`
+/// crate's own table: that table is of access *rights*, and this is a `restrict_self` **flag**,
+/// whose `since()` the crate keeps `pub(crate)`. There is no public expression of it to defer to.
+///
+/// Public because the suite's `R-trace-denials` rows build their facts around it, and an ABI they
+/// spelled themselves could drift from the one the ladder compares against.
 ///
 /// [spec §14.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#145---trace-denials
 pub const LOGGING_ABI: libc::c_long = 7;
@@ -59,7 +64,7 @@ pub struct Tracing {
     workspace: PathBuf,
     /// The channel self-test, held rather than called twice by name, so the pass that brackets
     /// the run is the same test as the pass that opened the trace.
-    channel: Channels,
+    self_test: SelfTest,
     /// The domain the self-test's own denial was logged under, which is what keeps it out of the
     /// run's trace — by its id, read off the record, and never by a pattern over the text.
     self_test_domain: String,
@@ -100,12 +105,18 @@ pub enum Channel {
     Lossy,
     /// No record appeared within the budget.
     Silent,
+    /// The self-test could not be **run** at all: the marker could not be written, or the
+    /// throwaway domain did not deny the read. That is playpen's own failure and not the
+    /// channel's, so it is not `channel-silent` — an operator told to enable journald's audit
+    /// socket would be fixing the wrong thing, and nothing was provoked for the channel to have
+    /// carried.
+    Unprovoked(String),
 }
 
 /// The channel self-test, as a value: held by the [`Tracing`] so that the pass bracketing the run
 /// is the same test as the pass that opened it, and shared rather than cloned because a self-test
 /// that differed between the two passes would make the bracket meaningless.
-pub type Channels = std::sync::Arc<dyn Fn(&Path) -> Channel + Send + Sync>;
+pub type SelfTest = std::sync::Arc<dyn Fn(&Path) -> Channel + Send + Sync>;
 
 /// What the trace needs of the host and of the backend. [`Facts::probed`] is what every launch
 /// uses; it is a value rather than four calls so the suite's `R-trace-denials` row can drive the
@@ -123,7 +134,7 @@ pub struct Facts {
     /// Whether this user can read the journal, attempted rather than inferred.
     pub readable: Box<dyn FnOnce() -> Result<(), String>>,
     /// The channel self-test, run once before the launch and once after the agent exits.
-    pub channel: Channels,
+    pub self_test: SelfTest,
 }
 
 impl Facts {
@@ -133,7 +144,7 @@ impl Facts {
             abi: abi(),
             backend_logs: backend_logs(),
             readable: Box::new(journal_readable),
-            channel: std::sync::Arc::new(self_test),
+            self_test: std::sync::Arc::new(channel_self_test),
         }
     }
 }
@@ -152,14 +163,14 @@ pub fn open_with(facts: Facts, file: &Path, workspace: &Path) -> Result<Tracing,
         abi,
         backend_logs,
         readable,
-        channel,
+        self_test,
     } = facts;
-    let test = channel.clone();
+    let test = self_test.clone();
     let domain = ladder(abi, backend_logs, readable, || test(workspace), workspace)?;
     let tracing = Tracing {
         file: file.to_owned(),
         workspace: workspace.to_owned(),
-        channel,
+        self_test,
         self_test_domain: domain,
         following: None,
         domain: None,
@@ -232,6 +243,14 @@ fn ladder(
     }
     match channel() {
         Channel::Delivers { domain } => Ok(domain),
+        Channel::Unprovoked(why) => Err(Refusal::new(
+            Code::StateIo,
+            format!(
+                "--trace-denials could not run its channel self-test under {}, so whether the \
+                 channel delivers was never observed: {why}",
+                workspace.display()
+            ),
+        )),
         Channel::Lossy => Err(Refusal::new(
             Code::TraceChannelLossy,
             format!(
@@ -328,7 +347,7 @@ impl Tracing {
         }
         // Never cached, and never skipped because the first one passed: what this one looks for
         // is a channel that stopped working *during* the run.
-        match (self.channel)(&self.workspace) {
+        match (self.self_test)(&self.workspace) {
             Channel::Delivers { .. } => None,
             Channel::Lossy => Some(self.unverified(format!(
                 "the channel self-test now finds its own denial only on _TRANSPORT=kernel, so \
@@ -337,6 +356,12 @@ impl Tracing {
             Channel::Silent => Some(self.unverified(format!(
                 "the channel self-test now finds no record of its own denial at all, so the \
                  journal stopped carrying them during the run; {REMEDY}"
+            ))),
+            // Teardown refuses nothing, so a self-test that could not be run leaves the trace
+            // unverified for the same reason a failing one does: nothing vouched for it.
+            Channel::Unprovoked(why) => Some(self.unverified(format!(
+                "the channel self-test could not be run after the agent exited, so the trace is \
+                 unvouched for rather than complete: {why}"
             ))),
         }
     }
@@ -413,10 +438,10 @@ fn drain(
             drained.failure = Some("the journal stopped being readable mid-run".to_string());
             return drained;
         };
-        let Some(record) = Record::read(&line) else {
+        let Some(entry) = Entry::read(&line) else {
             continue;
         };
-        let fields = Fields::of(&record.message);
+        let fields = Fields::of(&entry.message);
         let Some(domain) = fields.get("domain") else {
             continue;
         };
@@ -432,7 +457,7 @@ fn drain(
         if drained.domain.as_deref() != Some(domain) {
             continue;
         }
-        if writeln!(file, "{}\t{}", record.transport, record.message).is_err() {
+        if writeln!(file, "{}\t{}", entry.transport, entry.message).is_err() {
             drained.failure = Some("the trace could not be written to".to_string());
             return drained;
         }
@@ -440,19 +465,20 @@ fn drain(
     drained
 }
 
-/// One journal entry, as much of it as a trace needs.
+/// One journal entry, as much of it as a trace needs. An `Entry` and never a `Record`:
+/// a **run record** is what that word means here ([`crate::record::Record`]).
 #[derive(Debug, PartialEq, Eq)]
-struct Record {
+struct Entry {
     transport: String,
     message: String,
 }
 
-impl Record {
+impl Entry {
     /// Read one line of `journalctl -o json`. A real parser over the framing, because a journal
     /// field is arbitrary bytes and journald renders one that is not UTF-8 as an array of them.
-    fn read(line: &str) -> Option<Record> {
+    fn read(line: &str) -> Option<Entry> {
         let entry: serde_json::Value = serde_json::from_str(line).ok()?;
-        Some(Record {
+        Some(Entry {
             transport: text(entry.get("_TRANSPORT")?)?,
             message: text(entry.get("MESSAGE")?)?,
         })
@@ -563,19 +589,34 @@ fn backend_logs() -> bool {
 
 /// Whether this user can read the journal, **attempted** rather than inferred from group
 /// membership: the groups are what names the cause afterwards, not what decides it.
+///
+/// It asks for **one entry and requires one back**, rather than asking for none. `journalctl -n 0`
+/// exits 0 for a user in none of [`JOURNAL_GROUPS`] — it opens no file, says so on stderr, and
+/// reports success — so a readability check built on its status alone passes for exactly the user
+/// it exists to catch, and the permissions problem then resurfaces as `channel-silent`: the
+/// misdiagnosis this rung is here to prevent.
 fn journal_readable() -> Result<(), String> {
     let read = std::process::Command::new("journalctl")
-        .args(["--quiet", "--no-pager", "-n", "0"])
+        .args(["--quiet", "--no-pager", "-n", "1", "-o", "json"])
         .stdin(std::process::Stdio::null())
         .output();
     match read {
         Err(err) => Err(format!("journalctl could not be run: {err}")),
-        Ok(output) if output.status.success() => Ok(()),
-        Ok(output) => Err(format!(
+        Ok(output) if !output.status.success() => Ok(Err(format!(
             "journalctl exited {}: {}",
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
+        ))?),
+        // Asking for one entry and getting none means no journal file was opened: a journal this
+        // user could read holds at least journald's own account of starting.
+        Ok(output) if output.stdout.iter().all(u8::is_ascii_whitespace) => Err(format!(
+            "journalctl opened no journal file, so it returned no entry at all{}",
+            match String::from_utf8_lossy(&output.stderr).trim() {
+                "" => String::new(),
+                said => format!(": {said}"),
+            }
         )),
+        Ok(_) => Ok(()),
     }
 }
 
@@ -597,7 +638,7 @@ fn groups() -> String {
     let mut named = String::new();
     for gid in gids {
         let separator = if named.is_empty() { "" } else { ", " };
-        let _ = write!(named, "{separator}{}", name(gid));
+        let _ = write!(named, "{separator}{}", group_name(gid));
     }
     match named.is_empty() {
         true => "no group at all".to_string(),
@@ -605,8 +646,8 @@ fn groups() -> String {
     }
 }
 
-/// The name of `gid`, or the number where the host knows no name for it.
-fn name(gid: libc::gid_t) -> String {
+/// The name of group `gid`, or the number where the host knows no name for it.
+fn group_name(gid: libc::gid_t) -> String {
     // SAFETY: `getgrgid` returns a pointer into static storage or null, and the name it points at
     // is NUL-terminated and is copied before anything can call `getgrgid` again.
     unsafe {
@@ -624,7 +665,7 @@ fn name(gid: libc::gid_t) -> String {
 /// the journal for its record. Never cached — the question is whether the channel delivers *now*.
 ///
 /// [spec §14.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#145---trace-denials
-fn self_test(workspace: &Path) -> Channel {
+fn channel_self_test(workspace: &Path) -> Channel {
     // A path of this run's own, so the record the poll finds is this self-test's and not a
     // concurrent playpen's.
     let marker = workspace.join(format!(
@@ -632,29 +673,48 @@ fn self_test(workspace: &Path) -> Channel {
         std::process::id(),
         now_nanos()
     ));
-    if std::fs::write(&marker, b"playpen denial-channel self-test\n").is_err() {
-        return Channel::Silent;
+    if let Err(err) = std::fs::write(&marker, b"playpen denial-channel self-test\n") {
+        return Channel::Unprovoked(format!(
+            "the marker {} is unwritable: {err}",
+            marker.display()
+        ));
     }
-    // A second back, so a journal whose clock runs a little behind playpen's still returns the
-    // record this provokes.
+    // A second back, because `--since` takes whole seconds: without it a record stamped in this
+    // same second could fall before a window cut at the next one. Not a skew margin — journald
+    // stamps from the clock this reads — but the resolution of the query.
     let since = SystemTime::now() - Duration::from_secs(1);
     let provoked = provoke(&marker);
     let _ = std::fs::remove_file(&marker);
-    if !provoked {
-        return Channel::Silent;
-    }
+    let pid = match provoked {
+        Ok(pid) => pid.to_string(),
+        Err(why) => return Channel::Unprovoked(why),
+    };
     let wanted = marker.to_string_lossy().into_owned();
     let deadline = Instant::now() + BUDGET;
     let mut lossy = false;
+    // The **domain** this self-test's own denial was logged under, learnt from the
+    // `status=allocated` record naming the pid that allocated it. Two fields identify the record
+    // and not one ([spec §14.5]): the path is unique to this self-test, and the domain is what a
+    // *concurrent* playpen's self-test cannot share even if it chose the same path.
+    let mut provoker = None;
     loop {
-        for record in since_then(since) {
-            let fields = Fields::of(&record.message);
+        for entry in since_then(since) {
+            let fields = Fields::of(&entry.message);
+            if fields.get("status") == Some("allocated") && fields.get("pid") == Some(pid.as_str())
+            {
+                provoker = fields.get("domain").map(str::to_owned);
+            }
             if fields.get("path") != Some(wanted.as_str()) {
                 continue;
             }
-            if record.transport == "audit" {
-                // The domain is what keeps this denial out of the run's own trace. A record that
-                // carries none is still the channel delivering, which is what was asked.
+            // Where the allocation was logged too, the denial must carry the same domain. Where it
+            // was not — the record for it can be dropped on its own — the unique path stands
+            // alone, because refusing a delivered record for a *missing* second record would
+            // report a working channel as a broken one.
+            if provoker.is_some() && fields.get("domain") != provoker.as_deref() {
+                continue;
+            }
+            if entry.transport == "audit" {
                 return Channel::Delivers {
                     domain: fields.get("domain").unwrap_or_default().to_owned(),
                 };
@@ -681,17 +741,17 @@ fn now_nanos() -> u128 {
 
 /// Fork a child into a throwaway Landlock domain that grants nothing, and have it read `marker`.
 /// Whether the read is denied is the whole of the child's job; the record it leaves is what the
-/// caller is after.
+/// caller is after. Returns the pid that was confined, which is how the domain it allocated is
+/// found in the journal.
 ///
 /// The child does nothing between `fork` and `_exit` but system calls on memory the parent laid
 /// out first, so this is sound in a process that has threads — which the second, post-run
 /// self-test runs in.
-fn provoke(marker: &Path) -> bool {
+fn provoke(marker: &Path) -> Result<libc::pid_t, String> {
     use std::os::unix::ffi::OsStrExt;
 
-    let Ok(path) = std::ffi::CString::new(marker.as_os_str().as_bytes()) else {
-        return false;
-    };
+    let path = std::ffi::CString::new(marker.as_os_str().as_bytes())
+        .map_err(|err| format!("the marker path cannot be a C string: {err}"))?;
     let attr = LandlockRulesetAttr {
         handled_access_fs: LANDLOCK_ACCESS_FS_READ_FILE,
         handled_access_net: 0,
@@ -701,7 +761,10 @@ fn provoke(marker: &Path) -> bool {
     // allocated before the fork.
     let pid = unsafe { libc::fork() };
     if pid < 0 {
-        return false;
+        return Err(format!(
+            "the self-test could not fork: {}",
+            std::io::Error::last_os_error()
+        ));
     }
     if pid == 0 {
         // SAFETY: every call here is async-signal-safe, and `attr` and `path` outlive them all.
@@ -727,7 +790,17 @@ fn provoke(marker: &Path) -> bool {
     let mut status = 0;
     // SAFETY: `pid` is this process's own child, and `status` is a local the call fills.
     unsafe { libc::waitpid(pid, &mut status, 0) };
-    libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
+    match (libc::WIFEXITED(status), libc::WEXITSTATUS(status)) {
+        (true, 0) => Ok(pid),
+        (true, 2) => Err("the throwaway Landlock domain could not be applied".to_string()),
+        (true, 3) => Err(format!(
+            "the throwaway Landlock domain did not deny reading {}",
+            marker.display()
+        )),
+        _ => Err(format!(
+            "the self-test's child did not exit cleanly: {status}"
+        )),
+    }
 }
 
 /// `struct landlock_ruleset_attr` from `include/uapi/linux/landlock.h`. Spelled here because the
@@ -744,13 +817,13 @@ struct LandlockRulesetAttr {
 const LANDLOCK_ACCESS_FS_READ_FILE: u64 = 1 << 2;
 
 /// The journal's kernel-facing records since `since`, read once.
-fn since_then(since: SystemTime) -> Vec<Record> {
+fn since_then(since: SystemTime) -> Vec<Entry> {
     let Ok(output) = query(since).output() else {
         return Vec::new();
     };
     String::from_utf8_lossy(&output.stdout)
         .lines()
-        .filter_map(Record::read)
+        .filter_map(Entry::read)
         .collect()
 }
 
@@ -952,14 +1025,14 @@ mod tests {
     fn a_journal_entry_is_read_through_a_parser() {
         let line = serde_json::json!({"_TRANSPORT": "audit", "MESSAGE": DENIAL}).to_string();
         assert_eq!(
-            Record::read(&line),
-            Some(Record {
+            Entry::read(&line),
+            Some(Entry {
                 transport: "audit".to_string(),
                 message: DENIAL.to_string(),
             })
         );
-        assert_eq!(Record::read("not json"), None);
-        assert_eq!(Record::read(r#"{"MESSAGE":"no transport"}"#), None);
+        assert_eq!(Entry::read("not json"), None);
+        assert_eq!(Entry::read(r#"{"MESSAGE":"no transport"}"#), None);
     }
 
     /// journald renders a field that is not UTF-8 as the bytes it is, and a trace that dropped
@@ -969,7 +1042,7 @@ mod tests {
         let line =
             serde_json::json!({"_TRANSPORT": "kernel", "MESSAGE": [107, 61, 118]}).to_string();
         assert_eq!(
-            Record::read(&line).map(|record| record.message),
+            Entry::read(&line).map(|entry| entry.message),
             Some("k=v".to_string())
         );
     }
@@ -1037,7 +1110,17 @@ mod tests {
         let dir = tempdir();
         let marker = dir.join("marker");
         std::fs::write(&marker, b"x").expect("the marker");
-        assert!(provoke(&marker), "the throwaway domain denied the read");
+        assert!(
+            provoke(&marker).is_ok(),
+            "the throwaway domain denied the read"
+        );
+        // A marker that is not there at all is **still** denied, not `ENOENT`: the domain handles
+        // `READ_FILE` and grants it nowhere, so the denial is decided before the path is looked
+        // up. That is the never-`ENOENT` law ([spec §14.4]) holding at the self-test's own
+        // expense, and it is why the "did not deny" arm of `provoke` cannot be reached by
+        // removing the marker — only by a domain that failed to apply.
+        std::fs::remove_file(&marker).expect("reclaimed");
+        assert!(provoke(&marker).is_ok(), "denied, and never absent");
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -40,68 +40,106 @@ pub const REQUIRED: &[Capability] = &[Capability::ProcessScoping];
 /// outward only — in the run record and `playpen explain`, never in the manifest — because it
 /// maps what is worth attacking.
 ///
+/// A type rather than the sentence it renders to: whether the surface is **enforced** is the fact
+/// a reader wants, and a pre-rendered string makes recovering it a matter of matching prose —
+/// which is the thing [`crate::trace`]'s own tokenizer exists in order not to do.
+///
 /// [spec §6.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#63-credential-oracles
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Regime(String);
-
-impl Regime {
-    /// The sentence a record and `explain` carry.
-    pub fn stated(&self) -> &str {
-        &self.0
-    }
-
-    /// Seatbelt treats a unix-socket `connect()` as a network operation, and the pinned fork
-    /// sends unix sockets through its explicit-grant path rather than granting them all under
-    /// `AllowAll`. There are no versions, so there is nothing to probe.
-    #[cfg(target_os = "macos")]
-    pub fn probe() -> Self {
-        Regime("enforced by Seatbelt's explicit unix-socket grant path".to_string())
-    }
-
-    /// Landlock enforces a pathname-socket `connect()` from ABI 9, through the `FS_RESOLVE_UNIX`
-    /// right the fork's probe negotiates. Below it the surface is unenforceable, so it is a
-    /// **named residual** ([spec §18]) rather than a refusal: refusing every launch on a kernel
-    /// older than 6.17 would be refusing the host rather than the boundary.
+pub enum Regime {
+    /// The mechanism denies a `connect()` to an oracle's socket, by this means.
+    Enforced(Enforcement),
+    /// It cannot, so the surface is a **named residual** ([spec §18]) — unenforceable rather than
+    /// unenforced — for this reason.
     ///
     /// [spec §18]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#18-named-residuals
+    Residual(String),
+}
+
+/// How a mechanism that can deny an oracle's socket does it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Enforcement {
+    /// Landlock's `FS_RESOLVE_UNIX` right, which the fork's ABI probe negotiates, on this ABI.
+    ResolveUnix(libc::c_long),
+    /// Seatbelt's explicit-grant path for unix sockets, which the fork sends them through rather
+    /// than granting every one of them under `AllowAll` — a rule a backend emits on its own
+    /// initiative being a violation of the seam ([ADR 0029]).
+    ///
+    /// [ADR 0029]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0029-the-backend-grants-only-what-the-policy-asked-for.md
+    SeatbeltExplicitGrant,
+}
+
+impl Regime {
+    /// Whether the mechanism denies an oracle's socket at all. The fact itself, so that nothing
+    /// has to read it back out of the sentence.
+    pub fn enforced(&self) -> bool {
+        matches!(self, Regime::Enforced(_))
+    }
+
+    /// The sentence a record and `explain` carry.
+    pub fn stated(&self) -> String {
+        self.to_string()
+    }
+
+    /// Seatbelt has no versions, so there is nothing to probe: what it can express is fixed.
+    #[cfg(target_os = "macos")]
+    pub fn probe() -> Self {
+        Regime::Enforced(Enforcement::SeatbeltExplicitGrant)
+    }
+
+    /// Landlock enforces a pathname-socket `connect()` from the ABI that first offers
+    /// `FS_RESOLVE_UNIX`. Below it the surface is unenforceable, so it is a named residual rather
+    /// than a refusal: refusing every launch on an older kernel would be refusing the host rather
+    /// than the boundary.
     #[cfg(target_os = "linux")]
     pub fn probe() -> Self {
-        Regime(landlock_regime(landlock_abi()))
+        landlock_regime(landlock_abi())
     }
 }
 
 impl std::fmt::Display for Regime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        match self {
+            Regime::Enforced(Enforcement::ResolveUnix(abi)) => {
+                write!(
+                    f,
+                    "enforced by Landlock's FS_RESOLVE_UNIX right, on ABI {abi}"
+                )
+            }
+            Regime::Enforced(Enforcement::SeatbeltExplicitGrant) => {
+                f.write_str("enforced by Seatbelt's explicit unix-socket grant path")
+            }
+            Regime::Residual(why) => write!(f, "unenforced, a named residual: {why}"),
+        }
     }
 }
 
-/// The sentence a Landlock version query describes. The ABI that first offers `FS_RESOLVE_UNIX`
-/// is read from the `landlock` crate's own table rather than spelled, so it moves with the crate
-/// nono is built against.
+/// The regime a Landlock version query describes. The ABI that first offers `FS_RESOLVE_UNIX` is
+/// read from the `landlock` crate's own table rather than spelled, so it moves with the crate nono
+/// is built against.
 #[cfg(target_os = "linux")]
-fn landlock_regime(abi: std::io::Result<libc::c_long>) -> String {
+fn landlock_regime(abi: std::io::Result<libc::c_long>) -> Regime {
     use landlock::{ABI, Access, AccessFs};
 
     let resolve_unix_from = (1..=i32::from(ABI::V9 as u8))
         .find(|&abi| AccessFs::from_all(ABI::from(abi)).contains(AccessFs::ResolveUnix));
     let Ok(abi) = abi else {
-        return "unenforced: this kernel offers no Landlock, a named residual".to_string();
+        return Regime::Residual("this kernel offers no Landlock at all".to_string());
     };
     match resolve_unix_from {
         Some(first) if abi >= libc::c_long::from(first) => {
-            format!("enforced by Landlock's FS_RESOLVE_UNIX right, on ABI {abi}")
+            Regime::Enforced(Enforcement::ResolveUnix(abi))
         }
-        Some(first) => format!(
-            "unenforced: a named residual below Landlock ABI {first}, and this kernel offers ABI \
+        Some(first) => Regime::Residual(format!(
+            "Landlock's FS_RESOLVE_UNIX right arrives at ABI {first}, and this kernel offers ABI \
              {abi}"
-        ),
+        )),
         // The crate nono is built against knows no `FS_RESOLVE_UNIX` at all, so no ABI could be
         // negotiated for it whatever the kernel offers.
-        None => format!(
-            "unenforced: a named residual, because the pinned Landlock crate knows no \
-             FS_RESOLVE_UNIX right; this kernel offers ABI {abi}"
-        ),
+        None => Regime::Residual(format!(
+            "the pinned Landlock crate knows no FS_RESOLVE_UNIX right; this kernel offers ABI \
+             {abi}"
+        )),
     }
 }
 
@@ -247,45 +285,41 @@ mod tests {
         }
     }
 
-    /// The regime is the one thing playpen says about this surface, so it must say which of the
-    /// two it is rather than a sentence that reads the same either way ([spec §6.3]).
+    /// Landlock gates a pathname-socket `connect()` from the ABI that first offers
+    /// `FS_RESOLVE_UNIX`, and below it the surface is a named residual ([spec §6.3]). Asserted on
+    /// the regime itself rather than on the sentence it renders to; the sentence is asserted only
+    /// to name the ABI, which is what tells an operator whether their kernel is the problem.
     #[cfg(target_os = "linux")]
     #[test]
-    fn the_unix_socket_regime_names_enforcement_from_abi_9_and_a_residual_below_it() {
+    fn the_unix_socket_regime_enforces_from_abi_9_and_is_a_residual_below_it() {
         for abi in 1..9 {
-            let stated = landlock_regime(Ok(abi));
-            assert!(stated.starts_with("unenforced:"), "ABI {abi}: {stated}");
-            assert!(stated.contains("residual"), "ABI {abi}: {stated}");
+            let regime = landlock_regime(Ok(abi));
+            assert!(!regime.enforced(), "ABI {abi}: {regime}");
+            assert!(matches!(regime, Regime::Residual(_)), "ABI {abi}: {regime}");
             assert!(
-                stated.contains(&format!("ABI {abi}")),
-                "ABI {abi}: {stated}"
+                regime.stated().contains(&format!("ABI {abi}")),
+                "ABI {abi}: {regime}"
             );
         }
         for abi in [9, 10, 1000] {
-            let stated = landlock_regime(Ok(abi));
-            assert!(stated.starts_with("enforced by"), "ABI {abi}: {stated}");
-            assert!(stated.contains("FS_RESOLVE_UNIX"), "ABI {abi}: {stated}");
+            let regime = landlock_regime(Ok(abi));
+            assert_eq!(regime, Regime::Enforced(Enforcement::ResolveUnix(abi)));
+            assert!(regime.stated().contains("FS_RESOLVE_UNIX"), "{regime}");
         }
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn a_kernel_with_no_landlock_at_all_enforces_no_unix_socket_regime() {
-        let stated = landlock_regime(Err(std::io::Error::from_raw_os_error(libc::ENOSYS)));
-        assert!(stated.contains("residual"), "{stated}");
+        let regime = landlock_regime(Err(std::io::Error::from_raw_os_error(libc::ENOSYS)));
+        assert!(!regime.enforced(), "{regime}");
     }
 
-    /// Whatever this host is, the regime is one sentence that says which way it went: a record
-    /// carrying an empty one would state nothing.
+    /// Whatever this host is, the regime renders to one non-empty sentence: a record carrying an
+    /// empty one would state nothing.
     #[test]
     fn this_host_states_a_regime() {
-        let regime = Regime::probe();
-        assert!(!regime.stated().is_empty());
-        assert!(
-            regime.stated().starts_with("enforced by")
-                || regime.stated().starts_with("unenforced:"),
-            "{regime}"
-        );
+        assert!(!Regime::probe().stated().is_empty());
     }
 
     #[cfg(target_os = "linux")]

@@ -19,7 +19,7 @@
 mod linux;
 
 #[cfg(target_os = "linux")]
-pub use linux::{Channel, Channels, Facts, LOGGING_ABI, Tracing, open, open_with};
+pub use linux::{Channel, Facts, LOGGING_ABI, SelfTest, Tracing, open, open_with};
 
 #[cfg(not(target_os = "linux"))]
 mod elsewhere;

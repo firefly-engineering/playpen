@@ -519,6 +519,39 @@ never `ENOENT`. playpen adds nothing to it at the moment it happens.
 A broker denial is the same event at L7 — the **proxy** refusing a request an **endpoint rule
 set** does not permit — and is likewise distinguishable in-band from a transport failure.
 
+## Denial trace
+
+The kernel's own out-of-band account of what it denied one run, collected into a file the
+operator named. Never written to stderr, and never a reason to weaken the boundary: there is no
+permissive-with-logging mode, so a trace is either available or **refused**, and the refusal is
+scoped to the request for a trace rather than to the run.
+
+Where the platform can only offer one conditionally, each condition is named separately, because
+"your kernel is too old", "the **backend** does not ask for the records" and "you cannot read the
+log" are different things to act on. A trace the **channel self-test** cannot vouch for is marked
+**unverified** rather than presented as complete, since an empty trace otherwise reads as
+"nothing was denied" — the silent downgrade the whole surface exists to refuse.
+
+## Channel self-test
+
+Provoking a **denial** playpen knows the shape of, and looking for its record, to settle whether
+the denial channel delivers. An **observation** and never an inference: the alternative is reading
+whether the kernel's audit subsystem is switched on, which needs a strictly stronger privilege
+than reading what it logged, so there is nothing to read.
+
+It **brackets** the run — once before, once after the agent exits — because the channel can stop
+working mid-run, and a flood of denials is what stops it. It is never cached, for the reason the
+**floor self-test** is not: the question is whether the channel delivers *now*. A record that
+arrived by a lossy path is a failure and not a pass, because accepting it would hand back exactly
+the trace that reads as "nothing was denied".
+
+## Unix-socket regime
+
+Which mechanism, on this host, denies a **credential oracle** reached over a unix socket — or the
+statement that none can, in which case the surface is a **named residual**. Stated outward only,
+in the **run record** and `playpen explain`, and never in the **manifest**: it maps what is worth
+attacking, which is the one thing the manifest's audience should not be handed.
+
 ## Refusal
 
 playpen declining to launch. The standing alternative to any silent downgrade: where a

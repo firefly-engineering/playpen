@@ -333,7 +333,8 @@ fn render_routes(
     //
     // [spec §6.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#63-credential-oracles
     if let Some(regime) = unix_socket_regime {
-        writeln!(out, "unix sockets  {}", OneLine(regime))?;
+        // The same label the replayed form gives it, so one field does not read as two.
+        writeln!(out, "regime    {}", OneLine(regime))?;
     }
     writeln!(out, "routes")?;
     if routes.is_empty() {
