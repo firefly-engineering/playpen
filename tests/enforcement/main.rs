@@ -98,6 +98,10 @@ fn main() {
             no_upstream_leg_needs_the_request_to_have_been_refused,
         ),
         (
+            "a_command_that_fails_is_an_error_not_empty_output",
+            a_command_that_fails_is_an_error_not_empty_output,
+        ),
+        (
             "a_row_scoped_to_the_other_platform_is_na_and_never_runs",
             a_row_scoped_to_the_other_platform_is_na_and_never_runs,
         ),
@@ -202,6 +206,20 @@ fn a_negative_passes_only_on_a_denial_errno() {
         let verdict = judge(Expected::Denial, &Seen::Succeeded, &inside);
         assert!(matches!(verdict, Verdict::Fail(_)), "{verdict:?}");
     }
+}
+
+/// A command `P-denial-tree` runs that fails has said nothing about the log: read as empty output,
+/// a `log show` that cannot run would be polled to its deadline and reported as a denial the log
+/// never showed ([#142](https://github.com/firefly-engineering/playpen/issues/142)).
+fn a_command_that_fails_is_an_error_not_empty_output() {
+    // Spelled so the command's own text holds neither the stderr word nor the status the error
+    // must carry, nor anything of stdout.
+    let failed =
+        run::shell("echo p''artial; echo w''hy >&2; exit 7").expect_err("exit 7 is an error");
+    assert!(failed.contains("why"), "{failed}");
+    assert!(failed.contains("exit status: 7"), "{failed}");
+    assert!(!failed.contains("partial"), "{failed}");
+    assert_eq!(run::shell("echo said").as_deref(), Ok("said\n"));
 }
 
 /// A sandbox denies a lookup as not privileged; an unknown service is what absence reads as, so
