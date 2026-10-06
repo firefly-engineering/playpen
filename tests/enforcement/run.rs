@@ -246,12 +246,10 @@ fn manifest_is_true(row: &Row) -> Verdict {
         Err(why) => return Verdict::Setup(why),
     };
     let fixture = common::Fixture::new();
-    // The destination's root, which this fixture's launches name as the supervisor's own store so
-    // the broker can verify it ([ADR 0030]).
-    let root = fixture.policy_dir.path().join("destination-root.pem");
-    if let Err(e) = fs::write(&root, &destination.root) {
-        return Verdict::Setup(format!("the destination's root {}: {e}", root.display()));
-    }
+    let root = match destination.root_in(&fixture) {
+        Ok(root) => root,
+        Err(why) => return Verdict::Setup(why),
+    };
     let (read_only, elsewhere) = match (TempDir::new(), TempDir::new()) {
         (Ok(read_only), Ok(elsewhere)) => (read_only, elsewhere),
         _ => return Verdict::Setup("a directory for the row's roots".into()),
@@ -317,11 +315,9 @@ fn manifest_is_true(row: &Row) -> Verdict {
             Err(why) => return Verdict::Setup(why),
         }
     );
-    let launched = fixture
-        .run_under(&policy, &[&common::os_bin("sh"), "-c", &script])
-        .env("SSL_CERT_FILE", &root)
-        .env_remove("SSL_CERT_DIR")
-        .stdin(Stdio::null())
+    let mut launching = fixture.run_under(&policy, &[&common::os_bin("sh"), "-c", &script]);
+    launching.stdin(Stdio::null());
+    let launched = trusting_only(&mut launching, &root)
         .output()
         .expect("run playpen");
     if !launched.status.success() {
@@ -423,46 +419,51 @@ fn manifest_is_true(row: &Row) -> Verdict {
     let mut route_ops: Vec<RouteOp> = Vec::new();
     for (i, route) in routes.iter().enumerate() {
         let path = format!("{}manifest-{i}", route.path_prefix);
-        let op = |via: Via| {
-            serde_json::json!({
-                "via": match via { Via::Proxy => "proxy", Via::Direct => "direct" },
-                "method": "GET",
-                "authority": format!("{}:{}", route.host, destination.addr.port()),
-                "path": path,
-                "header": ROUTE_HEADER,
-                "delivery": route.delivery_env,
-            })
-            .to_string()
-        };
+        let authority = format!("{}:{}", route.host, destination.addr.port());
         route_ops.push(RouteOp {
-            outside: op(Via::Direct),
-            inside: op(Via::Proxy),
+            outside: request_json(Via::Direct, &authority, "GET", &path, &route.delivery_env),
+            inside: request_json(Via::Proxy, &authority, "GET", &path, &route.delivery_env),
             path,
             stated: format!("{}{}", route.host, route.path_prefix),
         });
     }
 
-    let mut argv: Vec<&str> = ops
+    // The filesystem ops run on both sides; the route ops run as a second invocation of their own,
+    // because what makes their outside half hold is the destination's `200` and not merely that
+    // the probe reported a request — which is all a filesystem verdict carries.
+    let argv: Vec<&str> = ops
         .iter()
         .flat_map(|(path, verb, _)| [*verb, path.as_str()])
         .collect();
-    let mut outside_argv = argv.clone();
-    for op in &route_ops {
-        outside_argv.extend(["request", op.outside.as_str()]);
-        argv.extend(["request", op.inside.as_str()]);
-    }
-    let actions = ops.len() + route_ops.len();
-    let mut outside = Command::new(PROBE);
-    outside.args(&outside_argv).env("SSL_CERT_FILE", &root);
-    // Outside there is no run and so no phantom; this half shows only that the destination
-    // answers, which is what it is for.
-    for route in routes {
-        outside.env(&route.delivery_env, "not-a-token");
-    }
-    let outside = outside
-        .env_remove("SSL_CERT_DIR")
+    let outside = Command::new(PROBE)
+        .args(&argv)
         .output()
         .expect("run the probe");
+    let mut routes_outside = Command::new(PROBE);
+    trusting_only(&mut routes_outside, &root);
+    for op in &route_ops {
+        routes_outside.args(["request", op.outside.as_str()]);
+    }
+    // Outside there is no run and so no phantom; this half shows only that the destination is up
+    // and verifiable from this host, which is what it is for.
+    for route in routes {
+        routes_outside.env(&route.delivery_env, "not-a-token");
+    }
+    let routes_outside = routes_outside
+        .stdin(Stdio::null())
+        .output()
+        .expect("run the probe");
+    let routes_outside = match exchanged(&routes_outside) {
+        Ok(answers) if answers.len() == route_ops.len() => answers,
+        Ok(answers) => {
+            return Verdict::Setup(format!(
+                "outside: the probe answered {} of {} route requests: {answers:?}",
+                answers.len(),
+                route_ops.len()
+            ));
+        }
+        Err(why) => return Verdict::Setup(format!("outside: {why}")),
+    };
     // What the destination recorded of the outside half is not the inside half's record.
     destination.forget();
     // Every op must succeed outside, whatever it is asserted to do inside, or the inside proves
@@ -470,19 +471,21 @@ fn manifest_is_true(row: &Row) -> Verdict {
     let probe = fixture.probe();
     let mut inside_argv = vec![probe.to_str().expect("a UTF-8 probe path")];
     inside_argv.extend(&argv);
+    for op in &route_ops {
+        inside_argv.extend(["request", op.inside.as_str()]);
+    }
     for (path, verb, _) in &ops {
         if *verb == "write" {
             let _ = fs::remove_file(path);
         }
     }
-    let inside = fixture
-        .run_under(&policy, &inside_argv)
-        .env("SSL_CERT_FILE", &root)
-        .env_remove("SSL_CERT_DIR")
-        .stdin(Stdio::null())
+    let mut probing = fixture.run_under(&policy, &inside_argv);
+    probing.stdin(Stdio::null());
+    let inside = trusting_only(&mut probing, &root)
         .output()
         .expect("run playpen");
-    let (outside, inside) = match (observe(outside, actions), observe(inside, actions)) {
+    let actions = ops.len() + route_ops.len();
+    let (outside, inside) = match (observe(outside, ops.len()), observe(inside, actions)) {
         (Ok(outside), Ok(inside)) => (outside, inside),
         (Err(why), _) => return Verdict::Setup(format!("outside: {why}")),
         (_, Err(why)) => return Verdict::Fail(format!("inside: {why}")),
@@ -510,12 +513,25 @@ fn manifest_is_true(row: &Row) -> Verdict {
     };
     route_ops
         .iter()
-        .zip(outside[ops.len()..].iter().zip(&inside[ops.len()..]))
+        .zip(routes_outside.iter().zip(&inside[ops.len()..]))
         .map(|(op, (outside, inside))| {
             let arrived = received
                 .iter()
                 .find(|head| head.contains(&format!(" {} HTTP/1.1\r\n", op.path)))
                 .cloned();
+            // The destination answering `200` is what makes the outside half hold: one that is
+            // down, or that this host cannot verify, is a host condition and not a false manifest.
+            let outside = match outside {
+                Ok(answer) if answer.starts_with("HTTP/1.1 200 ") => Seen::Succeeded,
+                Ok(answer) => Seen::Failed {
+                    cause: None,
+                    detail: format!("the destination answered {answer:?}"),
+                },
+                Err(why) => Seen::Failed {
+                    cause: None,
+                    detail: why.clone(),
+                },
+            };
             let seen = Exchanged {
                 proxied: Exchange {
                     answer: match inside {
@@ -524,13 +540,13 @@ fn manifest_is_true(row: &Row) -> Verdict {
                     },
                     arrived,
                 },
-                bypassing: None,
+                unbrokered: None,
                 detail: format!(
                     "the route the manifest states as {}: the destination received {received:?}",
                     op.stated
                 ),
             };
-            judge_request(Expected::Authenticated, substitution, outside, &seen)
+            judge_request(Expected::Authenticated, substitution, &outside, &seen)
         })
         .find(|verdict| *verdict != Verdict::Pass)
         .unwrap_or(Verdict::Pass)
@@ -681,11 +697,18 @@ const ROUTE_HEADER: &str = "x-api-key";
 /// The route's path prefix, which both legs' paths lie under, so each selects the route.
 const ROUTE_PREFIX: &str = "/v1/";
 
-/// The path the proxied leg asks for, and the path the bypassing leg asks for. Two paths rather
-/// than one, so what arrived at the destination is matched to the leg that sent it by its own
-/// request line rather than by arrival order.
+/// The path each leg asks for: one per leg, so what arrived at the destination is matched to the
+/// leg that sent it by its own request line rather than by arrival order.
 const PROXIED_PATH: &str = "/v1/messages";
 const BYPASSING_PATH: &str = "/v1/bypassed";
+const TUNNELLED_PATH: &str = "/v1/tunnelled";
+
+/// The authority the tunnelled leg names: the **same listener** as every other leg, under the name
+/// no route carries, so the proxy opens an opaque `CONNECT` to it rather than intercepting.
+///
+/// `127.0.0.1` rather than a made-up name because it resolves without the fixture arranging
+/// anything, and the destination's leaf carries it as a SAN beside `localhost`.
+const UNROUTED_HOST: &str = "127.0.0.1";
 
 /// The one method [`Fixture::RestrictedRoute`]'s rule set allows, on [`PROXIED_PATH`]. The row then
 /// asks for that path with [`DENIED_METHOD`], so what the denial turns on is the **method** and not
@@ -713,9 +736,9 @@ struct Destination {
     received: Arc<Mutex<Vec<String>>>,
     /// Set on drop, and the loop sees it on the connection drop makes.
     stopping: Arc<AtomicBool>,
-    /// A second descriptor on the listening socket, held so the wake-up connect reaches this
-    /// socket and not whatever the kernel next hands the port to.
-    held: Option<TcpListener>,
+    /// A second descriptor on the listening socket, held for this value's whole life so the
+    /// wake-up connect reaches this socket and not whatever the kernel next hands the port to.
+    _held: TcpListener,
     served: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -731,13 +754,17 @@ fn destination() -> Result<Destination, String> {
         .self_signed(&root_key)
         .map_err(|e| failed("sign a root", e))?;
     let leaf_key = rcgen::KeyPair::generate().map_err(|e| failed("make a leaf key", e))?;
-    let leaf = rcgen::CertificateParams::new(vec!["localhost".to_owned()])
-        .map_err(|e| failed("describe a leaf", e))?
-        .signed_by(
-            &leaf_key,
-            &rcgen::Issuer::from_params(&root_params, &root_key),
-        )
-        .map_err(|e| failed("sign a leaf", e))?;
+    // Both names for one listener: `localhost`, which the route carries, and `127.0.0.1`, which no
+    // route carries, so the same destination is intercepted under one name and tunnelled to under
+    // the other.
+    let leaf =
+        rcgen::CertificateParams::new(vec!["localhost".to_owned(), UNROUTED_HOST.to_owned()])
+            .map_err(|e| failed("describe a leaf", e))?
+            .signed_by(
+                &leaf_key,
+                &rcgen::Issuer::from_params(&root_params, &root_key),
+            )
+            .map_err(|e| failed("sign a leaf", e))?;
 
     let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::aws_lc_rs::default_provider(),
@@ -812,14 +839,25 @@ fn destination() -> Result<Destination, String> {
         root: root.pem(),
         received,
         stopping,
-        held: Some(held),
+        _held: held,
         served: Some(served),
     })
 }
 
 impl Destination {
-    fn authority(&self) -> String {
-        format!("localhost:{}", self.addr.port())
+    /// `host:port` for this destination under `host`, which decides whether a route matches it.
+    fn authority(&self, host: &str) -> String {
+        format!("{host}:{}", self.addr.port())
+    }
+
+    /// Write this destination's root where a launch can name it, and return the path. In the
+    /// fixture's own policy directory, which goes with the fixture, so it is reclaimed even on a
+    /// run killed before teardown.
+    fn root_in(&self, fixture: &common::Fixture) -> Result<PathBuf, String> {
+        let root = fixture.policy_dir.path().join("destination-root.pem");
+        fs::write(&root, &self.root)
+            .map(|()| root.clone())
+            .map_err(|e| format!("the destination's root {}: {e}", root.display()))
     }
 
     /// Every head received so far, and nothing of what a later leg sends.
@@ -839,14 +877,27 @@ impl Destination {
     }
 }
 
+/// Name `root` as this one process's whole trust store, the way every Unix TLS client reads it
+/// ([ADR 0030]).
+///
+/// On **one** command and never on the suite: per-suite would narrow every other row's upstream
+/// trust and make one row's failure read as another's. `SSL_CERT_DIR` is removed as well, so the
+/// store is genuinely *replaced* rather than widened — a proxy trusting only this root cannot pass
+/// by having reached something else.
+///
+/// [ADR 0030]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0030-the-hosts-own-trust-store-is-what-the-host-says-it-is.md
+fn trusting_only<'a>(command: &'a mut Command, root: &Path) -> &'a mut Command {
+    command
+        .env("SSL_CERT_FILE", root)
+        .env_remove("SSL_CERT_DIR")
+}
+
 impl Drop for Destination {
     /// Reclaimed with the row: the listener closes and the thread ends. Woken with a connection of
     /// its own rather than by `shutdown`, which Linux honours on a listener and Darwin does not.
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::SeqCst);
-        if self.held.is_some() {
-            let _ = TcpStream::connect(self.addr);
-        }
+        let _ = TcpStream::connect(self.addr);
         if let Some(served) = self.served.take() {
             let _ = served.join();
         }
@@ -877,13 +928,10 @@ fn credential_route(row: &Row, restricted: bool) -> Verdict {
         false => ("GET", PROXIED_PATH),
     };
     let fixture = common::Fixture::with_mode("read");
-    // The destination's root, where the launch's `SSL_CERT_FILE` can name it. Inside the policy
-    // directory, which goes with the fixture, so it is reclaimed even on a run killed before
-    // teardown.
-    let root = fixture.policy_dir.path().join("destination-root.pem");
-    if let Err(e) = fs::write(&root, &destination.root) {
-        return Verdict::Setup(format!("the destination's root {}: {e}", root.display()));
-    }
+    let root = match destination.root_in(&fixture) {
+        Ok(root) => root,
+        Err(why) => return Verdict::Setup(why),
+    };
     let endpoints = match restricted {
         true => serde_json::json!(["suite-restricted"]),
         false => serde_json::json!([]),
@@ -919,15 +967,15 @@ fn credential_route(row: &Row, restricted: bool) -> Verdict {
 
     // Outside: the same request, direct, with the destination's root as this process's only trust.
     // It must succeed, whatever the row asserts inside.
-    let outside_op = request_op(&destination, Via::Direct, method, path);
-    let outside = Command::new(PROBE)
+    let outside_op = request_op(&destination, Via::Direct, "localhost", method, path);
+    let mut outside = Command::new(PROBE);
+    outside
         .args(["request", &outside_op])
         // Outside there is no run and so no phantom. The destination answers whatever it is sent,
         // so this half shows only that it is up and verifiable, which is what it is for.
         .env(ROUTE_DELIVERY, "not-a-token")
-        .env("SSL_CERT_FILE", &root)
-        .env_remove("SSL_CERT_DIR")
-        .stdin(Stdio::null())
+        .stdin(Stdio::null());
+    let outside = trusting_only(&mut outside, &root)
         .output()
         .expect("run the probe");
     let outside = match exchanged(&outside) {
@@ -953,10 +1001,39 @@ fn credential_route(row: &Row, restricted: bool) -> Verdict {
     // Inside: the legs the row drives, in one confined launch. `SSL_CERT_FILE` is set on **this
     // launch** and never on the suite, and it *replaces* the store rather than extending it, so a
     // broker trusting only this root cannot pass by having reached something else ([ADR 0030]).
-    let mut ops = vec![request_op(&destination, Via::Proxy, method, path)];
-    if legs == Legs::ProxiedAndBypassing {
-        ops.push(request_op(&destination, Via::Direct, "GET", BYPASSING_PATH));
-    }
+    let mut ops = vec![request_op(
+        &destination,
+        Via::Proxy,
+        "localhost",
+        method,
+        path,
+    )];
+    // The second leg of a pair, which the broker does not broker. `Bypassing` goes around the
+    // proxy; `Tunnelled` goes through it to the name no route carries, so it opens an opaque
+    // `CONNECT` and the destination's own certificate is what the child has to verify.
+    let unbrokered_path = match legs {
+        Legs::Proxied => None,
+        Legs::ProxiedAndBypassing => {
+            ops.push(request_op(
+                &destination,
+                Via::Direct,
+                "localhost",
+                "GET",
+                BYPASSING_PATH,
+            ));
+            Some(BYPASSING_PATH)
+        }
+        Legs::ProxiedAndTunnelled => {
+            ops.push(request_op(
+                &destination,
+                Via::Proxy,
+                UNROUTED_HOST,
+                "GET",
+                TUNNELLED_PATH,
+            ));
+            Some(TUNNELLED_PATH)
+        }
+    };
     let probe = fixture.probe();
     let mut argv = vec![probe.to_str().expect("a UTF-8 probe path").to_owned()];
     for op in &ops {
@@ -964,11 +1041,9 @@ fn credential_route(row: &Row, restricted: bool) -> Verdict {
         argv.push(op.clone());
     }
     let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
-    let inside = fixture
-        .run_under(&policy, &argv)
-        .env("SSL_CERT_FILE", &root)
-        .env_remove("SSL_CERT_DIR")
-        .stdin(Stdio::null())
+    let mut inside = fixture.run_under(&policy, &argv);
+    inside.stdin(Stdio::null());
+    let inside = trusting_only(&mut inside, &root)
         .output()
         .expect("run playpen");
     let answers = match exchanged(&inside) {
@@ -996,9 +1071,11 @@ fn credential_route(row: &Row, restricted: bool) -> Verdict {
             answer: answers[0].clone(),
             arrived: arrived(PROXIED_PATH),
         },
-        bypassing: answers.get(1).map(|answer| Exchange {
-            answer: answer.clone(),
-            arrived: arrived(BYPASSING_PATH),
+        unbrokered: unbrokered_path.and_then(|path| {
+            answers.get(1).map(|answer| Exchange {
+                answer: answer.clone(),
+                arrived: arrived(path),
+            })
         }),
         detail: format!(
             "answers {answers:?}; the destination received {received:?}; playpen {}, stderr {:?}",
@@ -1024,18 +1101,41 @@ enum Via {
     Direct,
 }
 
+impl Via {
+    /// The spelling the probe's own `Via` deserializes.
+    fn named(self) -> &'static str {
+        match self {
+            Via::Proxy => "proxy",
+            Via::Direct => "direct",
+        }
+    }
+}
+
 /// One `request` operand for the probe: JSON, because a request takes more operands than a
 /// positional list could be read back from.
-fn request_op(destination: &Destination, via: Via, method: &str, path: &str) -> String {
+///
+/// `delivery` names the **variable**, never the value: no token belongs on a command line, where
+/// the host's process table can read it.
+fn request_op(destination: &Destination, via: Via, host: &str, method: &str, path: &str) -> String {
+    request_json(
+        via,
+        &destination.authority(host),
+        method,
+        path,
+        ROUTE_DELIVERY,
+    )
+}
+
+/// As [`request_op`], for a caller that has the authority and the delivery variable already — the
+/// manifest's route half reads both out of the manifest rather than from this fixture's constants.
+fn request_json(via: Via, authority: &str, method: &str, path: &str, delivery: &str) -> String {
     serde_json::json!({
-        "via": match via { Via::Proxy => "proxy", Via::Direct => "direct" },
+        "via": via.named(),
         "method": method,
-        "authority": destination.authority(),
+        "authority": authority,
         "path": path,
         "header": ROUTE_HEADER,
-        // The variable, never the value: no token belongs on a command line, where the host's
-        // process table can read it.
-        "delivery": ROUTE_DELIVERY,
+        "delivery": delivery,
     })
     .to_string()
 }
@@ -1054,13 +1154,13 @@ fn exchanged(output: &Output) -> Result<Vec<Result<String, String>>, String> {
         .map(|line| {
             let verdict: Value =
                 serde_json::from_str(line).map_err(|e| format!("verdict {line:?}: {e}"))?;
-            match verdict["ok"].as_bool() {
-                Some(true) => Ok(Ok(verdict["answer"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_owned())),
-                Some(false) => Ok(Err(verdict["detail"].as_str().unwrap_or(line).to_owned())),
-                None => Err(format!("verdict {line:?} has no `ok`")),
+            // A malformed verdict is the harness's fault, never the boundary's: an answer
+            // defaulted to empty would read as a destination that said nothing.
+            match (verdict["ok"].as_bool(), verdict["answer"].as_str()) {
+                (Some(true), Some(answer)) => Ok(Ok(answer.to_owned())),
+                (Some(true), None) => Err(format!("verdict {line:?} carries no `answer`")),
+                (Some(false), _) => Ok(Err(verdict["detail"].as_str().unwrap_or(line).to_owned())),
+                (None, _) => Err(format!("verdict {line:?} has no `ok`")),
             }
         })
         .collect()

@@ -333,12 +333,29 @@ pub enum Action {
 pub enum Legs {
     /// Through the proxy alone: the credential path.
     Proxied,
-    /// Both, against **one** destination, asserted as a pair. The proxied request is authenticated
-    /// and the bypassing one is not — and carries no phantom either. The pair is what keeps the
-    /// bypass half from being vacuous: "the bypassing request had no credential" would pass on a
-    /// build where the proxy injected into everything
-    /// ([#86](https://github.com/firefly-engineering/playpen/issues/86)).
+    /// Both, against **one** destination, asserted as a pair: the proxied request is authenticated
+    /// and the bypassing one is not. The pair is what keeps the bypass half from being vacuous —
+    /// "the bypassing request had no credential" would pass on a build where the proxy injected
+    /// into everything ([#86](https://github.com/firefly-engineering/playpen/issues/86)).
+    ///
+    /// The bypassing request **does** arrive carrying the phantom, because both legs present the
+    /// same request and nothing on this one strips it. That is not a leak, and asserting otherwise
+    /// would mean driving the two legs with different requests, which is the vacuity the pair
+    /// exists to rule out. See [`Expected::OnlyThroughTheProxy`].
     ProxiedAndBypassing,
+    /// The proxied leg, paired with one **through** the proxy to a **non-routed** authority, where
+    /// the proxy opens an opaque `CONNECT` and reads nothing of it ([spec §6.2]).
+    ///
+    /// The same destination, reached as `127.0.0.1` rather than as the route's `localhost`, so one
+    /// listener is routed under one name and not under the other. It answers with its own real
+    /// certificate, which the child verifies against a **host root** out of the bundle
+    /// `SSL_CERT_FILE` names — the combination
+    /// [#140](https://github.com/firefly-engineering/playpen/issues/140) is about, and the one the
+    /// bare session CA broke. The tunnelled request arrives unauthenticated, because a tunnel the
+    /// proxy cannot read is a tunnel it does not inject into.
+    ///
+    /// [spec §6.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#62-the-broker
+    ProxiedAndTunnelled,
 }
 
 impl Action {
@@ -543,9 +560,16 @@ pub enum Expected {
     ///
     /// [spec §7.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#73-session-phantom
     Authenticated,
-    /// As [`Expected::Authenticated`] for the proxied leg, and the **bypassing** leg arrives with
-    /// neither the secret nor the phantom. One assertion over a pair, because either half alone
-    /// would pass on a build the other catches.
+    /// As [`Expected::Authenticated`] for the proxied leg, and the **bypassing** leg arrives
+    /// without the secret. One assertion over a pair, because either half alone would pass on a
+    /// build the other catches: injecting into nothing, and a real secret having reached the
+    /// child's environment.
+    ///
+    /// Not "without the phantom" — the bypassing leg carries it by construction, since both legs
+    /// present the same request. The phantom is not a secret, and what it buys is use of the
+    /// *proxy*, which a destination is not ([spec §7.3]).
+    ///
+    /// [spec §7.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#73-session-phantom
     OnlyThroughTheProxy,
     /// Succeeds outside; inside the broker answers `403` with this code and `X-Playpen-Denied`
     /// ([spec §6.4]). A broker denial is a kernel denial's counterpart at L7, so this is a
@@ -753,8 +777,9 @@ pub struct Exchange {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Exchanged {
     pub proxied: Exchange,
-    /// The bypassing leg, where the row drove one.
-    pub bypassing: Option<Exchange>,
+    /// The leg the broker does not broker, where the row drove one: direct around the proxy, or
+    /// through it to a non-routed authority, where it opens an opaque tunnel and reads nothing.
+    pub unbrokered: Option<Exchange>,
     /// What was observed, for the report.
     pub detail: String,
 }
@@ -763,14 +788,32 @@ pub struct Exchanged {
 /// must arrive in. The header matters because substitution is **in place** — the secret must arrive
 /// in whichever header the phantom came in, so a proxy that moved it has not done this.
 ///
-/// The phantom's own value is not here, and does not need to be: the probe presents it in this one
-/// header and nowhere else, so a header whose value is **exactly** the secret is a header the
-/// phantom was replaced in. Asserting on a phantom the harness had to be told would mean printing
-/// one on the suite's stdout to learn it.
+/// The phantom's own **value** is not here, and does not need to be: it is recognised by
+/// [`carries_a_phantom`] by its shape. A harness that had to be told the value could only learn it
+/// by having a phantom printed on the suite's stdout.
 #[derive(Debug, Clone, Copy)]
 pub struct Substitution<'a> {
     pub secret: &'a str,
     pub header: &'a str,
+}
+
+/// How many hex digits a session phantom is: `proxy::PHANTOM_BYTES`, doubled ([spec §7.3]).
+///
+/// [spec §7.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#73-session-phantom
+const PHANTOM_HEX: usize = 64;
+
+/// Whether `head` holds anything shaped like a session phantom: a run of at least [`PHANTOM_HEX`]
+/// lowercase hex digits.
+///
+/// Shape rather than value, and that is what makes it worth having: it catches a phantom
+/// **anywhere** in the head, so a broker that substituted in place and *also* copied the phantom
+/// into a second header fails — which an assertion about the one header's value cannot see.
+///
+/// Nothing a passing row sends can be mistaken for one. The probe writes only the request line,
+/// `Host`, the delivery header and `Accept`, and the secret these rows inject carries hyphens.
+fn carries_a_phantom(head: &str) -> bool {
+    head.split(|c: char| !c.is_ascii_hexdigit() || c.is_ascii_uppercase())
+        .any(|run| run.len() >= PHANTOM_HEX)
 }
 
 /// A credential-route row: the condition first holds outside, then the destination received what
@@ -800,12 +843,16 @@ pub fn judge_request(
                 "no request reached the destination, so nothing was authenticated: {detail}"
             ));
         };
-        match arrived.contains(&presented) {
-            true => Verdict::Pass,
-            false => Verdict::Fail(format!(
+        if !arrived.contains(&presented) {
+            return Verdict::Fail(format!(
                 "the secret did not arrive as the whole of the header the phantom came in \
                  ({header}): {detail}"
-            )),
+            ));
+        }
+        // And the phantom did not arrive — anywhere, not merely in that header.
+        match carries_a_phantom(arrived) {
+            false => Verdict::Pass,
+            true => Verdict::Fail(format!("the phantom reached the destination: {detail}")),
         }
     };
     match expected {
@@ -817,9 +864,9 @@ pub fn judge_request(
                 // half from passing vacuously.
                 failed => return failed,
             }
-            let Some(bypassing) = &seen.bypassing else {
+            let Some(unbrokered) = &seen.unbrokered else {
                 return Verdict::Setup(format!(
-                    "the row drove no bypassing leg, and the pair is the assertion: {detail}"
+                    "the row drove no unbrokered leg, and the pair is the assertion: {detail}"
                 ));
             };
             // A failure here is the inside's, never the host's: the outside half has already shown
@@ -827,9 +874,9 @@ pub fn judge_request(
             // inside is a boundary regression — the child's own trust store having stopped naming
             // the roots it trusts, for one
             // ([#140](https://github.com/firefly-engineering/playpen/issues/140)).
-            let Some(arrived) = &bypassing.arrived else {
+            let Some(arrived) = &unbrokered.arrived else {
                 return Verdict::Fail(format!(
-                    "the bypassing request never reached the destination, which this host reached \
+                    "the unbrokered request never reached the destination, which this host reached \
                      outside: {detail}"
                 ));
             };
@@ -839,14 +886,14 @@ pub fn judge_request(
             // against a destination that records what it was sent. A build that leaked the secret
             // into the child's environment passes a proxied-only row and fails here.
             //
-            // The bypassing request does arrive carrying the phantom, and that is not a leak: the
-            // phantom is not a secret, and what it buys is use of the *proxy*, which a destination
-            // is not. Driving this leg with something else to avoid it would make the two legs
-            // incomparable, which is the vacuity the pair exists to rule out.
+            // This leg does arrive carrying the phantom, and that is not a leak: the phantom is
+            // not a secret, and what it buys is use of the *proxy*, which a destination is not.
+            // Driving it with something else to avoid that would make the two legs incomparable,
+            // which is the vacuity the pair exists to rule out.
             match arrived.contains(secret) {
                 false => Verdict::Pass,
                 true => Verdict::Fail(format!(
-                    "a request that bypassed the proxy arrived authenticated: {detail}"
+                    "a request the broker did not broker arrived authenticated: {detail}"
                 )),
             }
         }
@@ -879,7 +926,18 @@ pub fn judge_request(
                 )),
             }
         }
-        other => Verdict::Setup(format!("{other:?} is not a credential route's assertion")),
+        // Enumerated rather than a wildcard: a new `Expected` variant must be a compile error
+        // here, not a silent `Setup`. That is the shape of the vacuous pass [ADR 0016] denies.
+        //
+        // [ADR 0016]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0016-the-suite-defines-the-backend-and-an-assertion-that-can-pass-vacuously-is-a-defect.md
+        other @ (Expected::Denial
+        | Expected::Closed
+        | Expected::Succeeds
+        | Expected::Recorded(_)
+        | Expected::RecordedAt(..)
+        | Expected::Unexamined(_)) => {
+            Verdict::Setup(format!("{other:?} is not a credential route's assertion"))
+        }
     }
 }
 

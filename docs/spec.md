@@ -1659,6 +1659,7 @@ Row ids are provisional. The implementation owns the final ids.
 | `P-unshare` | positive | the **nested** `CLONE_NEWUSER` → `CLONE_NEWPID\|CLONE_NEWNET` sequence succeeds inside; checked outside first, else `skip.host.userns-restricted` | Linux (`n/a` macOS) |
 | `P-open-bypass` | positive | asserted as a **pair** against one destination: the request through the proxy arrives authenticated, and the one that bypasses it arrives **unauthenticated**. Either half alone passes on a build the other catches — injecting into nothing, and a real secret having reached the child's environment. The probe chooses each leg explicitly, since `NO_PROXY` holds `localhost` | both |
 | `P-manifest` | positive | "the manifest is true": every stated route authenticates through the proxy, every path is accessible at its stated mode, and nothing outside them is | both |
+| `P-tunnel` | positive | the other side of "TLS is terminated only for a routed host": the **same** listener, reached under a name no route carries, gets an opaque `CONNECT`, presents its own certificate — which the child verifies against a **host root** out of the bundle `SSL_CERT_FILE` names — and the request arrives unauthenticated. Paired with the proxied leg, as `P-open-bypass` is | both |
 | `P-argv` | positive | the injected argv in `explain --json` matches the argv the child received | both |
 | `P-endpoint` | positive | a matching request reaches upstream authenticated, with the secret arriving as **the whole of the header the phantom came in**. Also the assertion of [§18](#18-named-residuals)'s broker-upstream-roots residual: it points `SSL_CERT_FILE` at the destination's root on **that one launch** and passes only if the ambient variable was honoured | both |
 | `R-missing-cap` | refusal | a missing mechanism capability → `125` + code. No host lacks one, so the launch runs with its probe replaced by one offering nothing | both |
@@ -1744,8 +1745,10 @@ exactly the information both ledgers exist to carry.
     environment already decides which executable mints every secret the broker holds and what that
     executable trusts while minting it
     ([ADR 0030](adr/0030-the-hosts-own-trust-store-is-what-the-host-says-it-is.md)). Its provenance
-    is **stated** in `playpen explain` and the run record, and not in the manifest: the agent
-    cannot act on the supervisor's trust basis. **`P-endpoint` is this entry's assertion** — the
+    is to be **stated** in `playpen explain` and the run record
+    ([#141](https://github.com/firefly-engineering/playpen/issues/141), still owed), and in neither
+    case in the manifest: the agent cannot act on the supervisor's trust basis.
+    **`P-endpoint` is this entry's assertion** — the
     row points the variable at a harness-side loopback destination's root on its own launch and
     passes only if the ambient value was honoured, so the documentation and the measurement are one
     observation. The child's own store is a different question and is closed rather than residual

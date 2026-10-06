@@ -267,6 +267,19 @@ pub const ROWS: &[Row] = &[
             Decision::Issue(139),
         ],
     },
+    // The other side of "TLS is terminated only for a routed host": the same listener, reached
+    // under the name no route carries, gets an opaque `CONNECT` and presents its own certificate —
+    // which the child verifies against a host root out of the bundle `SSL_CERT_FILE` names. That
+    // combination is what the bare session CA broke, and nothing asserted it from inside a launch.
+    Row {
+        id: "P-tunnel",
+        class: Class::Positive,
+        platform: BOTH,
+        fixture: Fixture::CredentialRoute,
+        action: Action::Request(Legs::ProxiedAndTunnelled),
+        expected: Expected::OnlyThroughTheProxy,
+        from: &[Decision::Adr(13), Decision::Adr(16), Decision::Issue(140)],
+    },
     Row {
         id: "N-endpoint",
         class: Class::Negative,

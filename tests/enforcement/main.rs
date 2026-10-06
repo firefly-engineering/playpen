@@ -393,6 +393,11 @@ fn in_home(ids: &[&str]) -> Vec<Row> {
 /// What the credential-route checks judge against.
 const SECRET: &str = "the-real-secret";
 const HEADER: &str = "x-api-key";
+/// A value shaped like a session phantom: 64 lowercase hex digits ([spec §7.3]). The checks never
+/// need a real one, because that is the whole shape the judging recognises.
+///
+/// [spec §7.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#73-session-phantom
+const PHANTOM: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 fn substitution() -> Substitution<'static> {
     Substitution {
@@ -420,10 +425,10 @@ fn refused() -> Exchange {
     }
 }
 
-fn exchanged(proxied: Exchange, bypassing: Option<Exchange>) -> Exchanged {
+fn exchanged(proxied: Exchange, unbrokered: Option<Exchange>) -> Exchanged {
     Exchanged {
         proxied,
-        bypassing,
+        unbrokered,
         detail: String::new(),
     }
 }
@@ -459,7 +464,7 @@ fn an_authenticated_request_needs_the_secret_in_the_header_the_phantom_came_in()
         // The phantom was never replaced.
         exchanged(
             reached(&format!(
-                "GET /v1/messages HTTP/1.1\r\n{HEADER}: 0123456789abcdef\r\n\r\n"
+                "GET /v1/messages HTTP/1.1\r\n{HEADER}: {PHANTOM}\r\n\r\n"
             )),
             None,
         ),
@@ -470,10 +475,21 @@ fn an_authenticated_request_needs_the_secret_in_the_header_the_phantom_came_in()
             )),
             None,
         ),
-        // The phantom left beside the secret, which a `contains` on the value alone would admit.
+        // The phantom left beside the secret in the same header, which a `contains` on the value
+        // alone would admit.
         exchanged(
             reached(&format!(
-                "GET /v1/messages HTTP/1.1\r\n{HEADER}: {SECRET} 0123456789abcdef\r\n\r\n"
+                "GET /v1/messages HTTP/1.1\r\n{HEADER}: {SECRET} {PHANTOM}\r\n\r\n"
+            )),
+            None,
+        ),
+        // Substituted in place, and the phantom *also* copied into a second header. An assertion
+        // about the one header's value cannot see this, which is why the phantom is recognised by
+        // its shape anywhere in the head.
+        exchanged(
+            reached(&format!(
+                "GET /v1/messages HTTP/1.1\r\n{HEADER}: {SECRET}\r\n\
+                 X-Forwarded-Authorization: {PHANTOM}\r\n\r\n"
             )),
             None,
         ),
@@ -504,9 +520,10 @@ fn an_authenticated_request_needs_the_secret_in_the_header_the_phantom_came_in()
 fn the_bypass_pair_needs_both_legs_and_judges_each() {
     let authenticated =
         format!("GET /v1/messages HTTP/1.1\r\nHost: localhost\r\n{HEADER}: {SECRET}\r\n\r\n");
-    let unauthenticated = format!(
-        "GET /v1/bypassed HTTP/1.1\r\nHost: localhost\r\n{HEADER}: 0123456789abcdef\r\n\r\n"
-    );
+    // The unbrokered leg arrives carrying the phantom, by construction: both legs present the
+    // same request and nothing on this one strips it.
+    let unauthenticated =
+        format!("GET /v1/bypassed HTTP/1.1\r\nHost: localhost\r\n{HEADER}: {PHANTOM}\r\n\r\n");
     let judged = |seen: &Exchanged| {
         judge_request(
             Expected::OnlyThroughTheProxy,

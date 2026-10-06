@@ -64,7 +64,7 @@ pub const CA_FILE: &str = "broker-ca.pem";
 /// followed by the session CA's certificate. Derived from the host's store rather than authored,
 /// and public for the same reason the certificate is — every certificate in it is already public,
 /// and no key is.
-pub const BUNDLE_FILE: &str = "broker-roots.pem";
+pub const BUNDLE_FILE: &str = "broker-trust-bundle.pem";
 
 /// The one protocol the broker speaks. Offered on both legs, so a client that would have chosen
 /// HTTP/2 chooses this instead rather than speaking something the broker would mangle.
@@ -238,22 +238,38 @@ impl Roots {
     /// [ADR 0030]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0030-the-hosts-own-trust-store-is-what-the-host-says-it-is.md
     pub fn host() -> Result<Self, Refusal> {
         let native = rustls_native_certs::load_native_certs();
-        if native.certs.is_empty() {
+        Self::usable(native.certs, native.errors.len())
+    }
+
+    /// The roots among `certificates` the verification store will take, or `refusal.proxy.ca` where
+    /// there are none. `errors` is how many the loader could not read at all, for the sentence.
+    ///
+    /// A certificate the store rejects is **dropped rather than refused** — the host named it, and
+    /// one root nothing can parse is not a reason to decline a run the rest can verify — and it is
+    /// dropped from the **bundle** too, so the child is never pointed at a root nothing could use.
+    ///
+    /// "No usable roots" is therefore decided on the store and never on the count the loader
+    /// returned: a host whose every certificate failed to parse has none, however many it named.
+    fn usable(certificates: Vec<CertificateDer<'static>>, errors: usize) -> Result<Self, Refusal> {
+        let mut store = rustls::RootCertStore::empty();
+        let usable: Vec<CertificateDer<'static>> = certificates
+            .into_iter()
+            .filter(|certificate| store.add(certificate.clone()).is_ok())
+            .collect();
+        if usable.is_empty() {
             return Err(Refusal::new(
                 Code::ProxyCa,
                 format!(
-                    "the broker cannot verify destinations: this host offers no trusted roots \
-                     ({} errors loading them)",
-                    native.errors.len()
+                    "the broker cannot verify destinations: this host offers no usable trusted \
+                     roots ({errors} errors loading them)"
                 ),
             ));
         }
-        Ok(Self(native.certs))
+        Ok(Self(usable))
     }
 
-    /// These roots as a store for upstream verification. A certificate the store will not take is
-    /// dropped rather than refused: the host named it, and one root it cannot parse is not a reason
-    /// to decline a run the rest can verify.
+    /// These roots as a store for upstream verification. Every one of them is usable, because
+    /// [`Roots::host`] kept only those the store took.
     fn store(&self) -> rustls::RootCertStore {
         let mut roots = rustls::RootCertStore::empty();
         for certificate in &self.0 {
@@ -1412,6 +1428,47 @@ mod tests {
         assert_eq!(verified_by(&bundle, direct), Ok(()));
     }
 
+    /// A root the verification store will not take is dropped from the bundle too, so the child is
+    /// never pointed at one nothing could use — and "no usable roots" is decided on the store, not
+    /// on the count the platform loader returned. A host whose every certificate failed to parse
+    /// has none, however many it named, and that is `refusal.proxy.ca`.
+    #[test]
+    fn a_root_the_store_will_not_take_reaches_neither_the_store_nor_the_bundle() {
+        let dir = tempfile::TempDir::new().expect("dir");
+        let usable = issued("localhost").root;
+        // Not a certificate at all, which is what an unparseable root in a platform store is.
+        let rubbish = CertificateDer::from(b"not a certificate".to_vec());
+
+        // The rest of the host's store still verifies destinations, so the run goes on — and the
+        // child is pointed at the roots it can use and no others.
+        let roots = Roots::usable(vec![rubbish.clone(), usable.clone()], 0).expect("one usable");
+        assert_eq!(roots.0, vec![usable]);
+        let session = ca().expect("a session CA");
+        let at = dir.path().join(BUNDLE_FILE);
+        roots.bundle(&session, &at).expect("the bundle");
+        let bundle = std::fs::read_to_string(&at).expect("the bundle");
+        assert_eq!(
+            pem::parse_many(&bundle).expect("PEM").len(),
+            2,
+            "the unusable root reached the bundle: {bundle}"
+        );
+
+        // A host whose every certificate the store rejects has no usable roots, however many it
+        // named: the loader returned one, and this is still `refusal.proxy.ca`.
+        // ...and so does one the loader could read nothing from at all; the sentence says which.
+        for (certificates, errors) in [(vec![rubbish], 0), (Vec::new(), 3)] {
+            let refused = Roots::usable(certificates, errors)
+                .err()
+                .expect("no usable root");
+            assert_eq!(refused.code, Code::ProxyCa);
+            assert!(
+                refused.message().contains(&format!("{errors} errors")),
+                "{}",
+                refused.message()
+            );
+        }
+    }
+
     /// The two variables name two different files, because only one of them is additive: pointed at
     /// the bundle, `NODE_EXTRA_CA_CERTS` would have Node re-add every root it already has.
     #[test]
@@ -1424,7 +1481,7 @@ mod tests {
             deliveries: vec!["CLAUDE_CODE_OAUTH_TOKEN".to_owned()],
         };
         let entries: HashMap<String, String> = set.entries().into_iter().collect();
-        assert_eq!(entries["SSL_CERT_FILE"], "/scratch/broker-roots.pem");
+        assert_eq!(entries["SSL_CERT_FILE"], "/scratch/broker-trust-bundle.pem");
         assert_eq!(entries["NODE_EXTRA_CA_CERTS"], "/scratch/broker-ca.pem");
         assert_ne!(entries["SSL_CERT_FILE"], entries["NODE_EXTRA_CA_CERTS"]);
     }
