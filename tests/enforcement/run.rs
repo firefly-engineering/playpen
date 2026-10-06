@@ -1276,11 +1276,19 @@ fn descendant_denied(row: &Row) -> Verdict {
 #[cfg(target_os = "macos")]
 const LOG_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How far back the outside half looks for the decoy's denial, as `log show --last` takes it. Its
+/// own reach, never the window `explain` printed: a window cut too narrow is the command's defect
+/// and must fail the row, where a window shared with the outside half reads as a host that never
+/// logged the denial ([#142](https://github.com/firefly-engineering/playpen/issues/142)). The
+/// decoy's path is unique to this run, so reaching back further admits nothing else.
+#[cfg(target_os = "macos")]
+const LOG_LOOKBACK: &str = "5m";
+
 /// A confined shell forks the probe, which is denied a read of a decoy outside every grant. The
-/// outside half is the platform's log showing that denial at all, found by the decoy's path; the
-/// inside half is the command `explain --run` prints returning it, from a process that is not the
-/// child ([#124](https://github.com/firefly-engineering/playpen/issues/124)). An error is a
-/// fixture that could not be made, before either half could be observed.
+/// outside half is the platform's log showing that denial at all, found by the decoy's path over
+/// [`LOG_LOOKBACK`]; the inside half is the command `explain --run` prints returning it, from a
+/// process that is not the child ([#124](https://github.com/firefly-engineering/playpen/issues/124)).
+/// An error is a fixture that could not be made, before either half could be observed.
 #[cfg(target_os = "macos")]
 fn pull_denials() -> Result<(Seen, Seen), String> {
     let failed = |detail: String| Seen::Failed {
@@ -1298,6 +1306,11 @@ fn pull_denials() -> Result<(Seen, Seen), String> {
         .path()
         .canonicalize()
         .map_err(|e| format!("the decoy's path: {e}"))?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("the decoy's name: {path:?}"))?
+        .to_owned();
     let path = utf8(&path)?;
     let denied = format!("deny(1) file-read-data {path}");
 
@@ -1305,11 +1318,14 @@ fn pull_denials() -> Result<(Seen, Seen), String> {
     let probe = fixture.probe();
     // `; true` keeps the shell from replacing itself with the probe, so the probe is forked.
     let script = format!("'{}' read '{path}'; true", probe.display());
+    // The shell's `; true` makes any other exit playpen's own: a launch that never ran the probe
+    // denied nothing, and the log would be polled for a denial that cannot come.
     let ran = fixture
         .run(&[&common::os_bin("sh"), "-c", &script])
         .stdin(Stdio::null())
         .output()
-        .map_err(|e| format!("run playpen: {e}"))?;
+        .map_err(|e| format!("run playpen: {e}"))
+        .and_then(|ran| succeeded(ran, "playpen running the probe"))?;
     let run = fixture
         .run_ids()
         .pop()
@@ -1324,30 +1340,48 @@ fn pull_denials() -> Result<(Seen, Seen), String> {
         return Err(format!("no denials command or pid: {replay}"));
     };
 
-    // Outside: the same window, found by the decoy's path rather than by anything the run set.
-    let (window, _) = command
-        .split_once(" --predicate ")
-        .ok_or_else(|| format!("no predicate in {command}"))?;
-    let by_path = format!(
-        "{window} --predicate 'sender == \"Sandbox\" AND eventMessage CONTAINS \"{path}\"'"
-    );
+    // Outside: found by the decoy's path over the harness's own reach, nothing the run set.
+    let sandbox = |needle: &str| {
+        format!(
+            "/usr/bin/log show --last {LOG_LOOKBACK} --predicate 'sender == \"Sandbox\" AND \
+             eventMessage CONTAINS \"{needle}\"'"
+        )
+    };
+    let by_path = sandbox(&path);
     let deadline = std::time::Instant::now() + LOG_DEADLINE;
-    while !shell(&by_path)?.contains(&denied) {
+    loop {
+        // A `log show` that fails is polled again, not taken as the answer: the deadline decides.
+        let shown = shell(&by_path);
+        if shown.as_ref().is_ok_and(|shown| shown.contains(&denied)) {
+            break;
+        }
         if std::time::Instant::now() > deadline {
-            let never = format!("the log never showed `{denied}` within {LOG_DEADLINE:?}");
+            // What the probe itself reported tells a read that was never denied from a denial
+            // never logged; the decoy's name alone tells one logged under another path or
+            // operation from none.
+            let by_name = sandbox(&name);
+            let never = format!(
+                "the log never showed `{denied}` within {LOG_DEADLINE:?}; the probe reported \
+                 {:?}; `{by_path}` last showed {shown:?}; `{by_name}` shows {:?}",
+                String::from_utf8_lossy(&ran.stdout).trim_end(),
+                shell(&by_name)
+            );
             return Ok((failed(never), failed(String::new())));
         }
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
 
-    // Inside: the command as printed, and the line it returns is a descendant's.
-    let pulled = shell(command)?;
-    let inside = match pulled.lines().find(|line| line.contains(&denied)) {
-        Some(line) if !line.contains(&format!("({child})")) => Seen::Succeeded,
-        Some(line) => failed(format!(
-            "the denial is the child's own, not a descendant's: {line}"
-        )),
-        None => failed(format!("`{command}` does not return `{denied}`")),
+    // Inside: the command as printed, and the line it returns is a descendant's. A command that
+    // fails is the command `explain` printed failing, which is the row's to fail, not the fixture's.
+    let inside = match shell(command) {
+        Err(why) => failed(why),
+        Ok(pulled) => match pulled.lines().find(|line| line.contains(&denied)) {
+            Some(line) if !line.contains(&format!("({child})")) => Seen::Succeeded,
+            Some(line) => failed(format!(
+                "the denial is the child's own, not a descendant's: {line}"
+            )),
+            None => failed(format!("`{command}` does not return `{denied}`")),
+        },
     };
     Ok((Seen::Succeeded, inside))
 }
@@ -1359,15 +1393,28 @@ fn pull_denials() -> Result<(Seen, Seen), String> {
     unreachable!("P-denial-tree is n/a on Linux")
 }
 
-/// `command`'s stdout, run by the shell as a user pasting it would.
-#[cfg(target_os = "macos")]
-fn shell(command: &str) -> Result<String, String> {
+/// `command`'s stdout, run by the shell as a user pasting it would. A command that fails is an
+/// error carrying its stderr, never the empty output it happened to print.
+pub fn shell(command: &str) -> Result<String, String> {
     let output = Command::new(common::os_bin("sh"))
         .args(["-c", command])
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("run the shell: {e}"))?;
+    let output = succeeded(output, &format!("`{command}`"))?;
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// `output`, if `what` exited successfully; otherwise an error naming its status and stderr.
+fn succeeded(output: Output, what: &str) -> Result<Output, String> {
+    if output.status.success() {
+        return Ok(output);
+    }
+    Err(format!(
+        "{what} failed, {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim_end()
+    ))
 }
 
 /// A refusal row, under a fixture of its own so its state directory holds this run alone.

@@ -27,8 +27,22 @@ fn with_env(fx: &Fixture, env: Value) -> std::path::PathBuf {
 
 /// The confined child's environment, as `env` prints it.
 fn environ(fx: &Fixture, policy: &Path, host: &[(&str, &str)]) -> BTreeMap<String, String> {
+    environ_without(fx, policy, host, &[])
+}
+
+/// [`environ`], on a host that lacks every name in `absent`: removed here rather than assumed
+/// missing from the test's own environment, which a CI runner's toolchain setup fills in.
+fn environ_without(
+    fx: &Fixture,
+    policy: &Path,
+    host: &[(&str, &str)],
+    absent: &[&str],
+) -> BTreeMap<String, String> {
     let mut command = fx.run_under(policy, &[&os_bin("env")]);
     command.envs(host.iter().copied());
+    for name in absent {
+        command.env_remove(name);
+    }
     let output = command.output().expect("playpen");
     assert!(output.status.success(), "{output:?}");
     String::from_utf8(output.stdout)
@@ -126,7 +140,7 @@ fn allowed_and_fragment_names_pass_through_and_set_values_win_over_the_floor() {
             "set": {"TERM": "dumb", "GIT_AUTHOR_NAME": "playpen agent"},
         }),
     );
-    let env = environ(
+    let env = environ_without(
         &fx,
         &policy,
         &[
@@ -134,6 +148,7 @@ fn allowed_and_fragment_names_pass_through_and_set_values_win_over_the_floor() {
             ("CARGO_HOME", "/c"),
             ("TERM", "xterm"),
         ],
+        &["RUSTUP_HOME"],
     );
     assert_eq!(env["COLORTERM"], "truecolor");
     assert_eq!(env["CARGO_HOME"], "/c");

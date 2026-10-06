@@ -521,11 +521,23 @@ fn render_run(replay: &Replay, out: &mut impl Write) -> io::Result<()> {
     Ok(())
 }
 
+/// How far the denials window reaches past the record's own times, in seconds. The unified log
+/// stamps an entry from its own clock, not the wall clock the record reads, and the two disagree:
+/// on a `macos-15` CI runner a descendant's denial, made after the record's launch time, was
+/// logged at least 52ms before it, outside a window cut at that second
+/// ([#142](https://github.com/firefly-engineering/playpen/issues/142)). One sample bounds the skew
+/// from below only, so the margin is generous rather than measured. A tagged run's predicate
+/// matches that run alone, so it costs `log show` only a little more to read; a pre-tag record's
+/// pid filter admits ten more seconds in which another process could have held that pid.
+#[cfg(target_os = "macos")]
+const LOG_CLOCK_MARGIN_S: u64 = 5;
+
 /// The exact platform command that pulls the denials of the run `record` holds, or `None` for a run
 /// that never launched ([spec §14.2]).
 ///
-/// On macOS the query is the run's window, widened to the whole seconds `log show` takes, filtered
-/// to the run's denial tag, which the kernel logs with every denial in the confined tree
+/// On macOS the query is the run's window, widened to the whole seconds `log show` takes and by
+/// [`LOG_CLOCK_MARGIN_S`] either side, filtered to the run's denial tag, which the kernel logs
+/// with every denial in the confined tree
 /// ([`crate::backend::denial_tag`]). A record written before runs were tagged holds none, and is
 /// filtered to the child's pid instead, which misses its descendants' denials
 /// ([#124](https://github.com/firefly-engineering/playpen/issues/124)). `/usr/bin/log` by path,
@@ -536,9 +548,11 @@ fn render_run(replay: &Replay, out: &mut impl Write) -> io::Result<()> {
 fn denials(record: &Record) -> Option<String> {
     let pid = record.pid?;
     let launched = record.launched_at_unix_ms?;
-    let mut command = format!("/usr/bin/log show --start '{}'", log_time(launched / 1000));
+    let start = (launched / 1000).saturating_sub(LOG_CLOCK_MARGIN_S);
+    let mut command = format!("/usr/bin/log show --start '{}'", log_time(start));
     if let Some(ended) = record.ended_at_unix_ms {
-        command += &format!(" --end '{}'", log_time(ended.div_ceil(1000)));
+        let end = ended.div_ceil(1000) + LOG_CLOCK_MARGIN_S;
+        command += &format!(" --end '{}'", log_time(end));
     }
     // A tagged run is found by its tag, which its whole tree logs; an older one by the child's pid.
     // The stored tag is printed into a shell command, so it is used only when it is the one this
@@ -667,8 +681,8 @@ mod tests {
         assert_eq!(
             denials(&record).as_deref(),
             Some(
-                "/usr/bin/log show --start '2026-10-05 07:51:33+0000' \
-                 --end '2026-10-05 07:51:34+0000' \
+                "/usr/bin/log show --start '2026-10-05 07:51:28+0000' \
+                 --end '2026-10-05 07:51:39+0000' \
                  --predicate 'sender == \"Sandbox\" AND \
                  eventMessage CONTAINS \"playpen-run-01M45GQTY3RF111ZQ8WPJ5SKTY\"'"
             )
@@ -692,8 +706,9 @@ mod tests {
     }
 
     /// A record written before denials were tagged is queried by the child's pid, the best it
-    /// holds. The window is widened to whole seconds, the precision `log show` takes, and given in
-    /// UTC so that it means the same instant wherever the command is pasted.
+    /// holds. The window is widened to whole seconds, the precision `log show` takes, and by
+    /// [`LOG_CLOCK_MARGIN_S`] either side, and given in UTC so that it means the same instant
+    /// wherever the command is pasted.
     #[test]
     #[cfg(target_os = "macos")]
     fn the_denials_command_names_the_runs_window_and_pid() {
@@ -705,8 +720,8 @@ mod tests {
         assert_eq!(
             denials(&record).as_deref(),
             Some(
-                "/usr/bin/log show --start '2026-10-05 07:51:33+0000' \
-                 --end '2026-10-05 07:51:34+0000' \
+                "/usr/bin/log show --start '2026-10-05 07:51:28+0000' \
+                 --end '2026-10-05 07:51:39+0000' \
                  --predicate 'sender == \"Sandbox\" AND eventMessage CONTAINS \"(82276)\"'"
             )
         );

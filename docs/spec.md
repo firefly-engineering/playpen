@@ -664,7 +664,11 @@ The floor is **one object with per-platform contents**. On macOS it must include
 `rc=134` and empty stderr. It must also include `file-read*` on the literal
 `/System/Volumes/Data`: libSystem stats that mount point at startup, and when the stat is denied it
 reports the denial over the syslog socket, which the process then holds for its lifetime. On
-Linux it includes `/proc`, `/dev`, the loader and its cache. How the floor is spelled never appears in a test; the loader canary and the fd negative must pass on
+Linux it includes `/proc`, `/dev`, the loader and its cache, and `/etc/hosts`: `NO_PROXY` names
+`localhost`, and a client that honours it resolves that name itself, through glibc reading
+`/etc/hosts`; denied, the lookup falls through to a nameserver an FHS host does not run
+([#86](https://github.com/firefly-engineering/playpen/issues/86)). The rest of the resolver's
+configuration is not in the floor. How the floor is spelled never appears in a test; the loader canary and the fd negative must pass on
 both platforms.
 
 ### 8.3 Toolchain
@@ -1318,7 +1322,11 @@ in `--json`, beside the record's own fields):
 
 - **macOS**: `/usr/bin/log show --start '<launched>' --end '<ended>' --predicate 'sender ==
   "Sandbox" AND eventMessage CONTAINS "playpen-run-<run id>"'`, the window widened to whole
-  seconds and given in UTC, and `--end` omitted for a run with no end. The backend attaches the
+  seconds and by five more either side, and given in UTC, and `--end` omitted for a run with no
+  end. The margin is for the unified log's own clock, which stamps a denial from a different time
+  base from the wall clock the record reads, and on a CI runner logged a descendant's denial
+  before the record's launch time
+  ([#142](https://github.com/firefly-engineering/playpen/issues/142)). The backend attaches the
   run's **denial tag**, `playpen-run-<run id>`, to the profile's default deny, and the kernel logs
   it with every denial in the confined tree, whatever the denied process's pid
   ([#124](https://github.com/firefly-engineering/playpen/issues/124)); the record holds the tag

@@ -68,6 +68,12 @@ const PATHS: &[(&str, Scope)] = &[
     ("/etc/ld.so.cache", Scope::Subtree),
     ("/etc/ld.so.conf", Scope::Subtree),
     ("/etc/ld.so.conf.d", Scope::Subtree),
+    // How glibc resolves `localhost`, which `NO_PROXY` names, so a client honouring it can reach
+    // what it bypasses the proxy for. Denied, the lookup falls through to a nameserver on
+    // `127.0.0.1:53` that an FHS host does not run, and fails
+    // ([#86](https://github.com/firefly-engineering/playpen/issues/86)). The rest of the
+    // resolver's configuration is not granted: nothing in the suite would assert it.
+    ("/etc/hosts", Scope::Subtree),
     ("/proc", Scope::Subtree),
     ("/dev", Scope::Subtree),
 ];
