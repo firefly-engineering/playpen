@@ -18,8 +18,10 @@ const IN_HOME: Platform = Platform {
 };
 
 pub const ROWS: &[Row] = &[
-    // "The manifest is true", filesystem half: what the agent is told and what the kernel
-    // enforces are one resolution pass, and this is what holds them to it.
+    // "The manifest is true": what the agent is told and what the kernel enforces are one
+    // resolution pass, and this is what holds them to it. The route half is the same statement
+    // about the route table — every input to its requests is read from the manifest, so a table
+    // stated wrong sends a request no route authenticates.
     Row {
         id: "P-manifest",
         class: Class::Positive,
@@ -27,7 +29,12 @@ pub const ROWS: &[Row] = &[
         fixture: Fixture::Manifest,
         action: Action::ManifestIsTrue,
         expected: Expected::Succeeds,
-        from: &[Decision::Adr(11), Decision::Adr(16), Decision::Issue(78)],
+        from: &[
+            Decision::Adr(11),
+            Decision::Adr(16),
+            Decision::Issue(78),
+            Decision::Issue(90),
+        ],
     },
     // playpen reads no argument anywhere, so what it injects and what the child gets are held
     // together by one function and nothing else.

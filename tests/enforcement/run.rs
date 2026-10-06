@@ -215,21 +215,43 @@ fn excluded(row: &Row) -> Verdict {
     beside(row, &fixture, &policy, &neighbour, &[decoy])
 }
 
-/// `P-manifest`, filesystem half: every path the manifest states is reachable at its stated mode
-/// from inside the run it describes, and a decoy outside every grant is not ([spec §13]).
+/// `P-manifest`: **the manifest is true** ([spec §13]). Every path it states is reachable at its
+/// stated mode from inside the run it describes, a decoy outside every grant is not, and **every
+/// route it states authenticates through the proxy**.
 ///
 /// Two launches of one policy. The first learns the run-scoped paths from the environment, writes
 /// into each of them, and copies the manifest out; the paths it printed are then checked against
 /// what the manifest said they were, so a manifest naming the wrong scratch or the wrong area
 /// fails here rather than misleading an agent. The second probes the paths that outlive a run —
-/// the two roots at their two modes, and the persistent area — and the decoy beside them.
+/// the two roots at their two modes, and the persistent area — and the decoy beside them, and
+/// issues one request per stated route.
+///
+/// The route half is **projection-is-true, not the secret's bytes**: ADR 0011 makes the manifest a
+/// document that describes without constituting, so what this catches is drift between the stated
+/// route table and the live one. Every input to each request — the host, the path prefix, the
+/// variable the phantom is delivered in — is read **from the manifest**, so a manifest that stated
+/// the wrong prefix or the wrong delivery variable sends a request no route authenticates and
+/// fails here. That a secret arrives in the header a phantom came in is `P-endpoint`'s to assert,
+/// and it does.
 ///
 /// [spec §13]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#13-the-manifest
 fn manifest_is_true(row: &Row) -> Verdict {
     if row.action != Action::ManifestIsTrue {
         return Verdict::Setup(format!("{:?} is not the manifest's own check", row.action));
     }
+    // The route half's destination, outside the launch and reclaimed with the row, as every
+    // route-bearing row's is.
+    let destination = match destination() {
+        Ok(destination) => destination,
+        Err(why) => return Verdict::Setup(why),
+    };
     let fixture = common::Fixture::new();
+    // The destination's root, which this fixture's launches name as the supervisor's own store so
+    // the broker can verify it ([ADR 0030]).
+    let root = fixture.policy_dir.path().join("destination-root.pem");
+    if let Err(e) = fs::write(&root, &destination.root) {
+        return Verdict::Setup(format!("the destination's root {}: {e}", root.display()));
+    }
     let (read_only, elsewhere) = match (TempDir::new(), TempDir::new()) {
         (Ok(read_only), Ok(elsewhere)) => (read_only, elsewhere),
         _ => return Verdict::Setup("a directory for the row's roots".into()),
@@ -246,11 +268,24 @@ fn manifest_is_true(row: &Row) -> Verdict {
         "manifest.json",
         &serde_json::json!({
             "version": 1,
+            "minters": {"m": {"command": [
+                common::os_bin("sh"), "-c",
+                format!(
+                    r#"cat >/dev/null; printf '{{"token":"{ROUTE_SECRET}","expires_at":"2099-01-01T00:00:00Z"}}'"#
+                ),
+            ]}},
             "workspaces": {"w": {
                 "roots": [
                     {"path": fixture.root(), "mode": "readwrite"},
                     {"path": read_only.path(), "mode": "read"},
                 ],
+                // So the manifest has a route table to be wrong about, as it has areas and roots.
+                "credentials": [{
+                    "host": "localhost",
+                    "path_prefix": ROUTE_PREFIX,
+                    "minter": "m",
+                    "delivery": {"env": ROUTE_DELIVERY},
+                }],
                 "areas": {
                     "landing": {"lifetime": "persistent", "concurrency": "shared"},
                     "target": {"lifetime": "ephemeral"},
@@ -284,6 +319,8 @@ fn manifest_is_true(row: &Row) -> Verdict {
     );
     let launched = fixture
         .run_under(&policy, &[&common::os_bin("sh"), "-c", &script])
+        .env("SSL_CERT_FILE", &root)
+        .env_remove("SSL_CERT_DIR")
         .stdin(Stdio::null())
         .output()
         .expect("run playpen");
@@ -373,14 +410,61 @@ fn manifest_is_true(row: &Row) -> Verdict {
         Ok(path) => ops.push((path, "read", Expected::Denial)),
         Err(why) => return Verdict::Setup(why),
     }
-    let argv: Vec<&str> = ops
+    // The route half: one request per route the manifest states, built from the host, the path
+    // prefix and the delivery variable **the manifest named**. A route table stated wrong sends a
+    // request no route authenticates, and that is the drift this catches.
+    //
+    // Outside the same request goes direct, which shows the destination is up and verifiable from
+    // this host; inside it goes through the proxy. The leg is a probe argument on both sides.
+    let routes = &manifest.network.routes;
+    if routes.is_empty() {
+        return Verdict::Fail("the manifest states no route, so its route half is vacuous".into());
+    }
+    let mut route_ops: Vec<RouteOp> = Vec::new();
+    for (i, route) in routes.iter().enumerate() {
+        let path = format!("{}manifest-{i}", route.path_prefix);
+        let op = |via: Via| {
+            serde_json::json!({
+                "via": match via { Via::Proxy => "proxy", Via::Direct => "direct" },
+                "method": "GET",
+                "authority": format!("{}:{}", route.host, destination.addr.port()),
+                "path": path,
+                "header": ROUTE_HEADER,
+                "delivery": route.delivery_env,
+            })
+            .to_string()
+        };
+        route_ops.push(RouteOp {
+            outside: op(Via::Direct),
+            inside: op(Via::Proxy),
+            path,
+            stated: format!("{}{}", route.host, route.path_prefix),
+        });
+    }
+
+    let mut argv: Vec<&str> = ops
         .iter()
         .flat_map(|(path, verb, _)| [*verb, path.as_str()])
         .collect();
-    let outside = Command::new(PROBE)
-        .args(&argv)
+    let mut outside_argv = argv.clone();
+    for op in &route_ops {
+        outside_argv.extend(["request", op.outside.as_str()]);
+        argv.extend(["request", op.inside.as_str()]);
+    }
+    let actions = ops.len() + route_ops.len();
+    let mut outside = Command::new(PROBE);
+    outside.args(&outside_argv).env("SSL_CERT_FILE", &root);
+    // Outside there is no run and so no phantom; this half shows only that the destination
+    // answers, which is what it is for.
+    for route in routes {
+        outside.env(&route.delivery_env, "not-a-token");
+    }
+    let outside = outside
+        .env_remove("SSL_CERT_DIR")
         .output()
         .expect("run the probe");
+    // What the destination recorded of the outside half is not the inside half's record.
+    destination.forget();
     // Every op must succeed outside, whatever it is asserted to do inside, or the inside proves
     // nothing. The writes made outside are removed again, so each side creates its own.
     let probe = fixture.probe();
@@ -393,15 +477,18 @@ fn manifest_is_true(row: &Row) -> Verdict {
     }
     let inside = fixture
         .run_under(&policy, &inside_argv)
+        .env("SSL_CERT_FILE", &root)
+        .env_remove("SSL_CERT_DIR")
         .stdin(Stdio::null())
         .output()
         .expect("run playpen");
-    let (outside, inside) = match (observe(outside, ops.len()), observe(inside, ops.len())) {
+    let (outside, inside) = match (observe(outside, actions), observe(inside, actions)) {
         (Ok(outside), Ok(inside)) => (outside, inside),
         (Err(why), _) => return Verdict::Setup(format!("outside: {why}")),
         (_, Err(why)) => return Verdict::Fail(format!("inside: {why}")),
     };
-    ops.iter()
+    let filesystem = ops
+        .iter()
         .zip(outside.iter().zip(&inside))
         .map(|((path, verb, expected), (outside, inside))| {
             match judge(*expected, outside, inside) {
@@ -410,8 +497,52 @@ fn manifest_is_true(row: &Row) -> Verdict {
                 Verdict::Setup(why) => Verdict::Setup(format!("{verb} {path}: {why}")),
             }
         })
+        .find(|verdict| *verdict != Verdict::Pass);
+    if let Some(failed) = filesystem {
+        return failed;
+    }
+    // The route half, judged by what arrived at the destination: a `200` says the legs connected
+    // and says nothing about which token went out.
+    let received = destination.received();
+    let substitution = Substitution {
+        secret: ROUTE_SECRET,
+        header: ROUTE_HEADER,
+    };
+    route_ops
+        .iter()
+        .zip(outside[ops.len()..].iter().zip(&inside[ops.len()..]))
+        .map(|(op, (outside, inside))| {
+            let arrived = received
+                .iter()
+                .find(|head| head.contains(&format!(" {} HTTP/1.1\r\n", op.path)))
+                .cloned();
+            let seen = Exchanged {
+                proxied: Exchange {
+                    answer: match inside {
+                        Seen::Succeeded => Ok("the probe reported an answer".into()),
+                        Seen::Failed { detail, .. } => Err(detail.clone()),
+                    },
+                    arrived,
+                },
+                bypassing: None,
+                detail: format!(
+                    "the route the manifest states as {}: the destination received {received:?}",
+                    op.stated
+                ),
+            };
+            judge_request(Expected::Authenticated, substitution, outside, &seen)
+        })
         .find(|verdict| *verdict != Verdict::Pass)
         .unwrap_or(Verdict::Pass)
+}
+
+/// One request a stated route is checked with: the same request on each leg, the path it asks for,
+/// and the route as the manifest stated it, for the report.
+struct RouteOp {
+    outside: String,
+    inside: String,
+    path: String,
+    stated: String,
 }
 
 /// `P-argv`: the injected argv `explain --shim --json` states is the argv the child received
