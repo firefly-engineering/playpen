@@ -1423,11 +1423,15 @@ mode**.
 Where the platform cannot provide a trace, the **flag** is refused before launch, with a code
 naming *which* precondition failed. That refusal is scoped to the flag, not to the run.
 
-- **macOS**: there are no preconditions. Denials come from the kernel log
-  (`kernel (Sandbox) Sandbox: cat(47295) deny(1) file-read-data …`), streamed with `log stream`
-  filtered on the run's denial tag ([§14.2](#142-playpen-explain)), so the whole confined tree is
-  traced. The stream starts before the fork, because it shows nothing logged before it attached.
-  A stream that does not last the run marks the trace **unverified**.
+- **macOS**: there are no preconditions. Denials come from the kernel log, streamed with
+  `log stream` filtered on the run's denial tag ([§14.2](#142-playpen-explain)), so the whole
+  confined tree is traced. playpen drains the stream and writes one line per denial,
+  `<timestamp> Sandbox: cat(47295) deny(1) file-read-data …`, and nothing of the stream's own.
+  The stream starts before the fork, because it shows nothing logged before it attached.
+  Attaching and draining are **observed**, as the Linux channel self-test observes its channel:
+  playpen provokes a denial of its own under the run's tag, a **mark**, and waits for it to come
+  through, before the fork and again after the agent exits, with a **2 s** budget each. A mark
+  that never comes, or a stream that does not last the run, marks the trace **unverified**.
 - **Linux**: the trace comes from Landlock audit records in the system journal. Its
   preconditions, in order:
 

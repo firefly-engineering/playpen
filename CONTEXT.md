@@ -529,9 +529,19 @@ scoped to the request for a trace rather than to the run.
 Where the platform can only offer one conditionally, each condition is named separately, because
 "your kernel is too old", "the **backend** does not ask for the records" and "you cannot read the
 log" are different things to act on. A trace nothing can vouch for — the **channel self-test**
-failed after the run on Linux, or the log stream did not last the run on macOS — is marked
+failed after the run on Linux, or the log stream was not seen to attach, last the run and
+drain on macOS — is marked
 **unverified** rather than presented as complete, since an empty trace otherwise reads as
 "nothing was denied" — the silent downgrade the whole surface exists to refuse.
+
+## Mark
+
+A **denial** playpen provokes under a run's **denial tag**, in a throwaway sandbox of its own, to
+observe that macOS's log stream has attached before the fork and has drained after the agent
+exits. The macOS counterpart of the **channel self-test**: an observation, never a fixed wait. A
+mark is told from the agent's denials by the message the kernel appends, which the agent cannot
+choose, and is never written into the trace. A mark that never comes leaves the trace
+**unverified**.
 
 ## Channel self-test
 
