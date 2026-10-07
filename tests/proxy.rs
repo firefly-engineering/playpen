@@ -75,6 +75,35 @@ fn environ(fx: &Fixture, policy: &std::path::Path) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// A kind's own spelling of `HTTPS_PROXY` carries the same address, and exists exactly where the
+/// broker does: omp's Anthropic inference leaves the default route only for `PI_PROXY`
+/// ([#107](https://github.com/firefly-engineering/playpen/issues/107)).
+#[test]
+fn a_kinds_proxy_entry_is_the_brokers_address_and_only_with_a_route() {
+    let fx = Fixture::new();
+    let omp = |policy: &std::path::Path| -> BTreeMap<String, String> {
+        let output = fx
+            .playpen(&["run", "--profile", "p", "--agent", "omp", "--policy"])
+            .arg(policy)
+            .arg("--")
+            .arg(os_bin("env"))
+            .output()
+            .expect("playpen");
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout)
+            .expect("utf-8")
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect()
+    };
+    let routed = omp(&with_routes(&fx, one_route()));
+    assert_eq!(routed.get("PI_PROXY"), routed.get("HTTPS_PROXY"));
+    assert!(routed.contains_key("PI_PROXY"), "{routed:?}");
+    let unrouted = omp(&with_routes(&fx, json!([])));
+    assert!(!unrouted.contains_key("PI_PROXY"), "{unrouted:?}");
+}
+
 /// With no credential route there is no proxy, and so no proxy variable: the names do not exist
 /// rather than existing empty.
 #[test]

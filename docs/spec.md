@@ -348,7 +348,8 @@ granted.
 - **The presentation adapter owns the kind's instruction entry point** ([§13.3](#133-presentation)).
   A share entry naming that same file is **composed by reference**: the rendered file ends with
   the kind's import line pointing at the real file, which is granted read-only. For a kind with
-  no import mechanism, the collision is `refusal.state.collision`.
+  no import mechanism, the collision is `refusal.state.collision`. Both kinds in the table import
+  ([§12](#12-the-kind-table)), so today no kind can produce it.
 
 The cost is stated: a first launch under a new profile has no MCP auth and no history.
 
@@ -826,6 +827,8 @@ share one condition ([ADR 0020](adr/0020-playpen-claims-credential-confinement-o
 | each route's `delivery.env` | the session phantom | iff that route resolves |
 | the kind's state-dir redirect | the agent state directory | always ([§12](#12-the-kind-table)) |
 | the kind's suppression entries | per kind | always ([§12](#12-the-kind-table)) |
+| the kind's scratch entries | the run scratch | always ([§12](#12-the-kind-table)) |
+| the kind's proxy entries | the value `HTTPS_PROXY` has | iff a route resolves ([§12](#12-the-kind-table)) |
 
 - **The CA pair covers two TLS stacks in one boundary.** Both flagship binaries are Bun and
   honour `NODE_EXTRA_CA_CERTS`, while `git` and `curl` read `SSL_CERT_FILE`.
@@ -1198,9 +1201,25 @@ redirect `git`, `gh` and every other XDG-aware tool too.
 | | `claude` | `omp` |
 |---|---|---|
 | State-dir redirect | `CLAUDE_CONFIG_DIR` | `PI_CODING_AGENT_DIR` |
+| Agent home (where a share entry resolves) | `~/.claude` | `~/.omp/agent` |
 | Suppression table | `CLAUDE_CODE_SANDBOXED=1` | — |
-| Presentation adapter | renders the manifest into a file in the agent state directory | same |
+| Scratch entries | `CLAUDE_CODE_TMPDIR` | — |
+| Proxy entries | — | `PI_PROXY` |
+| Presentation adapter | renders the manifest into `CLAUDE.md` in the agent state directory; imports with `@<path>` | same, into `AGENTS.md`; imports with `@<path>` |
 | Liveness invocation | trivial no-network invocation, plus one task through the proxy | same |
+
+- **Scratch and proxy entries are an agent's own spellings of `TMPDIR` and `HTTPS_PROXY`**, for an
+  agent that reads them in their place, and are written with the same values under the same
+  conditions ([§9.2](#92-set-entries)). Claude Code 2.1.288 makes its `claude-<uid>` directory under
+  `CLAUDE_CODE_TMPDIR`, else `/tmp`, and never under `TMPDIR`, so confined without it `claude -p`
+  dies making `/tmp/claude-<uid>`. omp 18.8.2 on Bun 1.4 sends Anthropic inference over
+  `node:https`, whose Bun shim drops a tunnel, so it leaves the default route only for a proxy
+  named by `PI_PROXY`; without it the request bypasses the broker and the phantom is refused
+  upstream ([#106](https://github.com/firefly-engineering/playpen/issues/106),
+  [#107](https://github.com/firefly-engineering/playpen/issues/107)).
+- **`omp`'s redirect is incomplete.** omp 18.8.2 keeps its daemon registry in `~/.omp/run`
+  whatever `PI_CODING_AGENT_DIR` says, and `omp -p` dies making it, so a confined `omp` cannot run
+  against a real home ([#156](https://github.com/firefly-engineering/playpen/issues/156)).
 
 - **The suppression table only sets entries.** It is cooperative, and that is permitted: if a
   guest ignores it, the guest breaks and does not escape. A guest's nested `sandbox_init`
@@ -1263,7 +1282,9 @@ redirect `git`, `gh` and every other XDG-aware tool too.
 
 The kind's **presentation adapter** renders the manifest into the idiom that kind reads: the
 kind's instruction entry point in the profile's agent state directory (for `claude`,
-`$CLAUDE_CONFIG_DIR/CLAUDE.md`).
+`$CLAUDE_CONFIG_DIR/CLAUDE.md`; for `omp`, `$PI_CODING_AGENT_DIR/AGENTS.md`). Both kinds follow
+an absolute `@<path>` import from it, which the liveness suite confirms
+([§20](#20-handed-off-questions)).
 
 - That directory is shared by every run of the profile, so the rendered file states **only facts
   stable across those runs**: workspaces, roots and modes, persistent areas, credential routes and
@@ -1809,6 +1830,16 @@ kind: launch the real binary confined, exit 0 on a trivial no-network invocation
 through the proxy. It **gates only an agent-version or kind-table change**, never a playpen
 change, and it is skipped on hosted CI by policy (`skip.suite.liveness-not-on-ci`).
 
+The task is one model turn on a profile route for `api.anthropic.com`, minted by
+`playpen-minter-anthropic` and restricted by the shipped `anthropic-inference-only` set
+([§7.6](#76-endpoint-rule-sets)), which both kinds work under. It also settles the instruction
+question: a share entry names the entry point, the rendered file imports a shared file holding a
+nonce, and the row passes only if the reply holds the nonce and the rendered file does not. The
+agent holds only the phantom, so an answer proves the proxy substituted. A host lacking the agent
+is skipped as `skip.host.no-<kind>`; which minter is read is the operator's choice
+(`PLAYPEN_LIVENESS_MINTER=setup-token` or `host-login`), and without one the row is skipped as
+`skip.host.no-anthropic-minter`. `cargo test --test liveness` runs it.
+
 ---
 
 ## 18. Named residuals
@@ -1947,7 +1978,11 @@ establish during implementation. The wayfinding map closed with them handed off 
   adding a transport will not reopen the route table.
 - **Cross-shape injection.** Whether a credential route can carry an injection shape, so that a
   harness configured for one credential kind can be served another through the proxy
-  ([§7.3](#73-session-phantom)).
+  ([§7.3](#73-session-phantom)). `omp` 18.8.2 forces a related case: it shapes an Anthropic
+  request by the token's *content*, sending only a token holding `sk-ant-oat` as
+  `Authorization: Bearer`, so the opaque phantom in `ANTHROPIC_OAUTH_TOKEN` goes out as
+  `x-api-key` and the minted OAuth token is refused there. `L-omp` configures omp's own
+  OAuth-shaped provider to pass.
 
 **Needs a confined run or CI:**
 
@@ -1964,11 +1999,17 @@ establish during implementation. The wayfinding map closed with them handed off 
   confirm the desktop login survives.
 - Whether an access token survives another process's refresh.
 
-**Covered by the liveness probe:**
+**Answered by the liveness probe** (2026-10-07, `claude` 2.1.288 and `omp` 18.8.2 on macOS; the
+`L-claude` and `L-omp` rows of [§17.2](#172-rows)):
 
-- That `claude` loads `$CLAUDE_CONFIG_DIR/CLAUDE.md` and follows an absolute `@` import; and which
-  instruction entry point `omp` reads, and whether it has an import mechanism
-  ([§5.6](#56-agent-state-directory)).
+- `claude` loads `$CLAUDE_CONFIG_DIR/CLAUDE.md` and follows an absolute `@` import from it: **yes**.
+  The rendered file held only the import of a shared file holding a nonce, and the reply held the
+  nonce ([#106](https://github.com/firefly-engineering/playpen/issues/106)).
+- `omp` reads `$PI_CODING_AGENT_DIR/AGENTS.md`, whose default is `~/.omp/agent`, not `~/.omp`; and
+  it has an import mechanism, `@<path>` at the start of a line or after whitespace, absolute paths
+  included. Established the same way
+  ([#107](https://github.com/firefly-engineering/playpen/issues/107)). So its share-list collision
+  composes, and neither kind can produce `refusal.state.collision`.
 
 **In the nono fork** ([ADR 0022](adr/0022-playpen-pins-a-maintained-fork-of-nono.md)):
 
@@ -2134,7 +2175,10 @@ reconciled form. **Reviewed and accepted** in [#9](https://github.com/firefly-en
   unrewritten-`PATH` default. Re-entry is guarded by `PLAYPEN_ACTIVE` alone.
 - **B7. Reserved names include the kind table's entries.** ADR 0012 defines the reserved set as
   playpen's six set entries plus every delivery name. The redirect variable and the suppression
-  entries are also written by playpen, so ADR 0012's own one-author law reserves them too.
+  entries are also written by playpen, so ADR 0012's own one-author law reserves them too, as it
+  does the scratch and proxy entries the liveness suite added
+  ([#106](https://github.com/firefly-engineering/playpen/issues/106),
+  [#107](https://github.com/firefly-engineering/playpen/issues/107)).
 - **B8. ADR 0012's "No `refusal.env.*` code exists"** (the #31 amendment) refers to
   *value validation*. `refusal.env.reserved` remains minted, and the spec adds
   `refusal.env.forbidden` for `SSH_AUTH_SOCK`.

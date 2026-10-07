@@ -211,6 +211,12 @@ pub fn environment(
             value: Value::Written(value.into()),
             from: kind.from(),
         }));
+        // The kind's own spelling of `TMPDIR`, for an agent that reads that in its place.
+        written.extend(kind.scratch.iter().map(|&name| Var {
+            name: name.into(),
+            value: Value::Written(layout.scratch().into_os_string()),
+            from: kind.from(),
+        }));
         // The private redirect is what points the agent at the profile's own state directory, in
         // place of the real `~/.claude` or `~/.omp`, which nothing grants ([spec §5.6]).
         //
@@ -228,7 +234,19 @@ pub fn environment(
     //
     // [spec §6.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#62-the-broker
     if let Some(broker) = broker {
-        written.extend(broker.entries().into_iter().map(|(name, value)| Var {
+        let entries = broker.entries();
+        // The kind's own spelling of `HTTPS_PROXY`, for an agent whose model traffic reads that in
+        // its place: the same address, so it exists exactly where the broker does.
+        if let Some(kind) = kind
+            && let Some((_, address)) = entries.iter().find(|(name, _)| name == "HTTPS_PROXY")
+        {
+            written.extend(kind.proxy.iter().map(|&name| Var {
+                name: name.into(),
+                value: address.clone(),
+                from: kind.from(),
+            }));
+        }
+        written.extend(entries.into_iter().map(|(name, value)| Var {
             name,
             // The broker says which of its entries is a secret; nothing here re-derives it.
             value,

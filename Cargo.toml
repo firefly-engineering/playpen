@@ -78,6 +78,13 @@ name = "enforcement"
 path = "tests/enforcement/main.rs"
 harness = false
 
+# The liveness suite (spec §17.2): the enforcement suite's runner and rows over a real agent each,
+# skipped on hosted CI. Single-threaded like it, so outside the libtest harness too.
+[[test]]
+name = "liveness"
+path = "tests/liveness/main.rs"
+harness = false
+
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 

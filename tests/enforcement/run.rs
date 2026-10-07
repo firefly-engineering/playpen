@@ -34,8 +34,8 @@ use tempfile::{NamedTempFile, TempDir};
 use crate::common::{self, PROBE};
 use crate::row::{
     Action, Bracketed, CANARY, Cause, Checked, Declined, DedicatedFloor, Exchange, Exchanged,
-    Expected, Fixture, Invocation, Legs, Listening, Location, OVER_CEILING, Outcome, ROOT, Row,
-    Rung, SH, SHIM, Seen, Services, Signalled, Substitution, Target, Traced, Verdict, applies,
+    Expected, Fixture, Host, Invocation, Legs, Listening, Location, OVER_CEILING, Outcome, ROOT,
+    Row, Rung, SH, SHIM, Seen, Services, Signalled, Substitution, Target, Traced, Verdict, applies,
     judge, judge_bracket, judge_refusal, judge_request, judge_unexamined, over_ceiling_name,
 };
 use playpen::refusal::EXIT_REFUSED;
@@ -45,9 +45,15 @@ use playpen::refusal::EXIT_REFUSED;
 ///
 /// Must be called on the process's only thread: the bare floor's canary forks.
 pub fn run(rows: &[Row], home: &Path) -> Vec<Outcome> {
+    run_on(rows, &Host::at(home))
+}
+
+/// [`run`], on a host the caller has read more of than its home: the liveness suite's.
+pub fn run_on(rows: &[Row], host: &Host) -> Vec<Outcome> {
+    let home = host.home.as_path();
     let mut outcomes: Vec<Option<Outcome>> = rows
         .iter()
-        .map(|row| applies(&row.platform, home).err())
+        .map(|row| applies(&row.platform, host).err())
         .collect();
     let mut fixtures: Vec<Fixture> = Vec::new();
     for row in rows {
@@ -76,6 +82,10 @@ pub fn run(rows: &[Row], home: &Path) -> Vec<Outcome> {
             Fixture::CredentialRoute | Fixture::RestrictedRoute => members
                 .iter()
                 .map(|row| credential_route(row, fixture == Fixture::RestrictedRoute))
+                .collect(),
+            Fixture::Agent => members
+                .iter()
+                .map(|row| crate::live::live(row, host))
                 .collect(),
         };
         for (i, verdict) in batch.into_iter().zip(verdicts) {
@@ -1414,27 +1424,40 @@ pub fn shell(
     command: &str,
     deadline: std::time::Duration,
 ) -> Result<Result<String, String>, String> {
+    let mut shell = Command::new(common::os_bin("sh"));
+    shell.args(["-c", command]);
+    let what = format!("`{command}`");
+    let output = within(shell, &what, deadline)?;
+    Ok(succeeded(output, &what).map(|output| String::from_utf8_lossy(&output.stdout).into_owned()))
+}
+
+/// `command`'s output, with stdin closed. One still running after `deadline` is killed with its
+/// whole tree, and is an error naming it as `what`.
+pub fn within(
+    mut command: Command,
+    what: &str,
+    deadline: std::time::Duration,
+) -> Result<Output, String> {
     // Files rather than pipes: a pipe must be drained while the child runs, which takes a thread,
     // and this suite stays single-threaded.
-    let capture = |e: std::io::Error| format!("capture `{command}`: {e}");
+    let capture = |e: std::io::Error| format!("capture {what}: {e}");
     let (mut stdout, mut stderr) = (
         tempfile::tempfile().map_err(capture)?,
         tempfile::tempfile().map_err(capture)?,
     );
-    // A group of its own, so the kill reaches whatever the shell forked.
-    let mut child = Command::new(common::os_bin("sh"))
-        .args(["-c", command])
+    // A group of its own, so the kill reaches whatever it forked.
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(stdout.try_clone().map_err(capture)?)
         .stderr(stderr.try_clone().map_err(capture)?)
         .process_group(0)
         .spawn()
-        .map_err(|e| format!("run the shell: {e}"))?;
+        .map_err(|e| format!("run {what}: {e}"))?;
     let started = std::time::Instant::now();
     let status = loop {
         if let Some(status) = child
             .try_wait()
-            .map_err(|e| format!("wait on `{command}`: {e}"))?
+            .map_err(|e| format!("wait on {what}: {e}"))?
         {
             break status;
         }
@@ -1443,7 +1466,7 @@ pub fn shell(
             unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGKILL) };
             let _ = child.wait();
             return Err(format!(
-                "`{command}` was still running after {deadline:?}, and was killed"
+                "{what} was still running after {deadline:?}, and was killed"
             ));
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1452,16 +1475,14 @@ pub fn shell(
         let mut bytes = Vec::new();
         std::io::Seek::rewind(file)
             .and_then(|()| file.read_to_end(&mut bytes))
-            .map_err(|e| format!("read `{command}`'s output: {e}"))?;
+            .map_err(|e| format!("read {what}'s output: {e}"))?;
         Ok(bytes)
     };
-    let output = Output {
+    Ok(Output {
         status,
         stdout: read(&mut stdout)?,
         stderr: read(&mut stderr)?,
-    };
-    Ok(succeeded(output, &format!("`{command}`"))
-        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned()))
+    })
 }
 
 /// `output`, if `what` exited successfully; otherwise an error naming its status and stderr.
@@ -2417,6 +2438,9 @@ fn prepare(action: Action, home: &Path, root: &Path, made: &mut Made) -> Result<
                  has no route"
                     .into(),
             );
+        }
+        Action::Live(_) => {
+            return Err("a liveness row launches the agent, never the probe".into());
         }
         Action::Read(t) => each("read", target(t)?)?,
         Action::List(t) => each("list", target(t)?)?,

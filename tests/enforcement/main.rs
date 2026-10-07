@@ -10,6 +10,7 @@
 
 #[path = "../common/mod.rs"]
 mod common;
+mod live;
 mod row;
 mod rows;
 mod run;

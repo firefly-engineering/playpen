@@ -416,9 +416,14 @@ mod tests {
     /// be a file the agent never opens.
     #[test]
     fn a_kind_with_no_known_entry_point_renders_nothing() {
-        let omp = crate::kind::require("omp").expect("a known kind");
-        assert!(omp.presentation.is_none());
-        assert!(render(&full(), omp, Path::new("/state"), &[]).is_none());
+        // Every kind in the table has one since the liveness suite settled omp's
+        // ([#107](https://github.com/firefly-engineering/playpen/issues/107)), so this one is made.
+        let unknown = crate::kind::Kind {
+            name: "unknown",
+            presentation: None,
+            ..*claude()
+        };
+        assert!(render(&full(), &unknown, Path::new("/state"), &[]).is_none());
     }
 
     /// A staging failure never leaves a half-written entry point: the rename is what publishes.

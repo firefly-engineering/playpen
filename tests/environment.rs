@@ -68,8 +68,12 @@ fn nothing_reaches_the_child_that_playpen_did_not_put_there() {
     assert!(!env.contains_key("PLAYPEN_TEST_SECRET"), "{env:?}");
     assert_eq!(env.get("TERM").map(String::as_str), Some("xterm"));
     let kind = playpen::kind::require("claude").expect("a known kind");
-    let authored_by_kind =
-        |name: &str| name == kind.redirect || kind.suppression.iter().any(|(set, _)| *set == name);
+    let authored_by_kind = |name: &str| {
+        name == kind.redirect
+            || kind.suppression.iter().any(|(set, _)| *set == name)
+            || kind.scratch.contains(&name)
+            || kind.proxy.contains(&name)
+    };
     let allowed: Vec<_> = env
         .keys()
         .filter(|name| !playpen::environment::FLOOR.contains(&name.as_str()))
@@ -77,6 +81,18 @@ fn nothing_reaches_the_child_that_playpen_did_not_put_there() {
         .filter(|name| !authored_by_kind(name))
         .collect();
     assert!(allowed.is_empty(), "beyond the floor: {allowed:?}");
+}
+
+/// The stated kind's scratch entries name the run scratch, as `TMPDIR` does, whatever the host
+/// says: Claude Code makes its own directory under `CLAUDE_CODE_TMPDIR`, else `/tmp`, and never
+/// under `TMPDIR` ([#106](https://github.com/firefly-engineering/playpen/issues/106)).
+#[test]
+fn the_kinds_scratch_entries_name_the_run_scratch() {
+    let fx = Fixture::new();
+    let policy = with_env(&fx, json!({}));
+    let env = environ(&fx, &policy, &[("CLAUDE_CODE_TMPDIR", "/tmp")]);
+    let scratch = env.get("TMPDIR").expect("TMPDIR");
+    assert_eq!(env.get("CLAUDE_CODE_TMPDIR"), Some(scratch));
 }
 
 /// The stated kind's suppression entries are set in every run of it, whatever the policy says,

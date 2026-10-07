@@ -4,9 +4,10 @@
 //!
 //! [spec §17.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#171-form
 
+use std::ffi::OsString;
 use std::fmt;
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use playpen::code::Code;
 use playpen::refusal::EXIT_REFUSED;
@@ -135,6 +136,93 @@ pub enum Precondition {
     ///
     /// [spec §6.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#63-credential-oracles
     LandlockResolveUnix,
+    /// Not a hosted CI runner. The liveness suite is skipped there by policy ([spec §17.2]): it
+    /// launches a real agent against a real provider, and gates only an agent-version or
+    /// kind-table change.
+    ///
+    /// [spec §17.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#172-rows
+    #[allow(dead_code)] // constructed by the liveness suite, which shares this form
+    OffHostedCi,
+    /// The agent's binary is on the search path the runner was started with.
+    #[allow(dead_code)] // constructed by the liveness suite, which shares this form
+    Agent(Agent),
+    /// The operator named which reference minter for Anthropic a liveness task mints with
+    /// ([`MINTER_ENV`]): a choice of theirs, since `setup-token` needs a grant they stored and
+    /// `host-login` reads their own login, and never one the suite makes for them.
+    #[allow(dead_code)] // constructed by the liveness suite, which shares this form
+    AnthropicMinter,
+}
+
+/// The variable naming the subcommand of `playpen-minter-anthropic` a liveness task mints with:
+/// `setup-token` or `host-login` ([spec §7.5]). Read once, in `main`.
+///
+/// [spec §7.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#75-subscription-logins
+#[allow(dead_code)] // read by the liveness suite's `main`
+pub const MINTER_ENV: &str = "PLAYPEN_LIVENESS_MINTER";
+
+/// What a runner reads of its own environment, once, in `main`, and hands to the rows: nothing
+/// below it reads the environment ([#134](https://github.com/firefly-engineering/playpen/issues/134)).
+pub struct Host {
+    /// The caller's home directory, where the credential targets live, and the operator's own
+    /// keystore is found from.
+    pub home: PathBuf,
+    /// The search path an agent is found on.
+    pub path: Option<OsString>,
+    /// `GITHUB_ACTIONS=true`, which every hosted GitHub runner sets.
+    pub hosted_ci: bool,
+    /// [`MINTER_ENV`], where it names anything.
+    pub minter: Option<String>,
+}
+
+impl Host {
+    /// A host that is only a home: what the enforcement suite reads, and nothing it does not.
+    pub fn at(home: &Path) -> Self {
+        Self {
+            home: home.to_owned(),
+            path: None,
+            hosted_ci: false,
+            minter: None,
+        }
+    }
+
+    /// `name`, found on [`Host::path`] as a shell would, and resolved: the link a package manager
+    /// puts on the search path is not what a toolchain root grants.
+    pub fn find(&self, name: &str) -> Option<PathBuf> {
+        std::env::split_paths(self.path.as_ref()?)
+            .map(|dir| dir.join(name))
+            .find(|path| executable(path))
+            .and_then(|path| path.canonicalize().ok())
+    }
+}
+
+/// Whether `path` names something this process may execute, probed without running it.
+fn executable(path: &Path) -> bool {
+    let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: `path` is NUL-terminated and outlives the call.
+    unsafe { libc::access(path.as_ptr(), libc::X_OK) == 0 }
+}
+
+/// An agent kind the liveness suite launches ([spec §12]): one row each.
+///
+/// [spec §12]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#12-the-kind-table
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // constructed by the liveness suite, which shares this form
+pub enum Agent {
+    Claude,
+    Omp,
+}
+
+impl Agent {
+    /// The kind it is launched as, which is also the name its binary goes by.
+    pub fn kind(self) -> &'static playpen::kind::Kind {
+        let name = match self {
+            Agent::Claude => "claude",
+            Agent::Omp => "omp",
+        };
+        playpen::kind::get(name).expect("every liveness agent is a kind in the table")
+    }
 }
 
 impl Precondition {
@@ -145,13 +233,17 @@ impl Precondition {
             Precondition::Nix => "skip.host.no-nix",
             Precondition::Homebrew => "skip.host.no-homebrew",
             Precondition::LandlockResolveUnix => "skip.host.landlock-below-abi-9",
+            Precondition::OffHostedCi => "skip.suite.liveness-not-on-ci",
+            Precondition::Agent(Agent::Claude) => "skip.host.no-claude",
+            Precondition::Agent(Agent::Omp) => "skip.host.no-omp",
+            Precondition::AnthropicMinter => "skip.host.no-anthropic-minter",
         }
     }
 
     /// Probed without writing anything: a probe that wrote would need the reclamation it guards.
-    pub fn holds(self, home: &Path) -> bool {
+    pub fn holds(self, host: &Host) -> bool {
         match self {
-            Precondition::HomeWritable => writable(home),
+            Precondition::HomeWritable => writable(&host.home),
             Precondition::Nix => std::process::Command::new("nix-store")
                 .arg("--version")
                 .output()
@@ -169,6 +261,9 @@ impl Precondition {
             // the surface on every macOS version.
             #[cfg(not(target_os = "linux"))]
             Precondition::LandlockResolveUnix => true,
+            Precondition::OffHostedCi => !host.hosted_ci,
+            Precondition::Agent(agent) => host.find(agent.kind().name).is_some(),
+            Precondition::AnthropicMinter => host.minter.as_deref().is_some_and(|m| !m.is_empty()),
         }
     }
 }
@@ -275,6 +370,18 @@ pub enum Fixture {
     ///
     /// [spec §7.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#76-endpoint-rule-sets
     RestrictedRoute,
+    /// One launch per row of a **real agent**, confined under a profile whose toolchain is the
+    /// agent's own package and nothing beside it, with one profile route for `api.anthropic.com`
+    /// minted by `playpen-minter-anthropic` and restricted by the shipped
+    /// `anthropic-inference-only` set, and a share entry naming the kind's instruction entry
+    /// point ([spec §17.2], liveness).
+    ///
+    /// The caller's home is a synthetic one the fixture makes, so the share entry is a file of the
+    /// fixture's and never the operator's own instructions; the minter alone is handed the real
+    /// home, which is where its keystore is found.
+    ///
+    /// [spec §17.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#172-rows
+    Agent,
 }
 
 /// The closed set of checks.
@@ -357,6 +464,13 @@ pub enum Action {
     /// [spec §7.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#73-session-phantom
     /// [spec §7.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#76-endpoint-rule-sets
     Request(Legs),
+    /// The agent, confined, exits `0` on a trivial invocation that needs no network, then
+    /// completes one task through the proxy whose answer only its instruction entry point could
+    /// have told it ([spec §17.2], liveness). See [`crate::live`].
+    ///
+    /// [spec §17.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#172-rows
+    #[allow(dead_code)] // constructed by the liveness suite, which shares this form
+    Live(Agent),
 }
 
 /// Which leg or legs of the proxy a [`Action::Request`] row drives. **Chosen explicitly, never
@@ -418,6 +532,7 @@ impl Action {
             Action::Request(_) => {
                 matches!(fixture, Fixture::CredentialRoute | Fixture::RestrictedRoute)
             }
+            Action::Live(_) => fixture == Fixture::Agent,
         }
     }
 }
@@ -955,15 +1070,14 @@ impl fmt::Display for Outcome {
     }
 }
 
-/// Whether `platform` lets a row run on this host, whose caller's home is `home`, or what it is
-/// instead.
-pub fn applies(platform: &Platform, home: &Path) -> Result<(), Outcome> {
+/// Whether `platform` lets a row run on `host`, or what it is instead.
+pub fn applies(platform: &Platform, host: &Host) -> Result<(), Outcome> {
     if let Scope::Only(os, asymmetry) = platform.scope
         && os != Os::HERE
     {
         return Err(Outcome::NotApplicable(asymmetry));
     }
-    match platform.requires.iter().find(|p| !p.holds(home)) {
+    match platform.requires.iter().find(|p| !p.holds(host)) {
         Some(&missing) => Err(Outcome::Skipped(missing)),
         None => Ok(()),
     }
