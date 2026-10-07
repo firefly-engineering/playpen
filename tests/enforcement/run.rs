@@ -1358,7 +1358,7 @@ fn pull_denials() -> Result<(Seen, Seen), String> {
     let deadline = std::time::Instant::now() + LOG_DEADLINE;
     loop {
         // A `log show` that fails is polled again, not taken as the answer: the deadline decides.
-        let shown = shell(&by_path);
+        let shown = shell(&by_path, SHELL_DEADLINE)?;
         if shown.as_ref().is_ok_and(|shown| shown.contains(&denied)) {
             break;
         }
@@ -1371,7 +1371,7 @@ fn pull_denials() -> Result<(Seen, Seen), String> {
                 "the log never showed `{denied}` within {LOG_DEADLINE:?}; the probe reported \
                  {:?}; `{by_path}` last showed {shown:?}; `{by_name}` shows {:?}",
                 String::from_utf8_lossy(&ran.stdout).trim_end(),
-                shell(&by_name)
+                shell(&by_name, SHELL_DEADLINE)?
             );
             return Ok((failed(never), failed(String::new())));
         }
@@ -1380,7 +1380,7 @@ fn pull_denials() -> Result<(Seen, Seen), String> {
 
     // Inside: the command as printed, and the line it returns is a descendant's. A command that
     // fails is the command `explain` printed failing, which is the row's to fail, not the fixture's.
-    let inside = match shell(command) {
+    let inside = match shell(command, SHELL_DEADLINE)? {
         Err(why) => failed(why),
         Ok(pulled) => match pulled.lines().find(|line| line.contains(&denied)) {
             Some(line) if !line.contains(&format!("({child})")) => Seen::Succeeded,
@@ -1400,16 +1400,68 @@ fn pull_denials() -> Result<(Seen, Seen), String> {
     unreachable!("P-denial-tree is n/a on Linux")
 }
 
+/// How long one command `P-denial-tree` runs may take before it is taken as wedged. Each call's
+/// own bound: [`LOG_DEADLINE`] bounds the polling between calls, not a call that never returns.
+/// No longer than it, so one wedged call cannot outlast the row's whole budget.
+pub const SHELL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// `command`'s stdout, run by the shell as a user pasting it would. A command that fails is an
-/// error carrying its stderr, never the empty output it happened to print.
-pub fn shell(command: &str) -> Result<String, String> {
-    let output = Command::new(common::os_bin("sh"))
+/// inner error carrying its stderr, never the empty output it happened to print. One still running
+/// after `deadline` is killed with its whole tree, and is an outer error naming it: a wedged `log`
+/// says nothing about the row, and must end it as a setup failure rather than hang the suite
+/// ([#147](https://github.com/firefly-engineering/playpen/issues/147)).
+pub fn shell(
+    command: &str,
+    deadline: std::time::Duration,
+) -> Result<Result<String, String>, String> {
+    // Files rather than pipes: a pipe must be drained while the child runs, which takes a thread,
+    // and this suite stays single-threaded.
+    let capture = |e: std::io::Error| format!("capture `{command}`: {e}");
+    let (mut stdout, mut stderr) = (
+        tempfile::tempfile().map_err(capture)?,
+        tempfile::tempfile().map_err(capture)?,
+    );
+    // A group of its own, so the kill reaches whatever the shell forked.
+    let mut child = Command::new(common::os_bin("sh"))
         .args(["-c", command])
         .stdin(Stdio::null())
-        .output()
+        .stdout(stdout.try_clone().map_err(capture)?)
+        .stderr(stderr.try_clone().map_err(capture)?)
+        .process_group(0)
+        .spawn()
         .map_err(|e| format!("run the shell: {e}"))?;
-    let output = succeeded(output, &format!("`{command}`"))?;
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| format!("wait on `{command}`: {e}"))?
+        {
+            break status;
+        }
+        if started.elapsed() > deadline {
+            // SAFETY: the group is the child's own, made by `process_group(0)` above.
+            unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGKILL) };
+            let _ = child.wait();
+            return Err(format!(
+                "`{command}` was still running after {deadline:?}, and was killed"
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let read = |file: &mut File| -> Result<Vec<u8>, String> {
+        let mut bytes = Vec::new();
+        std::io::Seek::rewind(file)
+            .and_then(|()| file.read_to_end(&mut bytes))
+            .map_err(|e| format!("read `{command}`'s output: {e}"))?;
+        Ok(bytes)
+    };
+    let output = Output {
+        status,
+        stdout: read(&mut stdout)?,
+        stderr: read(&mut stderr)?,
+    };
+    Ok(succeeded(output, &format!("`{command}`"))
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned()))
 }
 
 /// `output`, if `what` exited successfully; otherwise an error naming its status and stderr.

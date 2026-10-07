@@ -112,6 +112,10 @@ fn main() {
             a_command_that_fails_is_an_error_not_empty_output,
         ),
         (
+            "a_command_past_its_deadline_is_killed_and_named",
+            a_command_past_its_deadline_is_killed_and_named,
+        ),
+        (
             "a_row_scoped_to_the_other_platform_is_na_and_never_runs",
             a_row_scoped_to_the_other_platform_is_na_and_never_runs,
         ),
@@ -224,12 +228,38 @@ fn a_negative_passes_only_on_a_denial_errno() {
 fn a_command_that_fails_is_an_error_not_empty_output() {
     // Spelled so the command's own text holds neither the stderr word nor the status the error
     // must carry, nor anything of stdout.
-    let failed =
-        run::shell("echo p''artial; echo w''hy >&2; exit 7").expect_err("exit 7 is an error");
+    let failed = run::shell(
+        "echo p''artial; echo w''hy >&2; exit 7",
+        run::SHELL_DEADLINE,
+    )
+    .expect("not wedged")
+    .expect_err("exit 7 is an error");
     assert!(failed.contains("why"), "{failed}");
     assert!(failed.contains("exit status: 7"), "{failed}");
     assert!(!failed.contains("partial"), "{failed}");
-    assert_eq!(run::shell("echo said").as_deref(), Ok("said\n"));
+    assert_eq!(
+        run::shell("echo said", run::SHELL_DEADLINE),
+        Ok(Ok("said\n".to_owned()))
+    );
+}
+
+/// A wedged `log show` must end the row as a setup failure naming it, not hang the suite until
+/// CI's own timeout ([#147](https://github.com/firefly-engineering/playpen/issues/147)). Its whole
+/// tree goes with it: a grandchild left running would outlive the row.
+fn a_command_past_its_deadline_is_killed_and_named() {
+    let dir = TempDir::new().expect("dir");
+    let survived = dir.path().join("survived");
+    let command = format!("(sleep 1; touch '{}') & wait", survived.display());
+    let started = std::time::Instant::now();
+    let wedged =
+        run::shell(&command, std::time::Duration::from_millis(100)).expect_err("past its deadline");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "{wedged}"
+    );
+    assert!(wedged.contains(&command), "{wedged}");
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    assert!(!survived.exists(), "a grandchild outlived the deadline");
 }
 
 /// A sandbox denies a lookup as not privileged; an unknown service is what absence reads as, so
