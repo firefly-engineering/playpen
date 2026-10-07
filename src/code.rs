@@ -50,6 +50,7 @@ registry! {
     EndpointUnsatisfiable => "refusal.endpoint.unsatisfiable",
     EnvReserved => "refusal.env.reserved",
     EnvForbidden => "refusal.env.forbidden",
+    EnvDuplicate => "refusal.env.duplicate",
     RootRelative => "refusal.root.relative",
     // Invocation and selection
     InvocationUsage => "refusal.invocation.usage",

@@ -12,7 +12,8 @@
 //!
 //! Layer 2 shares no name with 3 or 4, since the coherence tier refuses a policy entry naming a
 //! reserved one, so the order it is applied in decides nothing; [`construct`] applies it after the
-//! pass-through layers and before `set:`.
+//! pass-through layers and before `set:`. Layers 3 and 4 share no name either, refused as
+//! `refusal.env.duplicate`, so winning over the floor is the whole of layer 4's precedence.
 //!
 //! Only names are matched, exactly; an inherited value is never inspected. An allow-listed name
 //! the host does not have is simply absent, which fails closed.

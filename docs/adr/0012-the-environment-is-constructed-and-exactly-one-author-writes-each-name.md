@@ -151,6 +151,17 @@ exists, and passing the host `PATH` through is merely the *default*, not the mod
   changes, so **the gate is playpen's own unit and property tests** over every set entry's
   rendering: IPv4 and IPv6 proxy URLs and paths that round-trip through a real parser._
 
+- _Amended by [#130](https://github.com/firefly-engineering/playpen/issues/130): **"two authors" is
+  measured by what a name is written *as*, not by how many sites name it.** A profile that both
+  passes a name through and sets it is `refusal.env.duplicate` at the coherence tier — the case the
+  headline above always meant and no code covered, since `refusal.env.reserved` is scoped to names
+  **playpen** writes. Two *pass-through* sites for one name (`env.allow` and a listed fragment) are
+  the same instruction twice: nothing wins, so nothing is refused, and refusing it would make one
+  shipped fragment undeployable for every profile that also names what it carries — the fragments
+  carry names, never values consequence above, read back the other way. `set:` over the **floor**
+  remains the one blessed precedence, because the floor is playpen's and an operator cannot see it
+  in their own document, where an allow-list entry sits beside the `set:` table they wrote._
+
 - _Amended by [ADR 0020](0020-playpen-claims-credential-confinement-only.md) ([#35](https://github.com/firefly-engineering/playpen/issues/35)): **the proxy and CA tiers collapse into one.** `HTTPS_PROXY`,
   `NO_PROXY` / `no_proxy`, `NODE_USE_ENV_PROXY=1` and the pair `SSL_CERT_FILE` +
   `NODE_EXTRA_CA_CERTS` are written **iff a credential route resolves** — a proxy now exists exactly

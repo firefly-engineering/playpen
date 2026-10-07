@@ -24,6 +24,7 @@ const CHECKS: &[Check] = &[
     fragments_are_declared,
     env_is_not_forbidden,
     env_is_not_reserved,
+    env_has_one_author,
     areas_are_declared,
     minters_are_declared,
     routes_are_unambiguous,
@@ -167,6 +168,54 @@ fn env_is_not_reserved(loaded: &Loaded) -> Result<(), Refusal> {
         };
         if let Some(author) = by_playpen_of(var).or_else(delivered) {
             return collision(var, &from, &author);
+        }
+    }
+    Ok(())
+}
+
+/// A name a profile passes through is not also one it sets (`refusal.env.duplicate`): ADR 0012's
+/// one name, one author, held within the one document the operator wrote.
+///
+/// `set:` winning over the **floor** stays the one blessed precedence, because the floor is
+/// playpen's and an operator cannot see it in their own policy. An `env.allow` entry or a fragment
+/// the profile lists is theirs and sits beside the `set:` table, so a collision there is "which
+/// rule won" with both rules in view.
+///
+/// Two pass-through sites for one name are **not** a collision: `env.allow` and a listed fragment
+/// both say "pass this through", nothing wins, and refusing it would make one shipped fragment
+/// undeployable for every profile that also names what it carries. The refusal is for two authors
+/// disagreeing about *how* the name is written, which is the pass-through against the `set:`.
+///
+/// Scoped to one profile's effective set: two profiles naming one name each author their own run.
+fn env_has_one_author(loaded: &Loaded) -> Result<(), Refusal> {
+    let Loaded { path, policy } = loaded;
+    for (profile, selected) in &policy.profiles {
+        let allowed = selected
+            .env
+            .allow
+            .iter()
+            .enumerate()
+            .map(|(i, var)| (var.as_str(), format!("profile:{profile}.env.allow[{i}]")));
+        let carried = selected.env.fragments.iter().flat_map(|fragment| {
+            policy
+                .fragments
+                .env
+                .get(fragment)
+                .into_iter()
+                .flatten()
+                .map(move |var| (var.as_str(), format!("fragment:{fragment}")))
+        });
+        for (var, from) in allowed.chain(carried) {
+            if selected.env.set.contains_key(var) {
+                return Err(Refusal::new(
+                    Code::EnvDuplicate,
+                    format!(
+                        "{}: {from} passes {var:?} through and profile:{profile}.env.set.{var} \
+                         writes it: one name has one author",
+                        path.display()
+                    ),
+                ));
+            }
         }
     }
     Ok(())
@@ -609,6 +658,64 @@ profiles:
                 "{refusal}"
             );
         }
+    }
+
+    /// Pass-through and `set:` for one name is two authors of the profile's own, in one document.
+    #[test]
+    fn a_name_a_profile_passes_through_and_also_sets_is_refused() {
+        for (env, fragments, from) in [
+            (
+                "{ allow: [CARGO_HOME], set: { CARGO_HOME: /c } }",
+                "{}",
+                "profile:p.env.allow[0]",
+            ),
+            (
+                "{ fragments: [rust], set: { CARGO_HOME: /c } }",
+                "{ rust: [CARGO_HOME] }",
+                "fragment:rust",
+            ),
+        ] {
+            let text = format!(
+                "version: 1\nfragments: {{ env: {fragments} }}\nprofiles:\n  p: {{ workspaces: [], \
+                 toolchain: [], env: {env} }}\n"
+            );
+            let refusal = checked(&text).expect_err("refused");
+            assert_eq!(refusal.code, Code::EnvDuplicate, "{text}");
+            assert!(refusal.message().contains(from), "{refusal}");
+            assert!(
+                refusal.message().contains("profile:p.env.set.CARGO_HOME"),
+                "{refusal}"
+            );
+        }
+    }
+
+    /// `env.allow` and a fragment both say "pass this through": nothing wins, so nothing is refused.
+    /// A fragment the profile does not list authors nothing in it at all.
+    #[test]
+    fn two_pass_through_sites_for_one_name_are_one_instruction_twice() {
+        let text = "\
+version: 1
+fragments:
+  env: { rust: [CARGO_HOME], unlisted: [RUSTUP_HOME] }
+profiles:
+  p:
+    workspaces: []
+    toolchain: []
+    env: { allow: [CARGO_HOME], fragments: [rust], set: { RUSTUP_HOME: /r } }
+";
+        assert_eq!(checked(text), Ok(()));
+    }
+
+    /// One name set by one profile and passed through by another is each profile's own author.
+    #[test]
+    fn two_profiles_naming_one_name_are_each_their_own_author() {
+        let text = "\
+version: 1
+profiles:
+  p: { workspaces: [], toolchain: [], env: { set: { CARGO_HOME: /c } } }
+  q: { workspaces: [], toolchain: [], env: { allow: [CARGO_HOME] } }
+";
+        assert_eq!(checked(text), Ok(()));
     }
 
     #[test]

@@ -766,12 +766,20 @@ strip.
 3. **The profile's allow-list**: the names in `env.allow`, plus the names in each env fragment
    listed in `env.fragments`, passed through from the host.
 4. **The profile's `set:` table**: literal values, or a typed `!area <workspace>/<area>`
-   reference. These win over floor pass-through.
+   reference. These win over floor pass-through, and over nothing else.
 
 Rules:
 
 - **Names only.** An inherited value is never inspected: a value can only name a path, and the
   mechanism enforces every path regardless. Names are exact, never patterns.
+- **A name the profile passes through and also sets is `refusal.env.duplicate`**, at the
+  coherence tier. Winning over the floor is the one blessed precedence, because the floor is
+  playpen's and an operator cannot see it in their own document; an `env.allow` entry or a listed
+  fragment is theirs and sits beside the `set:` table, so a collision there is "which rule won"
+  with both rules in view. Two *pass-through* sites for one name — `env.allow` and a listed
+  fragment — are the same instruction twice and are coherent: nothing wins, and refusing would
+  make one shipped fragment undeployable for every profile that also names what it carries. The
+  scope is one profile's effective set; two profiles naming one name each author their own run.
 - **An allow-listed name that is absent from the host env is simply absent.** This is the one
   stated exception to refusal-never-silent-downgrade, and it is earned because it fails closed.
 - **`HOME` and `PATH` pass through unrewritten by default.** Rewriting `HOME` would be remapping
@@ -839,6 +847,12 @@ written. A policy `set:` or `env.allow` entry that collides with one is
 The manifest does **not** restate the environment, because the agent can read its own
 `environ`. `playpen explain --json` shows the constructed environment in full, with fragment
 provenance, as part of the capability set.
+
+**"In full" is every name, its `from:` provenance, and every value playpen authored.** A
+pass-through name's value is `null`: playpen never inspects an inherited value
+([§9.1](#91-layers)), so it does not state one, and reading it in order to report it is the
+interpretation [ADR 0002](adr/0002-playpen-does-not-interpret.md) forbids. The name and its
+provenance are the capability; the value is the host's.
 
 ---
 
@@ -1012,8 +1026,8 @@ vocabulary: absolute paths with access classes, a network mode, the constructed 
 injected argv and the route table. It contains no workspace names, no lifetimes
 and no profiles. **Every entry carries a `from:` provenance string** naming its authored source
 (`floor`, `profile:firefly.toolchain[3]`, `workspace:playpen.roots[0].exclude[0]`,
-`fragment:github`, `kind:claude`, `run-scratch`). That provenance is the only bridge back to the
-policy.
+`fragment:github`, `kind:claude`, `run-scratch`, `built-in` for an entry playpen writes of its
+own accord). That provenance is the only bridge back to the policy.
 
 ### 10.5 Validation tiers
 
@@ -1350,6 +1364,22 @@ A run that never launched has no command. The run id appears on every refusal li
 `explain --list` lists recent runs, most recent first. A run the ring does not hold, or an id that
 is not a run id, is `refusal.run.unknown`
 ([#52](https://github.com/firefly-engineering/playpen/issues/52)).
+
+**What `explain` approximates, having launched nothing.** `explain` reports a boundary no run
+holds, so three things in it are stated rather than observed:
+
+- **Per-run paths name the run `<run>`.** The run scratch and each ephemeral area are under a
+  directory named for a run id, and no id exists before launch, so the literal `<run>` stands
+  where one would be.
+- **The compiled-profile budget check is a lower bound.** The backend compiles only paths that
+  exist, and a state-derived grant playpen has not created yet contributes nothing to
+  `explain`'s count. So within a few paths of the ceiling
+  ([§15.3](#153-the-compiled-profile-ceiling)) `explain` can pass where `run` refuses at step 12
+  with `refusal.budget.exceeded`. Recorded as a named residual ([§18](#18-named-residuals)):
+  predicting those paths would be a second copy of step 12's arithmetic, which goes stale
+  against the one that counts.
+- **No state directory is `refusal.state.io`.** Provisioned paths are derived from playpen's
+  state directory, so a host that names none leaves `explain` nothing to derive them from.
 
 ### 14.3 The refusal line
 
@@ -1829,6 +1859,14 @@ exactly the information both ledgers exist to carry.
     passes only if the ambient value was honoured, so the documentation and the measurement are one
     observation. The child's own store is a different question and is closed rather than residual
     ([§9.2](#92-set-entries)).
+14. **`explain`'s budget check can pass where `run` refuses.** The compiled-profile count
+    ([§15.3](#153-the-compiled-profile-ceiling)) is taken over paths that exist, and `explain`
+    launches nothing, so a state-derived grant playpen has not created yet is missing from it.
+    Within a few paths of the ceiling the report is therefore a lower bound, and the refusal
+    arrives at step 12 of a real launch instead ([§14.2](#142-playpen-explain)). Left open because
+    closing it means predicting those paths in a second place: two counts of one ceiling, where
+    the one that does not gate anything is the one that goes stale. It fails in the safe
+    direction — `run` refuses, never grants past the ceiling — and `R-ceiling` asserts that half.
 
 ---
 
@@ -1946,6 +1984,7 @@ rather than a `refusal.*` code needing an exemption from the gate.
 | `refusal.endpoint.unsatisfiable` † | coherence | a rule set that no path under the route's prefix can match |
 | `refusal.env.reserved` † | coherence | a policy entry collides with a reserved name ([§9.2](#92-set-entries)) |
 | `refusal.env.forbidden` | coherence | `SSH_AUTH_SOCK` in `env.allow`, an env fragment, or `set:` |
+| `refusal.env.duplicate` † | coherence | one profile both passes a name through (`env.allow`, or a fragment it lists) and sets it ([§9.1](#91-layers)). Two pass-through sites for one name are coherent; `set:` over the **floor** stays the one blessed precedence |
 | `refusal.root.relative` † | coherence | a brought or toolchain root's path is not absolute |
 
 ### Invocation and selection
@@ -1972,7 +2011,7 @@ rather than a `refusal.*` code needing an exemption from the gate.
 | `refusal.cwd.ungranted` | existence | the CWD is not inside a granted root |
 | `refusal.area.busy` † | launch | an `exclusive` area is held; names the holding run id |
 | `refusal.state.collision` | coherence | a share entry names the kind's instruction entry point and the kind has no import mechanism |
-| `refusal.state.io` | launch | playpen cannot create its own state: run scratch, an area, the manifest, the record or the lock file |
+| `refusal.state.io` | launch | playpen cannot create its own state: run scratch, an area, the manifest, the record or the lock file. Also when the host names **no** state directory, which `explain` needs to derive provisioned paths from ([§14.2](#142-playpen-explain)) — not knowing where state goes is a case of not being able to make it |
 | `refusal.process.fork` † | launch | the supervisor could not fork the child |
 | `refusal.process.wait` † | launch | playpen could not wait for the floor self-test's throwaway canary, which is its one caller: a wait that fails after the agent has been `exec`ed is a fault, not a refusal ([ADR 0024](adr/0024-a-status-playpen-cannot-learn-is-a-fault-and-not-a-refusal.md)) |
 
