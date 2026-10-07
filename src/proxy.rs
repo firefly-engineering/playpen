@@ -38,6 +38,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::code::Code;
+use crate::environment::Value;
 use crate::manifest::DENIED_HEADER;
 use crate::refusal::Refusal;
 
@@ -115,16 +116,28 @@ pub struct Set {
 impl Set {
     /// The entries the broker writes, by name and value: rendered from the bound address and the
     /// paths playpen made, never formatted from a string the policy supplied.
-    pub fn entries(&self) -> Vec<(String, String)> {
+    ///
+    /// Each value says whether it may be **stated outward**. Every entry here but the deliveries
+    /// is a path or an address a report may repeat; a delivery carries the session phantom, which
+    /// is this run's secret, so it is [`Value::Secret`] and no surface states it
+    /// ([spec §14.1], "never tokens"). This is the only place that knows which names those are, so
+    /// it is the place that marks them.
+    ///
+    /// [spec §14.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#141-the-run-record
+    pub fn entries(&self) -> Vec<(String, Value)> {
+        let written = |value: String| Value::Written(value.into());
         let mut entries = vec![
-            ("HTTPS_PROXY".to_owned(), format!("http://{}", self.addr)),
-            ("NO_PROXY".to_owned(), NO_PROXY.to_owned()),
-            ("no_proxy".to_owned(), NO_PROXY.to_owned()),
+            (
+                "HTTPS_PROXY".to_owned(),
+                written(format!("http://{}", self.addr)),
+            ),
+            ("NO_PROXY".to_owned(), written(NO_PROXY.to_owned())),
+            ("no_proxy".to_owned(), written(NO_PROXY.to_owned())),
             // Bun and Node honour a proxy from the environment only when asked to
             // ([ADR 0012]), and both flagship agents are Bun.
             //
             // [ADR 0012]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0012-the-environment-is-constructed-and-exactly-one-author-writes-each-name.md
-            ("NODE_USE_ENV_PROXY".to_owned(), "1".to_owned()),
+            ("NODE_USE_ENV_PROXY".to_owned(), written("1".to_owned())),
         ];
         // Both names, because `git` and `curl` read one and Bun reads the other ([ADR 0012]) —
         // and they name **two different files**, because only one of them is additive.
@@ -142,14 +155,17 @@ impl Set {
         // [spec §9.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#92-set-entries
         entries.push((
             "SSL_CERT_FILE".to_owned(),
-            self.bundle.to_string_lossy().into_owned(),
+            written(self.bundle.to_string_lossy().into_owned()),
         ));
         entries.push((
             "NODE_EXTRA_CA_CERTS".to_owned(),
-            self.ca.to_string_lossy().into_owned(),
+            written(self.ca.to_string_lossy().into_owned()),
         ));
         for delivery in &self.deliveries {
-            entries.push((delivery.clone(), self.phantom.as_str().to_owned()));
+            entries.push((
+                delivery.clone(),
+                Value::Secret(self.phantom.as_str().into()),
+            ));
         }
         entries
     }
@@ -1863,10 +1879,41 @@ mod tests {
             phantom: Phantom::random().expect("a phantom"),
             deliveries: vec!["CLAUDE_CODE_OAUTH_TOKEN".to_owned()],
         };
-        let entries: HashMap<String, String> = set.entries().into_iter().collect();
-        assert_eq!(entries["SSL_CERT_FILE"], "/scratch/broker-trust-bundle.pem");
-        assert_eq!(entries["NODE_EXTRA_CA_CERTS"], "/scratch/broker-ca.pem");
-        assert_ne!(entries["SSL_CERT_FILE"], entries["NODE_EXTRA_CA_CERTS"]);
+        let entries: HashMap<String, Value> = set.entries().into_iter().collect();
+        let named = |name: &str| entries[name].as_os_str().to_string_lossy().into_owned();
+        assert_eq!(named("SSL_CERT_FILE"), "/scratch/broker-trust-bundle.pem");
+        assert_eq!(named("NODE_EXTRA_CA_CERTS"), "/scratch/broker-ca.pem");
+        assert_ne!(named("SSL_CERT_FILE"), named("NODE_EXTRA_CA_CERTS"));
+    }
+
+    /// The phantom is this run's secret, so the delivery entry is the one entry no surface outside
+    /// the boundary may state ([spec §14.1], "never tokens"). The child is still given it: a
+    /// phantom that did not reach the child would authenticate nothing.
+    ///
+    /// [spec §14.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#141-the-run-record
+    #[test]
+    fn a_delivery_carries_the_phantom_to_the_child_and_states_it_to_nobody() {
+        let phantom = Phantom::random().expect("a phantom");
+        let secret = phantom.as_str().to_owned();
+        let set = Set {
+            addr: SocketAddr::from((INTERFACE, 1)),
+            ca: PathBuf::from("/scratch").join(CA_FILE),
+            bundle: PathBuf::from("/scratch").join(BUNDLE_FILE),
+            phantom,
+            deliveries: vec!["CLAUDE_CODE_OAUTH_TOKEN".to_owned()],
+        };
+        let entries: HashMap<String, Value> = set.entries().into_iter().collect();
+        let delivery = &entries["CLAUDE_CODE_OAUTH_TOKEN"];
+        assert_eq!(delivery.as_os_str(), std::ffi::OsStr::new(&secret));
+        assert_eq!(delivery.stated(), None, "the phantom is never stated");
+        // And no other entry of the broker's is withheld: each one is a path or an address.
+        for (name, value) in &entries {
+            assert_eq!(
+                value.stated().is_none(),
+                name == "CLAUDE_CODE_OAUTH_TOKEN",
+                "{name} is withheld"
+            );
+        }
     }
 
     /// `P-endpoint` without rule sets ([spec §17.2]): a request through the proxy reaches upstream

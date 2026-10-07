@@ -192,12 +192,38 @@ pub enum Value {
     Inherited(OsString),
     /// Written by playpen or by the policy's `set:`.
     Written(OsString),
+    /// Written by playpen, and **never stated outward**: the child is given it, and no surface
+    /// that reports a boundary repeats it ([spec §14.1], "never tokens").
+    ///
+    /// The one value of this kind is the **session phantom** ([spec §7.3]), which every route's
+    /// delivery variable carries. Which variables those are is the broker's knowledge, so the
+    /// broker marks them ([`crate::proxy::Set::entries`]) rather than each reader re-deriving the
+    /// list — a reader that got the test wrong would print this run's bearer token.
+    ///
+    /// Distinguished from [`Value::Written`] by the **type** rather than by a check at each
+    /// surface, so a new reader of the environment cannot leak one by omission: it has to say what
+    /// it does with this arm ([#131](https://github.com/firefly-engineering/playpen/issues/131)).
+    ///
+    /// [spec §7.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#73-session-phantom
+    /// [spec §14.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#141-the-run-record
+    Secret(OsString),
 }
 
 impl Value {
+    /// The bytes the child is given, whatever kind of value it is: `execve` makes no distinction,
+    /// and the phantom only works by reaching the child.
     pub fn as_os_str(&self) -> &OsStr {
         match self {
-            Value::Inherited(value) | Value::Written(value) => value,
+            Value::Inherited(value) | Value::Written(value) | Value::Secret(value) => value,
+        }
+    }
+
+    /// The value as a surface outside the boundary may state it: `None` where playpen never
+    /// inspected it, and `None` where it is this run's secret.
+    pub fn stated(&self) -> Option<&OsStr> {
+        match self {
+            Value::Written(value) => Some(value),
+            Value::Inherited(_) | Value::Secret(_) => None,
         }
     }
 }

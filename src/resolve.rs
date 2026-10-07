@@ -230,7 +230,8 @@ pub fn environment(
     if let Some(broker) = broker {
         written.extend(broker.entries().into_iter().map(|(name, value)| Var {
             name,
-            value: Value::Written(value.into()),
+            // The broker says which of its entries is a secret; nothing here re-derives it.
+            value,
             from: crate::proxy::FROM.into(),
         }));
     }
@@ -464,10 +465,10 @@ impl From<&Var> for ResolvedVar {
     fn from(var: &Var) -> Self {
         Self {
             name: var.name.clone(),
-            value: match &var.value {
-                Value::Inherited(_) => None,
-                Value::Written(value) => Some(value.to_string_lossy().into_owned()),
-            },
+            value: var
+                .value
+                .stated()
+                .map(|value| value.to_string_lossy().into_owned()),
             from: var.from.clone(),
         }
     }

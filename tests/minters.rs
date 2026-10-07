@@ -100,6 +100,50 @@ fn a_profile_route_is_minted_before_the_launch_and_recorded_without_its_token() 
         !record.to_string().contains("s3cret-not-in-the-record"),
         "the record holds the token: {record}"
     );
+    // Nor the **phantom**, which is a different secret and would be a different leak: the record
+    // holds the constructed environment ([spec §14.1]), every route's delivery variable carries
+    // the phantom, and a host process that read one out of a record could have the proxy inject
+    // the real secret for it ([spec §7.3]). The name and its provenance are stated; the value is
+    // withheld, as an inherited value is.
+    let env = record["env"]
+        .as_array()
+        .expect("the constructed environment");
+    let delivery = env
+        .iter()
+        .find(|var| var["name"] == "CLAUDE_CODE_OAUTH_TOKEN")
+        .unwrap_or_else(|| panic!("the delivery variable is in {env:?}"));
+    assert!(
+        delivery["value"].is_null(),
+        "the record holds the phantom: {delivery}"
+    );
+    assert_eq!(delivery["from"], "broker");
+    // The child was given it even so: the phantom authenticates nothing if it does not arrive.
+    let environ = fx.root().join("environ");
+    let shown = fx
+        .run_under(
+            &policy,
+            &[
+                &os_bin("sh"),
+                "-c",
+                &format!(
+                    "printf '%s' \"$CLAUDE_CODE_OAUTH_TOKEN\" > {}",
+                    environ.display()
+                ),
+            ],
+        )
+        .output()
+        .expect("playpen");
+    assert!(
+        shown.status.success(),
+        "{}",
+        String::from_utf8_lossy(&shown.stderr)
+    );
+    let carried = std::fs::read_to_string(&environ).expect("what the child was given");
+    assert!(!carried.is_empty(), "the child was given no phantom");
+    assert_ne!(
+        carried, "s3cret-not-in-the-record",
+        "the child was given the real secret, not a phantom"
+    );
 }
 
 /// A route naming a minter the policy does not declare is a coherence refusal, so `check` makes

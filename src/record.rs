@@ -580,7 +580,8 @@ impl RunRecord {
     }
 
     /// Complete the record before the fork ([spec §4.2], step 15): the capability set, the
-    /// environment the child is given, and the launch time. A failure is `refusal.state.io`, and nothing has been forked.
+    /// environment the child is given, and the launch time. A failure is `refusal.state.io`, and
+    /// nothing has been forked.
     ///
     /// [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
     pub fn launch(
@@ -949,7 +950,7 @@ mod tests {
             crate::environment::Var {
                 name: "HOME".into(),
                 value: crate::environment::Value::Inherited("/home/someone".into()),
-                from: crate::floor::FROM.into(),
+                from: crate::environment::FROM_FLOOR.into(),
             },
             crate::environment::Var {
                 name: "TMPDIR".into(),
@@ -970,7 +971,7 @@ mod tests {
         assert_eq!(env.len(), 2, "{env:?}");
         assert_eq!(env[0].name, "HOME");
         assert_eq!(env[0].value, None, "an inherited value is not stated");
-        assert_eq!(env[0].from, crate::floor::FROM);
+        assert_eq!(env[0].from, crate::environment::FROM_FLOOR);
         assert_eq!(env[1].name, "TMPDIR");
         assert_eq!(env[1].value.as_deref(), Some("/state/scratch/r"));
         assert_eq!(stored.pid, Some(42));
@@ -1052,6 +1053,9 @@ mod tests {
         );
         let record = decode(without.as_bytes()).expect("an older record reads");
         assert_eq!(record.fault, None);
+        // The same fixture carries no `env` either, so it stands for every additive field: a
+        // record written before one existed holds `None` rather than failing to decode.
+        assert_eq!(record.env, None);
     }
 
     fn grant(path: &Path, access: Access, scope: Scope) -> PathGrant {

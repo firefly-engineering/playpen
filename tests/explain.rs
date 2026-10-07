@@ -140,12 +140,24 @@ fn explain_run_states_the_environment_the_child_was_given() {
     };
     assert_eq!(var("CARGO_HOME")["value"], "/cargo");
     assert_eq!(var("CARGO_HOME")["from"], "profile:p.env.set.CARGO_HOME");
-    assert_eq!(var("TMPDIR")["from"], "run-scratch");
-    assert_eq!(var("PLAYPEN_ACTIVE")["value"], "p");
-    assert_eq!(var("PLAYPEN_ACTIVE")["from"], "built-in");
+    assert_eq!(
+        var(playpen::environment::TMPDIR)["from"],
+        playpen::provision::FROM_SCRATCH
+    );
+    assert_eq!(var(playpen::environment::PLAYPEN_ACTIVE)["value"], "p");
+    assert_eq!(
+        var(playpen::environment::PLAYPEN_ACTIVE)["from"],
+        playpen::resolve::BUILT_IN
+    );
     // A floor name is passed through, so its value is `null`: playpen never read it.
     assert!(var("PATH")["value"].is_null(), "{:?}", var("PATH"));
-    assert_eq!(var("PATH")["from"], "floor");
+    assert_eq!(var("PATH")["from"], playpen::environment::FROM_FLOOR);
+
+    // Both forms, as §14.2 asks ([spec §14.2]): the JSON replay is the stored record, so the
+    // environment reaches it by the same route every other field does.
+    let replayed: Value =
+        serde_json::from_str(&explain(&fx, &["--run", &id, "--json"])).expect("JSON");
+    assert_eq!(replayed["env"], stored["env"]);
 
     let human = explain(&fx, &["--run", &id]);
     assert!(

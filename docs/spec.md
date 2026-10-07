@@ -1285,9 +1285,15 @@ The run record holds:
 - the capability set;
 - the **constructed environment** ([§9.3](#93-inward-and-outward)), which is part of that
   capability set: every name with its `from:` provenance and the value playpen or the policy
-  wrote, an inherited value withheld as `null` exactly as `explain --json` withholds it. Without
-  it only a live `explain` could say what a child was given, and `explain --run` could not
-  ([#131](https://github.com/firefly-engineering/playpen/issues/131));
+  wrote. Without it only a live `explain` could say what a child was given, and `explain --run`
+  could not ([#131](https://github.com/firefly-engineering/playpen/issues/131)). **Two kinds of
+  value are withheld as `null`**: an inherited one, exactly as `explain --json` withholds it
+  ([§9.3](#93-inward-and-outward)), and a **route's delivery variable**, which carries the session
+  phantom ([§7.3](#73-session-phantom)). The phantom is this run's secret, and the record lives
+  where the host can read it: a host process that read one out would have the broker inject the
+  real credential for it. Which variables those are is the broker's own knowledge, so the broker
+  marks them at the point it writes them rather than each surface re-deriving the list — a surface
+  that got the test wrong would print the token;
 - the route table, with provenance;
 - where the broker's upstream roots came from, naming which of `SSL_CERT_FILE` / `SSL_CERT_DIR`
   was found, or the platform search; absent where no route resolved, since then no broker existed
