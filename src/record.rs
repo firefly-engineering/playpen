@@ -27,9 +27,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::capability::{Access, CapabilitySet, PathGrant, Scope};
 use crate::code::Code;
+use crate::environment::Var;
 use crate::fault::Fault;
 use crate::proxy::Provenance;
 use crate::refusal::Refusal;
+use crate::resolve::ResolvedVar;
 use crate::select::Trace;
 
 /// The record format this playpen writes. A reader branches on it before anything else.
@@ -207,6 +209,20 @@ pub struct Record {
     pub selection: Option<Trace>,
     /// The capability set the child was confined under.
     pub capabilities: Option<CapabilitySet>,
+    /// The environment the child was given ([spec §9.3]), which is part of the capability set
+    /// ([spec §14.1]) and so belongs in the record: without it only a live `explain` can say what
+    /// a child was handed, and `explain --run` could not
+    /// ([#131](https://github.com/firefly-engineering/playpen/issues/131)).
+    ///
+    /// Each name carries its `from:` provenance and the value playpen or the policy wrote. An
+    /// inherited value is `null`, as in `explain --json`: playpen never inspected it, so the
+    /// record does not state one ([spec §9.3]). Additive, so a record written before this field
+    /// existed still reads.
+    ///
+    /// [spec §9.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#93-inward-and-outward
+    /// [spec §14.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#141-the-run-record
+    #[serde(default)]
+    pub env: Option<Vec<ResolvedVar>>,
     pub launched_at_unix_ms: Option<u64>,
     /// The confined child's pid.
     pub pid: Option<libc::pid_t>,
@@ -443,6 +459,7 @@ impl RunRecord {
             profile: None,
             selection: None,
             capabilities: None,
+            env: None,
             launched_at_unix_ms: None,
             pid: None,
             // SAFETY: getpid has no preconditions.
@@ -562,16 +579,18 @@ impl RunRecord {
         self.record.profile = profile.map(str::to_owned);
     }
 
-    /// Complete the record before the fork ([spec §4.2], step 15): the capability set and the
-    /// launch time. A failure is `refusal.state.io`, and nothing has been forked.
+    /// Complete the record before the fork ([spec §4.2], step 15): the capability set, the
+    /// environment the child is given, and the launch time. A failure is `refusal.state.io`, and nothing has been forked.
     ///
     /// [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
     pub fn launch(
         &mut self,
         caps: &CapabilitySet,
+        env: &[Var],
         denial_tag: Option<String>,
     ) -> Result<(), Refusal> {
         self.record.capabilities = Some(caps.clone());
+        self.record.env = Some(env.iter().map(ResolvedVar::from).collect::<Vec<_>>());
         self.record.denial_tag = denial_tag;
         self.record.launched_at_unix_ms = Some(now_unix_ms());
         self.write()
@@ -926,12 +945,34 @@ mod tests {
             mach_services: vec![],
             exclusions: vec![],
         };
-        record.launch(&caps, None).expect("launch");
+        let env = vec![
+            crate::environment::Var {
+                name: "HOME".into(),
+                value: crate::environment::Value::Inherited("/home/someone".into()),
+                from: crate::floor::FROM.into(),
+            },
+            crate::environment::Var {
+                name: "TMPDIR".into(),
+                value: crate::environment::Value::Written("/state/scratch/r".into()),
+                from: crate::resolve::BUILT_IN.into(),
+            },
+        ];
+        record.launch(&caps, &env, None).expect("launch");
         record.spawned(42);
         record.finish(3);
         let stored = read_back(&record);
         assert_eq!(&stored, record.record());
         assert_eq!(stored.capabilities, Some(caps));
+        // The environment is part of the capability set ([spec §9.3]), so a past run's child can be
+        // said what it was given. An inherited value is withheld exactly as `explain` withholds it:
+        // playpen never inspected it, so the record does not claim to know it.
+        let env = stored.env.expect("the constructed environment");
+        assert_eq!(env.len(), 2, "{env:?}");
+        assert_eq!(env[0].name, "HOME");
+        assert_eq!(env[0].value, None, "an inherited value is not stated");
+        assert_eq!(env[0].from, crate::floor::FROM);
+        assert_eq!(env[1].name, "TMPDIR");
+        assert_eq!(env[1].value.as_deref(), Some("/state/scratch/r"));
         assert_eq!(stored.pid, Some(42));
         assert_eq!(stored.status, Some(3));
         assert_eq!(

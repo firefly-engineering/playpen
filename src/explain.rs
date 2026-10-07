@@ -277,18 +277,7 @@ fn render_resolved(resolved: &Resolved, out: &mut impl Write) -> io::Result<()> 
         OneLine(&resolved.network.from)
     )?;
     writeln!(out, "env")?;
-    for var in &resolved.env {
-        let var_line = match &var.value {
-            Some(value) => format!("{}={value}", var.name),
-            None => format!("{} (inherited)", var.name),
-        };
-        writeln!(
-            out,
-            "  {}  (from {})",
-            OneLine(&var_line),
-            OneLine(&var.from)
-        )?;
-    }
+    render_env(&resolved.env, out)?;
     if !resolved.argv.is_empty() {
         writeln!(out, "argv")?;
         for arg in &resolved.argv {
@@ -552,6 +541,40 @@ fn render_run(replay: &Replay, out: &mut impl Write) -> io::Result<()> {
     }
     for service in &caps.mach_services {
         writeln!(out, "  mach-lookup       {}", OneLine(service))?;
+    }
+    // The environment is part of the capability set ([spec §9.3]), so a past run's child can be
+    // said what it was given ([#131]). A record written before the field existed holds none, and
+    // says so rather than showing an empty environment, which would read as "nothing was set".
+    //
+    // [spec §9.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#93-inward-and-outward
+    // [#131]: https://github.com/firefly-engineering/playpen/issues/131
+    match &record.env {
+        Some(env) => {
+            writeln!(out, "env")?;
+            render_env(env, out)?;
+        }
+        None => writeln!(out, "env       -")?,
+    }
+    Ok(())
+}
+
+/// The constructed environment, one variable a line. An inherited value is shown as inherited
+/// rather than as a value: playpen never inspected it ([spec §9.3]). Shared by the live report and
+/// `explain --run`, so a past run's environment reads exactly as a resolved one does.
+///
+/// [spec §9.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#93-inward-and-outward
+fn render_env(env: &[resolve::ResolvedVar], out: &mut impl Write) -> io::Result<()> {
+    for var in env {
+        let var_line = match &var.value {
+            Some(value) => format!("{}={value}", var.name),
+            None => format!("{} (inherited)", var.name),
+        };
+        writeln!(
+            out,
+            "  {}  (from {})",
+            OneLine(&var_line),
+            OneLine(&var.from)
+        )?;
     }
     Ok(())
 }

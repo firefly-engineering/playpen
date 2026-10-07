@@ -105,6 +105,62 @@ fn explain_run_replays_a_stored_record_in_both_forms() {
     );
 }
 
+/// The environment is part of the capability set ([spec §9.3]), so a past run's record holds it
+/// and `explain --run` states it — where before only a live `explain` could
+/// ([#131](https://github.com/firefly-engineering/playpen/issues/131)). An inherited value is
+/// withheld in the record exactly as the live report withholds it: playpen never inspected it.
+#[test]
+fn explain_run_states_the_environment_the_child_was_given() {
+    let fx = Fixture::new();
+    let policy = fx.policy_named(
+        "env.json",
+        &serde_json::json!({
+            "version": 1,
+            "workspaces": {"w": {"roots": [{"path": fx.root(), "mode": "readwrite"}]}},
+            "profiles": {"p": {
+                "workspaces": ["w"],
+                "toolchain": [],
+                "env": {"allow": ["COLORTERM"], "set": {"CARGO_HOME": "/cargo"}},
+            }},
+        }),
+    );
+    let output = fx
+        .run_under(&policy, &[&os_bin("sh"), "-c", "exit 0"])
+        .output()
+        .expect("playpen");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let id = fx.run_ids().pop().expect("a record");
+
+    let stored = fx.record(&id);
+    let env = stored["env"].as_array().expect("the record holds env");
+    let var = |name: &str| {
+        env.iter()
+            .find(|var| var["name"] == name)
+            .unwrap_or_else(|| panic!("no {name} in {env:?}"))
+    };
+    assert_eq!(var("CARGO_HOME")["value"], "/cargo");
+    assert_eq!(var("CARGO_HOME")["from"], "profile:p.env.set.CARGO_HOME");
+    assert_eq!(var("TMPDIR")["from"], "run-scratch");
+    assert_eq!(var("PLAYPEN_ACTIVE")["value"], "p");
+    assert_eq!(var("PLAYPEN_ACTIVE")["from"], "built-in");
+    // A floor name is passed through, so its value is `null`: playpen never read it.
+    assert!(var("PATH")["value"].is_null(), "{:?}", var("PATH"));
+    assert_eq!(var("PATH")["from"], "floor");
+
+    let human = explain(&fx, &["--run", &id]);
+    assert!(
+        human.lines().any(|line| line.contains("CARGO_HOME=/cargo")
+            && line.contains("(from profile:p.env.set.CARGO_HOME)")),
+        "the written value, with its provenance: {human}"
+    );
+    assert!(
+        human
+            .lines()
+            .any(|line| line.contains("PATH (inherited)") && line.contains("(from floor)")),
+        "an inherited name is shown as inherited: {human}"
+    );
+}
+
 #[test]
 fn explain_run_shows_a_refused_runs_code() {
     let fx = Fixture::new();

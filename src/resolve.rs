@@ -456,6 +456,23 @@ pub struct ResolvedVar {
     pub from: String,
 }
 
+impl From<&Var> for ResolvedVar {
+    /// One conversion, so `explain` and the run record withhold the same values: an inherited one
+    /// is never stated in either ([spec §9.3]).
+    ///
+    /// [spec §9.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#93-inward-and-outward
+    fn from(var: &Var) -> Self {
+        Self {
+            name: var.name.clone(),
+            value: match &var.value {
+                Value::Inherited(_) => None,
+                Value::Written(value) => Some(value.to_string_lossy().into_owned()),
+            },
+            from: var.from.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ResolvedPath {
     pub path: PathBuf,
@@ -544,17 +561,7 @@ impl Resolved {
             routes: Vec::new(),
             upstream_roots: None,
             unix_socket_regime: Some(crate::mechanism::Regime::probe().stated().to_owned()),
-            env: env
-                .iter()
-                .map(|var| ResolvedVar {
-                    name: var.name.clone(),
-                    value: match &var.value {
-                        Value::Inherited(_) => None,
-                        Value::Written(value) => Some(value.to_string_lossy().into_owned()),
-                    },
-                    from: var.from.clone(),
-                })
-                .collect(),
+            env: env.iter().map(ResolvedVar::from).collect(),
             argv: Vec::new(),
         }
     }

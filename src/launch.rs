@@ -746,7 +746,7 @@ fn run(
         Some(kind),
         broker.as_ref(),
     );
-    record.launch(&caps, backend::denial_tag(record.id()))?;
+    record.launch(&caps, &env, backend::denial_tag(record.id()))?;
     let run = record.id().clone();
     // Both callbacks write the record, and only one of them ever fires, but the borrow checker
     // cannot see that from two closures: a cell is cheaper than a seam for it.

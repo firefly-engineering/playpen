@@ -1283,6 +1283,11 @@ The run record holds:
 - the policy path;
 - the resolved profile and the selection trace;
 - the capability set;
+- the **constructed environment** ([§9.3](#93-inward-and-outward)), which is part of that
+  capability set: every name with its `from:` provenance and the value playpen or the policy
+  wrote, an inherited value withheld as `null` exactly as `explain --json` withholds it. Without
+  it only a live `explain` could say what a child was given, and `explain --run` could not
+  ([#131](https://github.com/firefly-engineering/playpen/issues/131));
 - the route table, with provenance;
 - where the broker's upstream roots came from, naming which of `SSL_CERT_FILE` / `SSL_CERT_DIR`
   was found, or the platform search; absent where no route resolved, since then no broker existed
