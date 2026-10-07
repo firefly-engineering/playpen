@@ -6,8 +6,8 @@
 use playpen::code::Code;
 
 use crate::row::{
-    Action, Asymmetry, BOTH, Class, Decision, Expected, Fixture, Invocation, Legs, Listening, Os,
-    POLICY_SPAN_SITES, Platform, Precondition, Row, Rung, Scope, Services, Signalled, Target,
+    Action, Asymmetry, BOTH, Class, Decision, DedicatedFloor, Expected, Fixture, Invocation, Legs,
+    Listening, Location, Os, Platform, Precondition, Row, Rung, Scope, Services, Signalled, Target,
 };
 
 /// Linux only, under the denial-visibility asymmetry: macOS yields a trace with zero
@@ -58,6 +58,308 @@ const IN_HOME: Platform = Platform {
     scope: Scope::Both,
     requires: &[Precondition::HomeWritable],
 };
+
+/// A refusal row that runs on both platforms, from outside, and is judged by its exit, its line
+/// and its record: the shape of every row that exists to produce one code.
+const fn refused(
+    id: &'static str,
+    invocation: Invocation,
+    code: Code,
+    from: &'static [Decision],
+) -> Row {
+    Row {
+        id,
+        class: Class::Refusal,
+        platform: BOTH,
+        fixture: Fixture::Outside,
+        action: Action::Refuse(invocation),
+        expected: Expected::Recorded(code),
+        from,
+    }
+}
+
+/// A key misspelt inside `definitions:`, arriving through a merge key ([spec §10.2]).
+///
+/// [spec §10.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#102-syntax-and-strictness
+const MERGED_TYPO: &str = "\
+version: 1
+definitions:
+  root: &root
+    mdoe: read
+workspaces:
+  w:
+    roots:
+      - <<: *root
+        path: \"{root}\"
+        mode: read
+profiles:
+  p: { workspaces: [w], toolchain: [] }
+";
+
+/// Where [`MERGED_TYPO`]'s misspelt key is used, and where it is defined.
+const POLICY_SPAN_SITES: &[(u32, u32)] = &[(8, 13), (4, 5)];
+
+/// A flow sequence never closed.
+const UNCLOSED: &str = "version: [1\n";
+
+/// A version this playpen does not read.
+const NEXT_VERSION: &str = "version: 2\n";
+
+/// An explicit YAML tag that is not `!area`.
+const TAGGED: &str = "version: !!int 1\n";
+
+/// `profiles` as a sequence, where it is a map.
+const MISTYPED: &str = "version: 1\nprofiles: []\n";
+
+/// A profile naming a workspace the policy does not declare.
+const UNDECLARED_WORKSPACE: &str = "\
+version: 1
+workspaces:
+  w: { roots: [{ path: \"{root}\", mode: read }] }
+profiles:
+  p: { workspaces: [w, undeclared], toolchain: [] }
+";
+
+// Every coherence document below is one entry away from the coherent shape: one workspace over the
+// fixture's root, and profile `p` selecting it. Spelt out in each, so a row reads whole.
+
+/// A second brought root whose path is not absolute.
+const RELATIVE_ROOT: &str = "\
+version: 1
+workspaces:
+  w: { roots: [{ path: \"{root}\", mode: read }, { path: relative/root, mode: read }] }
+profiles:
+  p: { workspaces: [w], toolchain: [] }
+";
+
+/// A profile listing an env fragment the policy does not declare.
+const UNDECLARED_FRAGMENT: &str = "\
+version: 1
+workspaces:
+  w: { roots: [{ path: \"{root}\", mode: read }] }
+profiles:
+  p: { workspaces: [w], toolchain: [], env: { fragments: [undeclared] } }
+";
+
+/// `SSH_AUTH_SOCK` passed through: a credential oracle the proxy cannot see.
+const FORBIDDEN_NAME: &str = "\
+version: 1
+workspaces:
+  w: { roots: [{ path: \"{root}\", mode: read }] }
+profiles:
+  p: { workspaces: [w], toolchain: [], env: { allow: [SSH_AUTH_SOCK] } }
+";
+
+/// `TMPDIR` set, which playpen writes.
+const RESERVED_NAME: &str = "\
+version: 1
+workspaces:
+  w: { roots: [{ path: \"{root}\", mode: read }] }
+profiles:
+  p: { workspaces: [w], toolchain: [], env: { set: { TMPDIR: /tmp } } }
+";
+
+/// One name both passed through and set by the one profile.
+const TWO_AUTHORS: &str = "\
+version: 1
+workspaces:
+  w: { roots: [{ path: \"{root}\", mode: read }] }
+profiles:
+  p: { workspaces: [w], toolchain: [], env: { allow: [CARGO_HOME], set: { CARGO_HOME: /c } } }
+";
+
+/// An `!area` reference to an area the workspace does not declare.
+const DANGLING_AREA: &str = "\
+version: 1
+workspaces:
+  w: { roots: [{ path: \"{root}\", mode: read }], areas: { a: { lifetime: ephemeral } } }
+profiles:
+  p: { workspaces: [w], toolchain: [], env: { set: { X: !area w/undeclared } } }
+";
+
+/// A route naming a minter the policy does not declare.
+const UNDECLARED_MINTER: &str = "\
+version: 1
+workspaces:
+  w: { roots: [{ path: \"{root}\", mode: read }] }
+profiles:
+  p:
+    workspaces: [w]
+    toolchain: []
+    credentials:
+      - { host: api.example, path_prefix: /, minter: undeclared, delivery: { env: SUITE_TOKEN } }
+";
+
+/// Two routes on one host, neither prefix extending the other.
+const TIED_ROUTES: &str = "\
+version: 1
+minters:
+  m: { command: [\"{sh}\", -c, 'exit 3'] }
+workspaces:
+  w: { roots: [{ path: \"{root}\", mode: read }] }
+profiles:
+  p:
+    workspaces: [w]
+    toolchain: []
+    credentials:
+      - { host: api.example, path_prefix: /a/, minter: m, delivery: { env: SUITE_A } }
+      - { host: api.example, path_prefix: /b/, minter: m, delivery: { env: SUITE_B } }
+";
+
+/// A route naming an endpoint rule set the policy does not declare.
+const UNDECLARED_RULE_SET: &str = "\
+version: 1
+minters:
+  m: { command: [\"{sh}\", -c, 'exit 3'] }
+workspaces:
+  w: { roots: [{ path: \"{root}\", mode: read }] }
+profiles:
+  p:
+    workspaces: [w]
+    toolchain: []
+    credentials:
+      - host: api.example
+        path_prefix: /
+        minter: m
+        delivery: { env: SUITE_TOKEN }
+        endpoints: [undeclared]
+";
+
+/// A rule set no path under its route's prefix can match.
+const UNSATISFIABLE_RULE_SET: &str = "\
+version: 1
+minters:
+  m: { command: [\"{sh}\", -c, 'exit 3'] }
+fragments:
+  endpoints:
+    inference: [{ method: POST, path: /v1/messages }]
+workspaces:
+  w: { roots: [{ path: \"{root}\", mode: read }] }
+profiles:
+  p:
+    workspaces: [w]
+    toolchain: []
+    credentials:
+      - host: api.example
+        path_prefix: /repos/
+        minter: m
+        delivery: { env: SUITE_TOKEN }
+        endpoints: [inference]
+";
+
+/// No profile `p`, which the invocation names.
+const NO_PROFILE_P: &str = "\
+version: 1
+workspaces:
+  w: { roots: [{ path: \"{root}\", mode: read }] }
+profiles:
+  q: { workspaces: [w], toolchain: [] }
+";
+
+/// An exclusion of a path that is not there.
+const ABSENT_EXCLUSION: &str = "\
+version: 1
+workspaces:
+  w: { roots: [{ path: \"{root}\", mode: read, exclude: [{ path: \"{root}/absent\" }] }] }
+profiles:
+  p: { workspaces: [w], toolchain: [] }
+";
+
+/// A profile route whose minter exits non-zero.
+const MINTER_EXITS: &str = "\
+version: 1
+minters:
+  m: { command: [\"{sh}\", -c, 'exit 3'] }
+workspaces:
+  w: { roots: [{ path: \"{root}\", mode: read }] }
+profiles:
+  p:
+    workspaces: [w]
+    toolchain: []
+    credentials:
+      - { host: api.example, path_prefix: /, minter: m, delivery: { env: SUITE_TOKEN } }
+";
+
+/// A profile route whose minter answers something that is not `{token, expires_at}`.
+const MINTER_MUMBLES: &str = "\
+version: 1
+minters:
+  m: { command: [\"{sh}\", -c, 'echo not-json'] }
+workspaces:
+  w: { roots: [{ path: \"{root}\", mode: read }] }
+profiles:
+  p:
+    workspaces: [w]
+    toolchain: []
+    credentials:
+      - { host: api.example, path_prefix: /, minter: m, delivery: { env: SUITE_TOKEN } }
+";
+
+/// A profile route whose minter outlives its one-second `timeout`.
+const MINTER_HANGS: &str = "\
+version: 1
+minters:
+  m: { command: [\"{sh}\", -c, 'sleep 30'], timeout: 1 }
+workspaces:
+  w: { roots: [{ path: \"{root}\", mode: read }] }
+profiles:
+  p:
+    workspaces: [w]
+    toolchain: []
+    credentials:
+      - { host: api.example, path_prefix: /, minter: m, delivery: { env: SUITE_TOKEN } }
+";
+
+/// A policy declaring a shim, but not the one playpen is invoked as.
+const OTHER_SHIM: &str = "\
+version: 1
+workspaces:
+  w: { roots: [{ path: \"{root}\", mode: read }] }
+profiles:
+  p: { workspaces: [w], toolchain: [], prefixes: [\"{root}\"] }
+shims:
+  other: { target: \"{canary}\", kind: claude }
+";
+
+/// The shim invoked, stating a kind this playpen does not know.
+const UNKNOWN_KIND: &str = "\
+version: 1
+workspaces:
+  w: { roots: [{ path: \"{root}\", mode: read }] }
+profiles:
+  p: { workspaces: [w], toolchain: [], prefixes: [\"{root}\"] }
+shims:
+  tool: { target: \"{canary}\", kind: not-a-kind }
+";
+
+/// The shim invoked unpinned, from a directory no profile's prefixes contain.
+const NO_PREFIX: &str = "\
+version: 1
+workspaces:
+  w: { roots: [{ path: \"{root}\", mode: read }] }
+profiles:
+  p: { workspaces: [w], toolchain: [], prefixes: [] }
+shims:
+  tool: { target: \"{canary}\", kind: claude }
+";
+
+/// The shim invoked unpinned, from a directory two profiles' equally long prefixes contain.
+const TIED_PREFIXES: &str = "\
+version: 1
+workspaces:
+  w: { roots: [{ path: \"{root}\", mode: read }] }
+profiles:
+  p: { workspaces: [w], toolchain: [], prefixes: [\"{root}\"] }
+  q: { workspaces: [w], toolchain: [], prefixes: [\"{root}\"] }
+shims:
+  tool: { target: \"{canary}\", kind: claude }
+";
+
+/// What every row whose document the parser refuses rests on.
+const PARSER: &[Decision] = &[Decision::Adr(9), Decision::Adr(16), Decision::Issue(56)];
+
+/// What every row of a refusal about a minter rests on.
+const MINTERS: &[Decision] = &[Decision::Adr(8), Decision::Adr(16), Decision::Issue(85)];
 
 pub const ROWS: &[Row] = &[
     // "The manifest is true": what the agent is told and what the kernel enforces are one
@@ -430,7 +732,7 @@ pub const ROWS: &[Row] = &[
         class: Class::Refusal,
         platform: BOTH,
         fixture: Fixture::Outside,
-        action: Action::Refuse(Invocation::MergedTypo),
+        action: Action::Refuse(Invocation::Policy(MERGED_TYPO)),
         expected: Expected::RecordedAt(Code::PolicyUnknownField, POLICY_SPAN_SITES),
         from: &[Decision::Adr(9), Decision::Adr(16), Decision::Issue(56)],
     },
@@ -448,7 +750,7 @@ pub const ROWS: &[Row] = &[
         class: Class::Refusal,
         platform: BOTH,
         fixture: Fixture::Outside,
-        action: Action::Refuse(Invocation::IncoherentWorkspace),
+        action: Action::Refuse(Invocation::Policy(UNDECLARED_WORKSPACE)),
         expected: Expected::Recorded(Code::WorkspaceUnknown),
         from: &[Decision::Adr(9), Decision::Adr(16), Decision::Issue(59)],
     },
@@ -473,4 +775,249 @@ pub const ROWS: &[Row] = &[
         expected: Expected::Recorded(Code::BudgetExceeded),
         from: &[Decision::Adr(16), Decision::Issue(67)],
     },
+    // One row per code from here on, each provoking exactly its own: `R-code-coverage` asks every
+    // `refusal.*` code for a row that produces it, and a row passing on some other code would be
+    // the vacuous pass ADR 0016 denies.
+    //
+    // The policy's location ([spec §10.1]).
+    refused(
+        "R-policy-not-found",
+        Invocation::Locate(Location::Absent),
+        Code::PolicyNotFound,
+        &[Decision::Adr(16), Decision::Issue(57)],
+    ),
+    refused(
+        "R-policy-unreadable",
+        Invocation::Locate(Location::Directory),
+        Code::PolicyUnreadable,
+        &[Decision::Adr(16), Decision::Issue(57)],
+    ),
+    refused(
+        "R-policy-ambiguous",
+        Invocation::Locate(Location::BothFormats),
+        Code::PolicyAmbiguousLocation,
+        &[Decision::Adr(16), Decision::Issue(57)],
+    ),
+    // The parser-contract tier ([spec §10.2]).
+    refused(
+        "R-policy-syntax",
+        Invocation::Policy(UNCLOSED),
+        Code::PolicySyntax,
+        PARSER,
+    ),
+    refused(
+        "R-policy-version",
+        Invocation::Policy(NEXT_VERSION),
+        Code::PolicyVersion,
+        PARSER,
+    ),
+    refused(
+        "R-policy-tag",
+        Invocation::Policy(TAGGED),
+        Code::PolicyTag,
+        PARSER,
+    ),
+    refused(
+        "R-policy-type",
+        Invocation::Policy(MISTYPED),
+        Code::PolicyType,
+        PARSER,
+    ),
+    // The coherence tier ([spec §10.5]).
+    refused(
+        "R-root-relative",
+        Invocation::Policy(RELATIVE_ROOT),
+        Code::RootRelative,
+        &[
+            Decision::Adr(9),
+            Decision::Adr(16),
+            Decision::Issue(59),
+            Decision::Issue(65),
+        ],
+    ),
+    refused(
+        "R-fragment-unknown",
+        Invocation::Policy(UNDECLARED_FRAGMENT),
+        Code::FragmentUnknown,
+        &[Decision::Adr(12), Decision::Adr(16), Decision::Issue(68)],
+    ),
+    refused(
+        "R-env-forbidden",
+        Invocation::Policy(FORBIDDEN_NAME),
+        Code::EnvForbidden,
+        &[Decision::Adr(12), Decision::Adr(16), Decision::Issue(69)],
+    ),
+    refused(
+        "R-env-reserved",
+        Invocation::Policy(RESERVED_NAME),
+        Code::EnvReserved,
+        &[Decision::Adr(12), Decision::Adr(16), Decision::Issue(69)],
+    ),
+    refused(
+        "R-env-duplicate",
+        Invocation::Policy(TWO_AUTHORS),
+        Code::EnvDuplicate,
+        &[Decision::Adr(12), Decision::Adr(16), Decision::Issue(130)],
+    ),
+    refused(
+        "R-area-unknown",
+        Invocation::Policy(DANGLING_AREA),
+        Code::AreaUnknown,
+        &[Decision::Adr(10), Decision::Adr(16), Decision::Issue(73)],
+    ),
+    refused(
+        "R-minter-unknown",
+        Invocation::Policy(UNDECLARED_MINTER),
+        Code::MinterUnknown,
+        MINTERS,
+    ),
+    refused(
+        "R-route-ambiguous",
+        Invocation::Policy(TIED_ROUTES),
+        Code::RouteAmbiguous,
+        &[Decision::Adr(16), Decision::Issue(89)],
+    ),
+    refused(
+        "R-endpoint-unknown",
+        Invocation::Policy(UNDECLARED_RULE_SET),
+        Code::EndpointUnknown,
+        &[Decision::Adr(16), Decision::Adr(17), Decision::Issue(94)],
+    ),
+    refused(
+        "R-endpoint-unsatisfiable",
+        Invocation::Policy(UNSATISFIABLE_RULE_SET),
+        Code::EndpointUnsatisfiable,
+        &[Decision::Adr(16), Decision::Adr(17), Decision::Issue(94)],
+    ),
+    // Invocation and selection ([spec §11]).
+    refused(
+        "R-unknown-profile",
+        Invocation::Policy(NO_PROFILE_P),
+        Code::SelectionUnknownProfile,
+        &[Decision::Adr(16), Decision::Issue(60)],
+    ),
+    refused(
+        "R-shim-unknown",
+        Invocation::Shim(OTHER_SHIM),
+        Code::ShimUnknown,
+        &[Decision::Adr(16), Decision::Adr(19), Decision::Issue(81)],
+    ),
+    refused(
+        "R-kind-unknown",
+        Invocation::Shim(UNKNOWN_KIND),
+        Code::KindUnknown,
+        &[Decision::Adr(16), Decision::Issue(75)],
+    ),
+    refused(
+        "R-selection-no-match",
+        Invocation::Shim(NO_PREFIX),
+        Code::SelectionNoMatch,
+        &[Decision::Adr(16), Decision::Issue(60)],
+    ),
+    refused(
+        "R-selection-ambiguous",
+        Invocation::Shim(TIED_PREFIXES),
+        Code::SelectionAmbiguous,
+        &[Decision::Adr(16), Decision::Issue(60)],
+    ),
+    Row {
+        id: "R-run-unknown",
+        class: Class::Refusal,
+        platform: BOTH,
+        fixture: Fixture::Outside,
+        action: Action::Refuse(Invocation::UnknownRun),
+        expected: Expected::Unrecorded(Code::RunUnknown),
+        from: &[Decision::Adr(16), Decision::Issue(52)],
+    },
+    // Host state ([spec §11.5], [spec §11.7], [spec §5]).
+    refused(
+        "R-exclusion-missing",
+        Invocation::Policy(ABSENT_EXCLUSION),
+        Code::ExclusionMissing,
+        &[Decision::Adr(16), Decision::Issue(63)],
+    ),
+    refused(
+        "R-integrity-unresolvable",
+        Invocation::UnfoundLink,
+        Code::IntegrityUnresolvable,
+        &[
+            Decision::Adr(16),
+            Decision::Issue(66),
+            Decision::Issue(81),
+            Decision::Issue(108),
+        ],
+    ),
+    refused(
+        "R-cwd-ungranted",
+        Invocation::CwdOutside,
+        Code::CwdUngranted,
+        &[Decision::Adr(16), Decision::Issue(48)],
+    ),
+    refused(
+        "R-area-busy",
+        Invocation::HeldArea,
+        Code::AreaBusy,
+        &[Decision::Adr(10), Decision::Adr(16), Decision::Issue(72)],
+    ),
+    refused(
+        "R-state-io",
+        Invocation::ScratchBlocked,
+        Code::StateIo,
+        &[Decision::Adr(16), Decision::Issue(70)],
+    ),
+    refused(
+        "R-process-fork",
+        Invocation::NoProcesses,
+        Code::ProcessFork,
+        &[Decision::Adr(16), Decision::Issue(50)],
+    ),
+    // The mechanism ([spec §8.2], [spec §8.6]).
+    refused(
+        "R-floor-unavailable",
+        Invocation::Floor(DedicatedFloor::Undeclared),
+        Code::FloorUnavailable,
+        &[Decision::Adr(16), Decision::Adr(23), Decision::Issue(134)],
+    ),
+    refused(
+        "R-floor-self-test",
+        Invocation::Floor(DedicatedFloor::CanaryUnrunnable),
+        Code::FloorSelfTest,
+        &[
+            Decision::Adr(6),
+            Decision::Adr(16),
+            Decision::Adr(23),
+            Decision::Issue(50),
+        ],
+    ),
+    refused(
+        "R-target-exec",
+        Invocation::AbsentTarget,
+        Code::TargetExec,
+        &[Decision::Adr(16), Decision::Issue(51)],
+    ),
+    // Credentials and the proxy ([spec §7.2], [spec §6.2]).
+    refused(
+        "R-minter-failed",
+        Invocation::Policy(MINTER_EXITS),
+        Code::MinterFailed,
+        MINTERS,
+    ),
+    refused(
+        "R-minter-malformed",
+        Invocation::Policy(MINTER_MUMBLES),
+        Code::MinterMalformed,
+        MINTERS,
+    ),
+    refused(
+        "R-minter-timeout",
+        Invocation::Policy(MINTER_HANGS),
+        Code::MinterTimeout,
+        MINTERS,
+    ),
+    refused(
+        "R-proxy-ca",
+        Invocation::NoTrustedRoots,
+        Code::ProxyCa,
+        &[Decision::Adr(16), Decision::Adr(30), Decision::Issue(86)],
+    ),
 ];

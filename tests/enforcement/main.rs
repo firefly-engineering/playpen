@@ -84,6 +84,10 @@ fn main() {
             a_recorded_refusal_needs_the_exit_the_code_and_the_record,
         ),
         (
+            "an_unrecorded_refusal_names_no_run_and_leaves_the_ring_empty",
+            an_unrecorded_refusal_names_no_run_and_leaves_the_ring_empty,
+        ),
+        (
             "a_spanned_refusal_needs_every_site_on_its_line",
             a_spanned_refusal_needs_every_site_on_its_line,
         ),
@@ -315,9 +319,10 @@ fn a_recorded_refusal_needs_the_exit_the_code_and_the_record() {
     let expected = Expected::Recorded(code);
     let declined = Declined {
         status: Some(playpen::refusal::EXIT_REFUSED),
-        line: Some((code.to_string(), "01J9".into())),
+        line: Some((code.to_string(), Some("01J9".into()))),
         text: format!("playpen: {code}: /p/policy.yaml:8:13 (defined at /p/policy.yaml:4:5): x"),
         recorded: Some(Some(code.to_string())),
+        ring: 1,
         detail: String::new(),
     };
     assert_eq!(judge_refusal(expected, &declined), Verdict::Pass);
@@ -333,7 +338,12 @@ fn a_recorded_refusal_needs_the_exit_the_code_and_the_record() {
             ..declined.clone()
         },
         Declined {
-            line: Some((other.clone(), "01J9".into())),
+            line: Some((other.clone(), Some("01J9".into()))),
+            ..declined.clone()
+        },
+        // A line naming no run names no record, whatever the ring holds.
+        Declined {
+            line: Some((code.to_string(), None)),
             ..declined.clone()
         },
         Declined {
@@ -357,13 +367,57 @@ fn a_recorded_refusal_needs_the_exit_the_code_and_the_record() {
     }
 }
 
+/// A command that launches nothing is held to the converse of a launch's refusal: its line names
+/// no run, and the ring stays empty. Either half alone passes on a build the other catches — a
+/// line that merely omits its id, and a record opened for an `explain`.
+fn an_unrecorded_refusal_names_no_run_and_leaves_the_ring_empty() {
+    let code = Code::RunUnknown;
+    let expected = Expected::Unrecorded(code);
+    let declined = Declined {
+        status: Some(playpen::refusal::EXIT_REFUSED),
+        line: Some((code.to_string(), None)),
+        text: format!("playpen: {code}: no record of run 01J9"),
+        recorded: None,
+        ring: 0,
+        detail: String::new(),
+    };
+    assert_eq!(judge_refusal(expected, &declined), Verdict::Pass);
+    for broken in [
+        Declined {
+            status: Some(0),
+            ..declined.clone()
+        },
+        Declined {
+            line: Some((Code::StateIo.to_string(), None)),
+            ..declined.clone()
+        },
+        Declined {
+            line: Some((code.to_string(), Some("01J9".into()))),
+            recorded: Some(Some(code.to_string())),
+            ring: 1,
+            ..declined.clone()
+        },
+        Declined {
+            ring: 1,
+            ..declined.clone()
+        },
+    ] {
+        let verdict = judge_refusal(expected, &broken);
+        assert!(
+            matches!(verdict, Verdict::Fail(_)),
+            "{broken:?}: {verdict:?}"
+        );
+    }
+}
+
 fn a_spanned_refusal_needs_every_site_on_its_line() {
     let code = Code::PolicyUnknownField;
     let declined = Declined {
         status: Some(playpen::refusal::EXIT_REFUSED),
-        line: Some((code.to_string(), "01J9".into())),
+        line: Some((code.to_string(), Some("01J9".into()))),
         text: format!("playpen: {code}: /p/policy.yaml:8:13 (defined at /p/policy.yaml:4:5): x"),
         recorded: Some(Some(code.to_string())),
+        ring: 1,
         detail: String::new(),
     };
     let expected = Expected::RecordedAt(code, &[(8, 13), (4, 5)]);

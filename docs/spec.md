@@ -1799,6 +1799,7 @@ Row ids are provisional. The implementation owns the final ids.
 | `R-state-reachable` | refusal | a root that is an ancestor of playpen's state directory → `125` + `refusal.state.reachable`, naming both paths. The state directory is **synthetic**, not the real `$HOME`: the check compares resolved paths and does not care whose home it is | both |
 | `R-integrity` | refusal | a policy file inside the profile's own read-write root → `125` + `refusal.integrity.writable` | both |
 | `R-code-coverage` | refusal | every `refusal.*` code in the registry has ≥ 1 producing row | both |
+| `R-<code>` | refusal | one row per `refusal.*` code no row above produces (`R-policy-syntax`, `R-area-busy`, …) → `125` + that code + a record holding it, and no other code. Provoked by a policy document alone, or by **one host fact set on that one launch** — a search path, a working directory, a held area, a process limit, a dedicated floor, a trust store — never by a seam in the shipped source. `R-run-unknown` is the converse, since `explain` launches nothing: no run named, and the ring left empty | both |
 | `R-policy-span` | refusal | a policy refusal names file, line and column, including through a merge key | both |
 | `R-no-filesystem` | refusal | `check --no-filesystem` performs no existence check | both |
 | `R-trace-denials` | refusal | `--trace-denials` refuses naming the missing precondition, including `channel-lossy`; a failed post-run self-test marks the trace unverified | Linux (`n/a` macOS) |

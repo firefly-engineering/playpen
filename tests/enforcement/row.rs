@@ -526,17 +526,19 @@ pub enum Invocation {
     ///
     /// [ADR 0027]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0027-the-state-directory-is-unreachable-by-refusal-because-a-carve-out-is-not-portable.md
     StateReachable,
-    /// `playpen run` under a YAML policy whose one root holds a key misspelt inside
-    /// `definitions:`, arriving through a merge key ([spec §10.2]). [`POLICY_SPAN_SITES`] are the
-    /// use site and the definition site, in that document.
+    /// `playpen run` of profile `p` as `claude`, from inside the fixture's root, under this YAML
+    /// policy document and nothing else about the host. Every refusal a document alone provokes —
+    /// the parser's and the coherence tier's, a dangling exclusion, a minter that fails — is an
+    /// instance of this one check, so a new one is a row and a document, never a variant
+    /// ([spec §17.1]).
     ///
-    /// [spec §10.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#102-syntax-and-strictness
-    MergedTypo,
-    /// `playpen run` under a policy whose selected profile names a workspace the policy does not
-    /// declare: the coherence tier's, at launch step 5 ([spec §10.5]).
+    /// The document is written as it is spelt, with three names substituted: [`ROOT`], the
+    /// fixture's one root; [`SH`], the floor's own shell, for a minter's command; and [`CANARY`],
+    /// the floor's canary, for a shim's target. Substitution is of the whole placeholder only, so
+    /// a line and column the row asserts stay where the document puts them.
     ///
-    /// [spec §10.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#105-validation-tiers
-    IncoherentWorkspace,
+    /// [spec §17.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#171-form
+    Policy(&'static str),
     /// `playpen run` under a policy file that lies inside the profile's own read-write root, so the
     /// confined tree could rewrite the boundary of the next launch ([spec §11.7]).
     ///
@@ -560,7 +562,113 @@ pub enum Invocation {
     ///
     /// [spec §15.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#153-the-compiled-profile-ceiling
     OverCeiling,
+    /// `playpen run` of a policy that is where `location` puts it ([spec §10.1]).
+    ///
+    /// [spec §10.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#101-location
+    Locate(Location),
+    /// playpen invoked as a **shim** named [`SHIM`], through a link to the binary in a directory of
+    /// its own, with this YAML document where the search path finds it ([spec §11.3]). Substituted
+    /// as [`Invocation::Policy`]'s is. Everything a shim decides from the document alone — whether
+    /// it declares the name, the kind it states, the profile the chain selects — is an instance of
+    /// this one check.
+    ///
+    /// The chain is left to the working directory: `PLAYPEN_PROFILE` is removed on that launch,
+    /// and the shim runs from inside the fixture's root ([spec §11.4]).
+    ///
+    /// [spec §11.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#113-shims
+    /// [spec §11.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#114-profile-selection
+    Shim(&'static str),
+    /// The shim of [`Invocation::Shim`], invoked by its **bare name** as a `PATH` lookup leaves
+    /// `argv[0]`, with a `PATH` that holds no entry leading to it. The link playpen was reached
+    /// through cannot be found, so it cannot be shown unwritable ([spec §11.7]).
+    ///
+    /// A host fact on that one launch, rather than the re-run's injected executable that
+    /// `R-missing-cap` uses: the shipped `main` is what reads both `argv[0]` and `PATH`.
+    ///
+    /// [spec §11.7]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#117-self-integrity
+    UnfoundLink,
+    /// `playpen run` from a working directory outside every granted root: the fixture's policy
+    /// directory, which the policy does not grant ([spec §11.5]).
+    ///
+    /// [spec §11.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#115-working-directory
+    CwdOutside,
+    /// `playpen run` of a target that does not exist, inside the one root the profile grants, so
+    /// the `exec` that fails is the confined child's and not a path the boundary hid
+    /// ([spec Appendix C], item C9).
+    ///
+    /// [spec Appendix C]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#appendix-c--assembly-choices
+    AbsentTarget,
+    /// `playpen run` of a profile with one `exclusive` area while another run of it holds that
+    /// area: a run of the suite's own, launched first and held until the refusal is in
+    /// ([spec §5.4]).
+    ///
+    /// [spec §5.4]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#54-provisioned-areas
+    HeldArea,
+    /// `playpen run` under a state directory where the run scratch's parent is a regular file, so
+    /// the scratch cannot be created ([spec §5.7]). The record lives beside it and is untouched,
+    /// which is what makes this the refusal and not the record's own failure to open.
+    ///
+    /// [spec §5.7]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#57-run-scratch
+    ScratchBlocked,
+    /// `playpen run` with `RLIMIT_NPROC` at zero on that one launch, so its first `fork` — the
+    /// floor self-test's throwaway child — is refused by the kernel ([spec §8.6]). Ignored for a
+    /// caller that is root, which a reference host's suite does not run as.
+    ///
+    /// [spec §8.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#86-the-floor-self-test
+    NoProcesses,
+    /// `playpen run` with `PLAYPEN_FLOOR` naming a dedicated floor of the suite's own making on
+    /// that one launch, in the state `floor` says ([spec §8.2]).
+    ///
+    /// [spec §8.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#82-the-floor
+    Floor(DedicatedFloor),
+    /// `playpen run` of a profile with one credential route whose minter answers, with
+    /// `SSL_CERT_FILE` naming an empty file on that one launch: the host's own trust store is what
+    /// the host says it is, and this one says nothing ([ADR 0030]). The broker would have nothing to
+    /// verify a destination against.
+    ///
+    /// [ADR 0030]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0030-the-hosts-own-trust-store-is-what-the-host-says-it-is.md
+    NoTrustedRoots,
+    /// `playpen explain --run` of a well-formed run id the fixture's ring does not hold
+    /// ([spec §14.2]).
+    ///
+    /// [spec §14.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#142-playpen-explain
+    UnknownRun,
 }
+
+/// Where [`Invocation::Locate`] puts the policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Location {
+    /// Nowhere: `--policy` names a path in the fixture's policy directory that does not exist.
+    /// Named rather than searched for, so a host's own `/etc/playpen` cannot answer instead.
+    Absent,
+    /// `--policy` names a directory.
+    Directory,
+    /// No `--policy`, and the first location of the search path holds both `policy.yaml` and
+    /// `policy.json`, each a document that would load. That location is the launch's own
+    /// `XDG_CONFIG_HOME`, set on that one launch and never on the suite; being first, it is
+    /// refused before any location of the host's is looked at.
+    BothFormats,
+}
+
+/// The state of a dedicated floor [`Invocation::Floor`] names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DedicatedFloor {
+    /// An empty directory: no declared closure at all.
+    Undeclared,
+    /// A declared closure, and a canary at `bin/true` that is not executable, so it cannot start
+    /// when confined.
+    CanaryUnrunnable,
+}
+
+/// The name [`Invocation::Shim`] and [`Invocation::UnfoundLink`] invoke playpen under.
+pub const SHIM: &str = "tool";
+
+/// What [`Invocation::Policy`] and [`Invocation::Shim`] substitute with the fixture's one root.
+pub const ROOT: &str = "{root}";
+/// What they substitute with the floor's shell.
+pub const SH: &str = "{sh}";
+/// What they substitute with the floor's canary.
+pub const CANARY: &str = "{canary}";
 
 /// Which rung of the denial trace's precondition ladder is made to fail ([spec §14.5]), or made
 /// to fail only on the pass that *brackets* the run.
@@ -660,25 +768,6 @@ pub fn over_ceiling_name(i: usize) -> String {
     format!("{i:05}").repeat(40)
 }
 
-/// The policy [`Invocation::MergedTypo`] runs under, with `{root}` for its one root's path.
-pub const MERGED_TYPO: &str = "\
-version: 1
-definitions:
-  root: &root
-    mdoe: read
-workspaces:
-  w:
-    roots:
-      - <<: *root
-        path: \"{root}\"
-        mode: read
-profiles:
-  p: { workspaces: [w], toolchain: [] }
-";
-
-/// Where [`MERGED_TYPO`]'s misspelt key is used, and where it is defined.
-pub const POLICY_SPAN_SITES: &[(u32, u32)] = &[(8, 13), (4, 5)];
-
 /// What the row asserts of the action, outside and then inside.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Expected {
@@ -701,6 +790,13 @@ pub enum Expected {
     /// As [`Expected::Recorded`], and the refusal line names each `line:column` of the YAML
     /// policy the invocation ran under.
     RecordedAt(Code, &'static [(u32, u32)]),
+    /// playpen exits `125` with this code on its refusal line, the line names **no** run, and the
+    /// ring holds no record afterwards: the refusal of a command that launches nothing
+    /// ([spec §14.2]). The empty ring is the half that keeps it from being any refusal at all — a
+    /// build that opened a record for `explain` would push a real run out of the ring.
+    ///
+    /// [spec §14.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#142-playpen-explain
+    Unrecorded(Code),
     /// `playpen check` refuses the document with this code, which shows the existence check is
     /// there to skip; `check --no-filesystem` of the same document then succeeds, silently.
     Unexamined(Code),
@@ -758,9 +854,10 @@ impl Expected {
             | Expected::Authenticated
             | Expected::OnlyThroughTheProxy
             | Expected::TraceBracketed => Class::Positive,
-            Expected::Recorded(_) | Expected::RecordedAt(..) | Expected::Unexamined(_) => {
-                Class::Refusal
-            }
+            Expected::Recorded(_)
+            | Expected::RecordedAt(..)
+            | Expected::Unrecorded(_)
+            | Expected::Unexamined(_) => Class::Refusal,
         }
     }
 }
@@ -806,13 +903,16 @@ pub enum Cause {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Declined {
     pub status: Option<i32>,
-    /// The code and run id on the refusal line, if stderr held exactly one line that reads as one.
-    pub line: Option<(String, String)>,
+    /// The code on the refusal line, if stderr held exactly one line that reads as one, and the
+    /// run id it names, if it names one.
+    pub line: Option<(String, Option<String>)>,
     /// That line as written, or empty.
     pub text: String,
     /// The record of that run, if it exists, by the refusal code it stores: the inner `None` is a
     /// record that holds no refusal.
     pub recorded: Option<Option<String>>,
+    /// How many records the state directory's ring holds afterwards.
+    pub ring: usize,
     /// What was observed, for the report.
     pub detail: String,
 }
@@ -901,12 +1001,16 @@ pub fn judge(expected: Expected, outside: &Seen, inside: &Seen) -> Verdict {
             Some(Cause::Errno(libc::EBADF)) => Verdict::Pass,
             _ => Verdict::Fail(format!("not EBADF: {detail}")),
         },
-        (Expected::Recorded(_) | Expected::RecordedAt(..) | Expected::Unexamined(_), _) => {
-            Verdict::Setup(
-                "a refusal has no inside: playpen declined to launch, so it is judged by what it left"
-                    .into(),
-            )
-        }
+        (
+            Expected::Recorded(_)
+            | Expected::RecordedAt(..)
+            | Expected::Unrecorded(_)
+            | Expected::Unexamined(_),
+            _,
+        ) => Verdict::Setup(
+            "a refusal has no inside: playpen declined to launch, so it is judged by what it left"
+                .into(),
+        ),
         (
             Expected::Authenticated
             | Expected::OnlyThroughTheProxy
@@ -1100,6 +1204,7 @@ pub fn judge_request(
         | Expected::Succeeds
         | Expected::Recorded(_)
         | Expected::RecordedAt(..)
+        | Expected::Unrecorded(_)
         | Expected::Unexamined(_)) => {
             Verdict::Setup(format!("{other:?} is not a credential route's assertion"))
         }
@@ -1121,21 +1226,23 @@ fn denied(exchange: &Exchange, detail: &str) -> Verdict {
 }
 
 /// A refusal row: exit `125` with the expected code, then the record that the line names holds
-/// it. Neither half alone is the assertion: a run that launched leaves a record too.
+/// it. Neither half alone is the assertion: a run that launched leaves a record too. A command
+/// that launches nothing is held to the converse: its line names no run, and the ring stays empty.
 pub fn judge_refusal(expected: Expected, declined: &Declined) -> Verdict {
-    let (code, sites) = match expected {
-        Expected::Recorded(code) => (code, &[][..]),
-        Expected::RecordedAt(code, sites) => (code, sites),
+    let (code, sites, launched) = match expected {
+        Expected::Recorded(code) => (code, &[][..], true),
+        Expected::RecordedAt(code, sites) => (code, sites, true),
+        Expected::Unrecorded(code) => (code, &[][..], false),
         _ => return Verdict::Setup(format!("{expected:?} is not a refusal's assertion")),
     };
     let detail = &declined.detail;
     if declined.status != Some(EXIT_REFUSED) {
         return Verdict::Fail(format!("did not refuse: {detail}"));
     }
-    match &declined.line {
-        Some((seen, _)) if seen == code.as_str() => {}
+    let run = match &declined.line {
+        Some((seen, run)) if seen == code.as_str() => run,
         _ => return Verdict::Fail(format!("not one refusal line with {code}: {detail}")),
-    }
+    };
     if let Some((line, column)) = sites
         .iter()
         .find(|(line, column)| !declined.text.contains(&format!(".yaml:{line}:{column}")))
@@ -1143,6 +1250,21 @@ pub fn judge_refusal(expected: Expected, declined: &Declined) -> Verdict {
         return Verdict::Fail(format!(
             "the refusal line does not name {line}:{column} of the policy: {detail}"
         ));
+    }
+    // A command that launches nothing: the line names no run, and none was recorded.
+    if !launched {
+        return match (run, declined.ring) {
+            (None, 0) => Verdict::Pass,
+            (Some(run), _) => Verdict::Fail(format!(
+                "the refusal line names run {run}, and nothing was launched: {detail}"
+            )),
+            (None, ring) => Verdict::Fail(format!(
+                "the ring holds {ring} record(s), and nothing was launched: {detail}"
+            )),
+        };
+    }
+    if run.is_none() {
+        return Verdict::Fail(format!("the refusal line names no run: {detail}"));
     }
     match &declined.recorded {
         None => Verdict::Fail(format!("no run record after the refusal: {detail}")),

@@ -33,10 +33,10 @@ use tempfile::{NamedTempFile, TempDir};
 
 use crate::common::{self, PROBE};
 use crate::row::{
-    Action, Bracketed, Cause, Checked, Declined, Exchange, Exchanged, Expected, Fixture,
-    Invocation, Legs, Listening, MERGED_TYPO, OVER_CEILING, Outcome, Row, Rung, Seen, Services,
-    Signalled, Substitution, Target, Traced, Verdict, applies, judge, judge_bracket, judge_refusal,
-    judge_request, judge_unexamined, over_ceiling_name,
+    Action, Bracketed, CANARY, Cause, Checked, Declined, DedicatedFloor, Exchange, Exchanged,
+    Expected, Fixture, Invocation, Legs, Listening, Location, OVER_CEILING, Outcome, ROOT, Row,
+    Rung, SH, SHIM, Seen, Services, Signalled, Substitution, Target, Traced, Verdict, applies,
+    judge, judge_bracket, judge_refusal, judge_request, judge_unexamined, over_ceiling_name,
 };
 use playpen::refusal::EXIT_REFUSED;
 
@@ -1618,7 +1618,9 @@ fn decline(invocation: Invocation) -> Declined {
     // may move it, which is the whole point of `StateReachable`.
     let mut runs = fixture.runs();
     // What an invocation made that must outlive playpen's run.
-    let mut held = None;
+    let mut held: Vec<TempDir> = Vec::new();
+    // A run of the suite's own holding what this one is refused for, let go once it is.
+    let mut holder = None;
     let mut command = match invocation {
         Invocation::Usage => fixture.playpen(&["run"]),
         Invocation::MissingCapability => {
@@ -1633,27 +1635,10 @@ fn decline(invocation: Invocation) -> Declined {
                 .current_dir(fixture.root());
             command
         }
-        Invocation::MergedTypo => {
-            let root = fixture.root().to_str().expect("utf-8 path");
+        Invocation::Policy(document) => {
             let policy = fixture.policy_dir.path().join("policy.yaml");
-            fs::write(&policy, MERGED_TYPO.replace("{root}", root)).expect("write policy");
-            let mut command =
-                fixture.playpen(&["run", "--profile", "p", "--agent", "claude", "--policy"]);
-            command.arg(&policy).arg("--").arg(canary());
-            command
-        }
-        Invocation::IncoherentWorkspace => {
-            let policy = fixture.policy_dir.path().join("incoherent.json");
-            let document = serde_json::json!({
-                "version": 1,
-                "workspaces": {"w": {"roots": [{"path": fixture.root(), "mode": "read"}]}},
-                "profiles": {"p": {"workspaces": ["w", "undeclared"], "toolchain": []}},
-            });
-            fs::write(&policy, document.to_string()).expect("write policy");
-            let mut command =
-                fixture.playpen(&["run", "--profile", "p", "--agent", "claude", "--policy"]);
-            command.arg(&policy).arg("--").arg(canary());
-            command
+            fs::write(&policy, substituted(document, &fixture)).expect("write policy");
+            fixture.run_under(&policy, &[canary().to_str().expect("utf-8 path")])
         }
         Invocation::WritablePolicy => {
             let policy = fixture.root().join("policy.json");
@@ -1669,7 +1654,7 @@ fn decline(invocation: Invocation) -> Declined {
             command
         }
         Invocation::OverCeiling => {
-            let tools = held.insert(TempDir::new().expect("toolchain roots"));
+            let tools = TempDir::new().expect("toolchain roots");
             let toolchain: Vec<Value> = (0..OVER_CEILING)
                 .map(|i| {
                     let root = tools.path().join(over_ceiling_name(i));
@@ -1677,6 +1662,7 @@ fn decline(invocation: Invocation) -> Declined {
                     serde_json::json!({"path": root})
                 })
                 .collect();
+            held.push(tools);
             let policy = fixture.policy_dir.path().join("over-ceiling.json");
             let document = serde_json::json!({
                 "version": 1,
@@ -1708,8 +1694,137 @@ fn decline(invocation: Invocation) -> Declined {
             command.env("XDG_STATE_HOME", &inside);
             command
         }
+        Invocation::Locate(location) => {
+            let named = |policy: &Path| {
+                let mut command =
+                    fixture.playpen(&["run", "--profile", "p", "--agent", "claude", "--policy"]);
+                command.arg(policy).arg("--").arg(canary());
+                command
+            };
+            match location {
+                Location::Absent => named(&fixture.policy_dir.path().join("absent.yaml")),
+                Location::Directory => named(fixture.policy_dir.path()),
+                Location::BothFormats => {
+                    let config = TempDir::new().expect("config home");
+                    let at = config.path().join("playpen");
+                    fs::create_dir(&at).expect("policy location");
+                    let document = fs::read(&fixture.policy).expect("the fixture's policy");
+                    for name in ["policy.yaml", "policy.json"] {
+                        fs::write(at.join(name), &document).expect("write policy");
+                    }
+                    let mut command =
+                        fixture.playpen(&["run", "--profile", "p", "--agent", "claude"]);
+                    command
+                        .arg("--")
+                        .arg(canary())
+                        .env("XDG_CONFIG_HOME", config.path());
+                    held.push(config);
+                    command
+                }
+            }
+        }
+        Invocation::Shim(document) => {
+            let (command, installed) = shim(&substituted(document, &fixture), &fixture);
+            held.extend(installed);
+            command
+        }
+        Invocation::UnfoundLink => {
+            let document = format!(
+                "version: 1\n\
+                 workspaces:\n  w: {{ roots: [{{ path: \"{ROOT}\", mode: read }}] }}\n\
+                 profiles:\n  p: {{ workspaces: [w], toolchain: [] }}\n\
+                 shims:\n  {SHIM}: {{ target: \"{CANARY}\", kind: claude, profile: p }}\n"
+            );
+            let (mut command, installed) = shim(&substituted(&document, &fixture), &fixture);
+            held.extend(installed);
+            // A `PATH` lookup leaves the bare name; this `PATH` holds no entry leading to it.
+            command.arg0(SHIM).env("PATH", fixture.policy_dir.path());
+            command
+        }
+        Invocation::CwdOutside => fixture.run_from(
+            fixture.policy_dir.path(),
+            &[canary().to_str().expect("utf-8 path")],
+        ),
+        Invocation::AbsentTarget => {
+            let absent = fixture.root().join("absent");
+            fixture.run(&[absent.to_str().expect("utf-8 path")])
+        }
+        Invocation::HeldArea => {
+            let policy = fixture.policy_dir.path().join("held.json");
+            let document = serde_json::json!({
+                "version": 1,
+                "workspaces": {"w": {
+                    "roots": [{"path": fixture.root(), "mode": "read"}],
+                    // `exclusive` is the default.
+                    "areas": {"landing": {"lifetime": "persistent"}},
+                }},
+                "profiles": {"p": {"workspaces": ["w"], "toolchain": []}},
+            });
+            fs::write(&policy, document.to_string()).expect("write policy");
+            holder = Some(hold(&fixture, &policy));
+            fixture.run_under(&policy, &[canary().to_str().expect("utf-8 path")])
+        }
+        Invocation::ScratchBlocked => {
+            let state = fixture.state_home().join("playpen");
+            fs::create_dir_all(&state).expect("state directory");
+            fs::write(state.join("scratch"), "").expect("a file where the scratch goes");
+            fixture.run(&[canary().to_str().expect("utf-8 path")])
+        }
+        Invocation::NoProcesses => {
+            let mut command = fixture.run(&[canary().to_str().expect("utf-8 path")]);
+            // SAFETY: setrlimit is async-signal-safe, and touches nothing of the parent's.
+            unsafe {
+                command.pre_exec(|| {
+                    let none = libc::rlimit {
+                        rlim_cur: 0,
+                        rlim_max: 0,
+                    };
+                    match libc::setrlimit(libc::RLIMIT_NPROC, &none) {
+                        0 => Ok(()),
+                        _ => Err(std::io::Error::last_os_error()),
+                    }
+                })
+            };
+            command
+        }
+        Invocation::Floor(state) => {
+            let floor = TempDir::new().expect("dedicated floor");
+            if state == DedicatedFloor::CanaryUnrunnable {
+                let bin = floor.path().join("bin");
+                fs::create_dir(&bin).expect("the floor's bin");
+                fs::write(
+                    floor.path().join("closure"),
+                    format!("{}\n", floor.path().display()),
+                )
+                .expect("the floor's closure");
+                // Not executable, so its `exec` fails however the floor is applied.
+                fs::write(bin.join("true"), "").expect("the floor's canary");
+            }
+            let mut command = fixture.run(&[canary().to_str().expect("utf-8 path")]);
+            command.env(playpen::floor::FLOOR_ENV, floor.path());
+            held.push(floor);
+            command
+        }
+        Invocation::NoTrustedRoots => {
+            let policy = fixture.policy_dir.path().join("policy.yaml");
+            fs::write(&policy, substituted(MINTED, &fixture)).expect("write policy");
+            let store = fixture.policy_dir.path().join("empty.pem");
+            fs::write(&store, "").expect("an empty trust store");
+            let mut command = fixture.run_under(&policy, &[canary().to_str().expect("utf-8 path")]);
+            // Replaced rather than extended, and the other variable that would extend it gone.
+            command
+                .env("SSL_CERT_FILE", &store)
+                .env_remove("SSL_CERT_DIR");
+            command
+        }
+        Invocation::UnknownRun => {
+            // Well formed, so it is the ring that does not hold it rather than the id that fails
+            // to parse.
+            fixture.playpen(&["explain", "--run", "01ARZ3NDEKTSV4RRFFQ69G5FAV"])
+        }
     };
     let output = command.stdin(Stdio::null()).output().expect("run playpen");
+    let released = holder.map(release);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let text = match stderr.lines().collect::<Vec<_>>().as_slice() {
         [line] => (*line).to_owned(),
@@ -1717,17 +1832,123 @@ fn decline(invocation: Invocation) -> Declined {
     };
     let line = refusal_line(&text);
     let recorded = line.as_ref().and_then(|(_, run)| {
-        let bytes = fs::read(runs.join(format!("{run}.json"))).ok()?;
+        let bytes = fs::read(runs.join(format!("{}.json", run.as_ref()?))).ok()?;
         // A record that does not parse as one is no record.
         let record: Record = serde_json::from_slice(&bytes).ok()?;
         Some(record.refusal.map(|refusal| refusal.code))
     });
+    let ring = fs::read_dir(&runs)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .count();
+    drop(held);
     Declined {
         status: output.status.code(),
         line,
         text,
         recorded,
-        detail: format!("{}, stderr {stderr:?}", output.status),
+        ring,
+        detail: match released {
+            Some(holder) => format!("{}, stderr {stderr:?}; {holder}", output.status),
+            None => format!("{}, stderr {stderr:?}", output.status),
+        },
+    }
+}
+
+/// `document` with [`ROOT`], [`SH`] and [`CANARY`] replaced by what they name for `fixture`.
+fn substituted(document: &str, fixture: &common::Fixture) -> String {
+    document
+        .replace(ROOT, fixture.root().to_str().expect("utf-8 path"))
+        .replace(SH, &common::os_bin("sh"))
+        .replace(CANARY, canary().to_str().expect("utf-8 path"))
+}
+
+/// The policy [`Invocation::NoTrustedRoots`] runs under: one profile route, whose minter answers.
+const MINTED: &str = "\
+version: 1
+minters:
+  m: { command: [\"{sh}\", -c, 'printf \"{\\\"token\\\":\\\"t\\\",\\\"expires_at\\\":\\\"2099-01-01T00:00:00Z\\\"}\"'] }
+workspaces:
+  w: { roots: [{ path: \"{root}\", mode: read }] }
+profiles:
+  p:
+    workspaces: [w]
+    toolchain: []
+    credentials:
+      - { host: api.example, path_prefix: /, minter: m, delivery: { env: PLAYPEN_SUITE_TOKEN } }
+";
+
+/// playpen installed as the shim [`SHIM`]: a link to the binary in a directory of its own, and a
+/// home whose search-path location holds `document`. The command invokes the link by its path
+/// from inside `fixture`'s root, under its state directory, with the chain left to the working
+/// directory. Returns it with the directories it needs kept.
+fn shim(document: &str, fixture: &common::Fixture) -> (Command, [TempDir; 2]) {
+    let links = TempDir::new().expect("link directory");
+    let link = links.path().join(SHIM);
+    std::os::unix::fs::symlink(common::PLAYPEN, &link).expect("shim link");
+    let home = TempDir::new().expect("home");
+    let location = home.path().join(".config/playpen");
+    fs::create_dir_all(&location).expect("policy location");
+    fs::write(location.join("policy.yaml"), document).expect("write policy");
+    let mut command = Command::new(&link);
+    command
+        .current_dir(fixture.root())
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove(playpen::select::ENV)
+        .env("XDG_STATE_HOME", fixture.state_home())
+        .env("HOME", home.path());
+    (command, [links, home])
+}
+
+/// How long the run [`hold`] starts may take to claim what it holds.
+const HOLD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A run of the canary's shell under `policy`, waiting on its stdin, once it holds its capability
+/// set: the claim is made before that, so whatever the policy makes exclusive is held. A run that
+/// never gets there is returned all the same, and the refusal it was meant to provoke is then
+/// whatever the second launch meets instead.
+fn hold(fixture: &common::Fixture, policy: &Path) -> std::process::Child {
+    let before = fixture.run_ids();
+    // `read` fails at end of file, which is how the hold is let go.
+    let child = fixture
+        .run_under(policy, &[&common::os_bin("sh"), "-c", "read _ || :"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the holding run");
+    let started = std::time::Instant::now();
+    while started.elapsed() < HOLD_DEADLINE {
+        let launched = fixture
+            .run_ids()
+            .into_iter()
+            .filter(|id| !before.contains(id))
+            .any(|id| {
+                fs::read(fixture.runs().join(format!("{id}.json")))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                    .is_some_and(|record| record["capabilities"].is_object())
+            });
+        if launched {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    child
+}
+
+/// Let the run [`hold`] started go, and say how it ended.
+fn release(mut holder: std::process::Child) -> String {
+    drop(holder.stdin.take());
+    match holder.wait_with_output() {
+        Ok(output) => format!(
+            "the holding run {}, stderr {:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ),
+        Err(e) => format!("the holding run could not be waited for: {e}"),
     }
 }
 
@@ -1848,10 +2069,10 @@ fn check_document() -> Checked {
     }
 }
 
-fn refusal_line(line: &str) -> Option<(String, String)> {
+fn refusal_line(line: &str) -> Option<(String, Option<String>)> {
     let (code, _) = line.strip_prefix("playpen: ")?.split_once(": ")?;
-    let (_, run) = line.rsplit_once(" — run ")?;
-    Some((code.to_owned(), run.to_owned()))
+    let run = line.rsplit_once(" — run ").map(|(_, run)| run.to_owned());
+    Some((code.to_owned(), run))
 }
 
 fn canary_outside() -> Seen {
