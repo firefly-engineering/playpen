@@ -1916,117 +1916,19 @@ mod tests {
         }
     }
 
-    /// `P-endpoint` without rule sets ([spec §17.2]): a request through the proxy reaches upstream
-    /// with the phantom stripped and the secret injected **in the same header**.
+    /// `request` sent through a live proxy serving `route` on `localhost` with `phantom`, to a TLS
+    /// destination on loopback: what the client was answered, and the head the destination
+    /// recorded, which is empty where no upstream leg occurred.
     ///
-    /// [spec §17.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#172-rows
-    #[test]
-    fn a_routed_request_reaches_upstream_with_the_secret_in_place_of_the_phantom() {
+    /// The agent's own client trusts the session CA, as `SSL_CERT_FILE` tells it to.
+    fn exchanged(route: Route, phantom: Phantom, request: &str) -> (String, String) {
         let (destination, destination_root, seen) = destination();
         let mut roots = rustls::RootCertStore::empty();
         roots.add(destination_root).expect("the destination's root");
         let session = ca().expect("a session CA");
         let ca_certificate = session.certificate.clone();
-        let phantom = Phantom::random().expect("a phantom");
-        let broker = Arc::new(
-            Broker::trusting(
-                session,
-                phantom.clone(),
-                vec![unrestricted("/v1/", "the-real-secret")],
-                roots,
-            )
-            .expect("a broker"),
-        );
-        let bound = bind().expect("bound");
-        let addr = bound.addr();
-        let mut serving = bound.serve(broker, 0);
-
-        // The agent's own client: trusts the session CA, as `SSL_CERT_FILE` tells it to.
-        let mut trusted = rustls::RootCertStore::empty();
-        trusted.add(ca_certificate).expect("the session CA");
-        let mut client_config = rustls::ClientConfig::builder_with_provider(Arc::new(provider()))
-            .with_safe_default_protocol_versions()
-            .expect("versions")
-            .with_root_certificates(trusted)
-            .with_no_client_auth();
-        client_config.alpn_protocols = vec![ALPN.to_vec()];
-        let mut socket = TcpStream::connect(addr).expect("the proxy");
-        socket
-            .write_all(
-                format!("CONNECT localhost:{} HTTP/1.1\r\n\r\n", destination.port()).as_bytes(),
-            )
-            .expect("the CONNECT");
-        let mut established = [0u8; 39];
-        socket.read_exact(&mut established).expect("established");
-        let session = rustls::ClientConnection::new(
-            Arc::new(client_config),
-            rustls::pki_types::ServerName::try_from("localhost").expect("a name"),
-        )
-        .expect("a client session");
-        let mut tls = rustls::StreamOwned::new(session, socket);
-        // The phantom, in the header this harness happens to use.
-        tls.write_all(
-            format!(
-                "GET /v1/messages HTTP/1.1\r\nHost: localhost\r\n\
-                 x-api-key: {}\r\nAccept: application/json\r\n\r\n",
-                phantom.as_str()
-            )
-            .as_bytes(),
-        )
-        .expect("the request");
-        tls.flush().expect("flushed");
-        let mut answer = Vec::new();
-        let _ = tls.read_to_end(&mut answer);
-        assert!(
-            String::from_utf8_lossy(&answer).starts_with("HTTP/1.1 200 OK"),
-            "{}",
-            String::from_utf8_lossy(&answer)
-        );
-
-        let head = String::from_utf8(seen.lock().expect("the recording").clone()).expect("utf-8");
-        // The secret arrived, in the header the phantom came in, and the phantom did not.
-        assert!(
-            head.contains("x-api-key: the-real-secret"),
-            "the secret was not injected in place: {head}"
-        );
-        assert!(
-            !head.contains(phantom.as_str()),
-            "the phantom reached upstream: {head}"
-        );
-        // Everything else the harness sent is still the harness's own.
-        assert!(head.contains("Accept: application/json"), "{head}");
-        assert!(head.starts_with("GET /v1/messages HTTP/1.1\r\n"), "{head}");
-        serving.stop();
-    }
-
-    /// `N-endpoint` and `N-endpoint-no-leg` ([spec §17.2]): a request the route's rule set does
-    /// not allow comes back `403` with `X-Playpen-Denied` and `broker.endpoint.denied`, and the
-    /// **instrumented upstream sees no request at all** — so the secret is never sent to a
-    /// destination a rule refused.
-    ///
-    /// [spec §17.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#172-rows
-    #[test]
-    fn a_denied_request_is_answered_and_no_upstream_leg_occurs() {
-        let (destination, destination_root, seen) = destination();
-        let mut roots = rustls::RootCertStore::empty();
-        roots.add(destination_root).expect("the destination's root");
-        let session = ca().expect("a session CA");
-        let ca_certificate = session.certificate.clone();
-        let phantom = Phantom::random().expect("a phantom");
-        let broker = Arc::new(
-            Broker::trusting(
-                session,
-                phantom.clone(),
-                vec![Route {
-                    host: "localhost".into(),
-                    path_prefix: "/".into(),
-                    secret: Secret::new("the-real-secret".into()),
-                    allowed: Allowed::Only(vec![rule("POST", "/v1/messages")]),
-                }],
-                roots,
-            )
-            .expect("a broker"),
-        );
+        let broker =
+            Arc::new(Broker::trusting(session, phantom, vec![route], roots).expect("a broker"));
         let bound = bind().expect("bound");
         let addr = bound.addr();
         let mut serving = bound.serve(broker, 0);
@@ -2053,28 +1955,140 @@ mod tests {
         )
         .expect("a client session");
         let mut tls = rustls::StreamOwned::new(client, socket);
-        // A `GET` where the one rule allows a `POST`.
-        tls.write_all(
-            format!(
-                "GET /v1/messages HTTP/1.1\r\nHost: localhost\r\nx-api-key: {}\r\n\r\n",
-                phantom.as_str()
-            )
-            .as_bytes(),
-        )
-        .expect("the request");
+        tls.write_all(request.as_bytes()).expect("the request");
         tls.flush().expect("flushed");
         let mut answer = Vec::new();
         let _ = tls.read_to_end(&mut answer);
-        let answer = String::from_utf8_lossy(&answer).into_owned();
+        serving.stop();
+        let head = seen.lock().expect("the recording").clone();
+        (
+            String::from_utf8_lossy(&answer).into_owned(),
+            String::from_utf8(head).expect("utf-8"),
+        )
+    }
+
+    /// `P-endpoint` without rule sets ([spec §17.2]): a request through the proxy reaches upstream
+    /// with the phantom stripped and the secret injected **in the same header**.
+    ///
+    /// [spec §17.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#172-rows
+    #[test]
+    fn a_routed_request_reaches_upstream_with_the_secret_in_place_of_the_phantom() {
+        let phantom = Phantom::random().expect("a phantom");
+        // The phantom, in the header this harness happens to use.
+        let (answer, head) = exchanged(
+            unrestricted("/v1/", "the-real-secret"),
+            phantom.clone(),
+            &format!(
+                "GET /v1/messages HTTP/1.1\r\nHost: localhost\r\n\
+                 x-api-key: {}\r\nAccept: application/json\r\n\r\n",
+                phantom.as_str()
+            ),
+        );
+        assert!(answer.starts_with("HTTP/1.1 200 OK"), "{answer}");
+        // The secret arrived, in the header the phantom came in, and the phantom did not.
+        assert!(
+            head.contains("x-api-key: the-real-secret"),
+            "the secret was not injected in place: {head}"
+        );
+        assert!(
+            !head.contains(phantom.as_str()),
+            "the phantom reached upstream: {head}"
+        );
+        // Everything else the harness sent is still the harness's own.
+        assert!(head.contains("Accept: application/json"), "{head}");
+        assert!(head.starts_with("GET /v1/messages HTTP/1.1\r\n"), "{head}");
+    }
+
+    /// `N-endpoint` and `N-endpoint-no-leg` ([spec §17.2]): a request the route's rule set does
+    /// not allow comes back `403` with `X-Playpen-Denied` and `broker.endpoint.denied`, and the
+    /// **instrumented upstream sees no request at all** — so the secret is never sent to a
+    /// destination a rule refused.
+    ///
+    /// [spec §17.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#172-rows
+    #[test]
+    fn a_denied_request_is_answered_and_no_upstream_leg_occurs() {
+        let phantom = Phantom::random().expect("a phantom");
+        // A `GET` where the one rule allows a `POST`.
+        let (answer, head) = exchanged(
+            Route {
+                host: "localhost".into(),
+                path_prefix: "/".into(),
+                secret: Secret::new("the-real-secret".into()),
+                allowed: Allowed::Only(vec![rule("POST", "/v1/messages")]),
+            },
+            phantom.clone(),
+            &format!(
+                "GET /v1/messages HTTP/1.1\r\nHost: localhost\r\nx-api-key: {}\r\n\r\n",
+                phantom.as_str()
+            ),
+        );
         assert!(answer.starts_with("HTTP/1.1 403 "), "{answer}");
         assert!(answer.contains("X-Playpen-Denied: localhost"), "{answer}");
         assert!(answer.contains("broker.endpoint.denied"), "{answer}");
-        serving.stop();
         // No upstream leg: the destination was never spoken to, so it recorded no head.
+        assert!(head.is_empty(), "a request reached upstream: {head:?}");
+    }
+
+    /// The shipped `github-git-read-only` set ([spec §7.6]), applied the way a launch applies it,
+    /// lets a clone through and stops a push. A fetch is `GET …/info/refs` then
+    /// `POST …/git-upload-pack`, both forwarded authenticated; a push's discovery is forwarded too,
+    /// because the query string that alone tells it from a fetch's is never matched, and the push
+    /// itself, `POST …/git-receive-pack`, is `403` with no upstream leg.
+    ///
+    /// [spec §7.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#76-endpoint-rule-sets
+    #[test]
+    fn the_shipped_git_read_only_set_lets_a_clone_through_and_stops_a_push() {
+        let text = format!(
+            r#"{{"version": 1,
+                "minters": {{"m": {{"command": ["/bin/true"]}}}},
+                "fragments": {{"endpoints": {{"github-git-read-only": {}}}}},
+                "workspaces": {{"w": {{"roots": [], "credentials": [{{
+                    "host": "localhost", "path_prefix": "/", "minter": "m",
+                    "delivery": {{"env": "GH_TOKEN"}}, "endpoints": ["github-git-read-only"]}}]}}}}}}"#,
+            include_str!("../endpoints/github-git-read-only.json")
+        );
+        let policy = crate::policy::Policy::parse(&text, Path::new("policy.json")).expect("parsed");
+        // Through the proxy, each request on a connection of its own, as git makes them.
+        let through = |request: &str| {
+            let phantom = Phantom::random().expect("a phantom");
+            exchanged(
+                Route {
+                    host: "localhost".into(),
+                    path_prefix: "/".into(),
+                    secret: Secret::new("the-real-secret".into()),
+                    allowed: crate::minter::allowed(
+                        &policy,
+                        &policy.workspaces["w"].credentials[0],
+                    ),
+                },
+                phantom.clone(),
+                &format!(
+                    "{request} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic {}\r\n\
+                     Content-Length: 0\r\n\r\n",
+                    phantom.as_str()
+                ),
+            )
+        };
+        for clone in [
+            "GET /org/repo.git/info/refs?service=git-upload-pack",
+            "POST /org/repo.git/git-upload-pack",
+            // The push's discovery, which only its query string tells from a fetch's.
+            "GET /org/repo.git/info/refs?service=git-receive-pack",
+        ] {
+            let (answer, upstream) = through(clone);
+            assert!(answer.starts_with("HTTP/1.1 200 OK"), "{clone}: {answer}");
+            assert!(
+                upstream.starts_with(clone)
+                    && upstream.contains("Authorization: Basic the-real-secret"),
+                "{clone} did not reach upstream authenticated: {upstream}"
+            );
+        }
+        let (answer, upstream) = through("POST /org/repo.git/git-receive-pack");
+        assert!(answer.starts_with("HTTP/1.1 403 "), "{answer}");
+        assert!(answer.contains("broker.endpoint.denied"), "{answer}");
         assert!(
-            seen.lock().expect("the recording").is_empty(),
-            "a request reached upstream: {:?}",
-            String::from_utf8_lossy(&seen.lock().expect("the recording").clone())
+            upstream.is_empty(),
+            "the push reached upstream: {upstream:?}"
         );
     }
 

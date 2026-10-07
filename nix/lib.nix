@@ -23,4 +23,14 @@ in
         lib.filter (path: path != "") (lib.splitString "\n" (builtins.readFile "${info}/store-paths"))
       )
     );
+
+  # The endpoint rule sets playpen ships ([spec §7.6]), by name: each the list of `{ method, path }`
+  # its file under `endpoints/` holds, so `fragments.endpoints.<name> = playpen.lib.endpoints.<name>;`
+  # declares it and a route's `endpoints = [ "<name>" ];` applies it. Nothing names one for you.
+  #
+  # [spec §7.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#76-endpoint-rule-sets
+  endpoints = lib.mapAttrs' (
+    file: _:
+    lib.nameValuePair (lib.removeSuffix ".json" file) (lib.importJSON (../endpoints + "/${file}"))
+  ) (builtins.readDir ../endpoints);
 }

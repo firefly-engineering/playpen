@@ -1,6 +1,8 @@
 # playpen for a host without Nix: the one channel off Nix is this formula, and this repository is
-# its tap (spec §16.2, ADR 0019). It installs the binary and nothing else: no toolchain fragment
-# ships, and shims are the operator's own `ln -s`, because the formula cannot see the policy.
+# its tap (spec §16.2, ADR 0019). It installs the binary and, as data for the operator to copy,
+# the shipped endpoint rule sets (spec §7.6) under `share/playpen/endpoints/`. Nothing else: no
+# toolchain fragment ships, and shims are the operator's own `ln -s`, because the formula cannot
+# see the policy.
 #
 # Head-only until the first release is tagged: a stable `url` needs a tag to point at.
 class Playpen < Formula
@@ -13,6 +15,7 @@ class Playpen < Formula
 
   def install
     system "cargo", "install", *std_cargo_args
+    pkgshare.install "endpoints"
   end
 
   test do

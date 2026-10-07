@@ -13,12 +13,15 @@ let
   playpen = self.packages.${system}.playpen;
 
   # Every shape the option tree has to carry: a tagged union, a one-of table, a tag-or-string
-  # value, a free-form table, and a closure spliced in by name.
+  # value, a free-form table, and a closure and a shipped endpoint rule set spliced in by name.
   policy = {
     version = 1;
     definitions.note = "free-form";
     minters.gh.command = [ "/etc/playpen/minters/gh" ];
-    fragments.env.rust = [ "RUSTUP_HOME" ];
+    fragments = {
+      env.rust = [ "RUSTUP_HOME" ];
+      endpoints.github-git-read-only = self.lib.endpoints.github-git-read-only;
+    };
     workspaces.w = {
       roots = [
         {
@@ -40,6 +43,7 @@ let
           path_prefix = "/firefly-engineering/";
           minter = "gh";
           delivery.env = "GH_TOKEN";
+          endpoints = [ "github-git-read-only" ];
         }
       ];
     };
@@ -112,6 +116,8 @@ in
     # Unset options are absent, never null.
     ! grep -q null ${document}
     [ "$(yq '.profiles.p.env.set.CARGO_HOME.area' ${document})" = w/cache ]
+    [ "$(yq -o=json -I=0 '.fragments.endpoints["github-git-read-only"]' ${document})" = \
+      "$(yq -p=json -o=json -I=0 . ${../endpoints/github-git-read-only.json})" ]
     [ "$(yq '.profiles.p.toolchain[].path' ${document})" = "$(cat ${
       pkgs.closureInfo { rootPaths = [ pkgs.hello ]; }
     }/store-paths)" ]

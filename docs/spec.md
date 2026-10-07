@@ -585,6 +585,17 @@ store ([ADR 0018](adr/0018-playpen-authenticates-outside-the-boundary.md), amend
   explicitly. A `GET`-only set cannot `clone`, because a git fetch is
   `GET …/info/refs` followed by `POST …/git-upload-pack`.
 
+The shipped sets live in [`endpoints/`](../endpoints/), one JSON file per set, each the value of
+one `fragments.endpoints` entry and named for it. **playpen merges none**: neither the binary nor
+the module carries them, and a route is restricted by one only where the policy declares it and
+names it. Each is held coherent against its intended route by `tests/endpoints.rs`.
+
+| Set | Intended route | Rules | Why |
+| --- | --- | --- | --- |
+| `github-git-read-only` | `github.com` | `GET /**/info/refs`, `POST /**/git-upload-pack` | A fetch's two requests and nothing else. A push dies at `POST …/git-receive-pack`; its discovery, `GET …/info/refs?service=git-receive-pack`, is allowed, because the query string is never matched ([ADR 0017](adr/0017-an-endpoint-rule-restricts-the-credential-and-never-the-agent.md)'s named residual). LFS, a `POST …/info/lfs/objects/batch`, is denied. |
+| `github-api-read-only` | `api.github.com` | `GET /repos/**` | Reads of repository resources. Every write is another method, and GraphQL, a `POST /graphql` that can read or write, is denied whole. |
+| `anthropic-inference-only` | `api.anthropic.com` | `POST /v1/messages`, `POST /v1/messages/count_tokens` | A message and its token count, which are what inference is. Everything else on the host is denied: `/api/oauth/**`, `create_api_key` among it, so the credential cannot mint another; the Batches, Files and Models APIs; and the Admin API. |
+
 ### 7.7 Consequences
 
 - A credential works **only over the proxy**, which retires `git+ssh` a second time.
@@ -1650,7 +1661,9 @@ playpen ships a flake ([ADR 0015](adr/0015-the-nix-module-is-a-projection-and-ho
 - The module's option tree **mirrors the policy schema one-to-one**, and its emitter is a pure
   projection. **No module-shipped defaults** exist in any tier.
 - Knowledge lives in `playpen.lib` helpers that return **values the operator splices in**.
-  `playpen.lib.closureRoots` takes a package list and returns root entries.
+  `playpen.lib.closureRoots` takes a package list and returns root entries;
+  `playpen.lib.endpoints.<name>` is the shipped endpoint rule set of that name
+  ([§7.6](#76-endpoint-rule-sets)).
 - The policy is emitted as `xdg.configFile."playpen/policy.yaml"`, so the policy and its closure
   are in the same generation, roll back together, and stay GC-rooted together. The module never
   reads `osConfig`.
@@ -1677,6 +1690,9 @@ For a host without Nix ([ADR 0019](adr/0019-a-homebrew-toolchain-is-a-keg-list-a
 - The toolchain is a **keg list** ([§8.3](#83-toolchain)).
 - **No Homebrew fragment ships.**
 - Shims are placed with the operator's `ln -s`.
+- The shipped endpoint rule sets ([§7.6](#76-endpoint-rule-sets)) are installed under
+  `share/playpen/endpoints/`, for the operator to copy into the policy. They are host-independent
+  data, not a fragment of this host's paths.
 - `playpen check` with existence checks stands in for the build-time gate.
 
 **Non-Nix Linux:** distro packages live under OS-owned paths the floor already grants.

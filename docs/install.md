@@ -51,6 +51,13 @@ The flake exposes `homeManagerModules.default` (the primary tier), and `nixosMod
 - `closureRoots` reads its closure while evaluating, so it needs import-from-derivation, which Nix
   allows unless `allow-import-from-derivation` is off.
 - An `!area` value is written `{ area = "<workspace>/<area>"; }`, its untagged form.
+- A shipped endpoint rule set ([spec §7.6](spec.md#76-endpoint-rule-sets)) is spliced in by name,
+  and applies only to a route that names it:
+
+  ```nix
+  policy.fragments.endpoints.github-git-read-only = playpen.lib.endpoints.github-git-read-only;
+  # and on the route: endpoints = [ "github-git-read-only" ];
+  ```
 - On NixOS the module also installs the dedicated floor ([spec §8.2](spec.md#82-the-floor)) in
   the system generation, where playpen finds it without `PLAYPEN_FLOOR`.
 
@@ -89,6 +96,25 @@ ln -s "$(brew --prefix)/bin/playpen" ~/.local/bin/claude
 
 Put the link in a directory the agent cannot write, and ahead of the real `claude` on your `PATH`.
 playpen refuses to launch through a link or directory a profile can write.
+
+### Shipped endpoint rule sets are data you copy
+
+The formula installs the shipped endpoint rule sets
+([spec §7.6](spec.md#76-endpoint-rule-sets)) under `$(brew --prefix)/share/playpen/endpoints/`,
+one JSON file per set. playpen applies none of them by itself: copy a file's list in as the value
+of `fragments.endpoints.<name>`, and name it on the route. JSON is YAML, so the list pastes as is:
+
+```yaml
+fragments:
+  endpoints:
+    github-git-read-only:
+      [
+        { "method": "GET", "path": "/**/info/refs" },
+        { "method": "POST", "path": "/**/git-upload-pack" },
+      ]
+```
+
+The copy is yours from then on: an upgrade changes the installed file, never your policy.
 
 ### Check the policy
 
