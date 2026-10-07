@@ -47,7 +47,7 @@
   ],
   "$defs": {
     "Minter": {
-      "description": "A command that produces one secret ([spec §7.2]). Argv, never a shell string.\n\n[spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters",
+      "description": "A command that produces one secret ([spec §7.2]). Argv, never a shell string.\n\n**Never declare a minter that refreshes a login it shares with the host.** Anthropic refresh\ntokens are single-use, so a minter that refreshes without writing back logs the host out within\none access-token lifetime ([spec §7.5]). playpen ships no refreshing minter: its reference\nminters, `playpen-minter-anthropic setup-token` and `playpen-minter-anthropic host-login`, only\nread.\n\n[spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters\n[spec §7.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#75-subscription-logins",
       "type": "object",
       "properties": {
         "command": {

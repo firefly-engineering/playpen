@@ -54,7 +54,14 @@ pub struct Policy {
 
 /// A command that produces one secret ([spec §7.2]). Argv, never a shell string.
 ///
+/// **Never declare a minter that refreshes a login it shares with the host.** Anthropic refresh
+/// tokens are single-use, so a minter that refreshes without writing back logs the host out within
+/// one access-token lifetime ([spec §7.5]). playpen ships no refreshing minter: its reference
+/// minters, `playpen-minter-anthropic setup-token` and `playpen-minter-anthropic host-login`, only
+/// read.
+///
 /// [spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters
+/// [spec §7.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#75-subscription-logins
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Minter {

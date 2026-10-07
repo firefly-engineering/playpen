@@ -17,7 +17,15 @@
 //! is not a second policy author. Launching without the credential would produce a run that works
 //! for ten minutes and then fails at the first push.
 //!
+//! **playpen ships no refreshing minter** ([spec §7.5]). Anthropic refresh tokens are single-use,
+//! so a minter that refreshes a login the host also holds, without writing the new refresh token
+//! back, logs the host out within one access-token lifetime. Writing back correctly means joining
+//! the host agent's private, unversioned refresh lock. The reference minters,
+//! `playpen-minter-anthropic` ([`src/bin/playpen-minter-anthropic.rs`]), read and never refresh.
+//!
 //! [spec §7.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#72-minters
+//! [spec §7.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#75-subscription-logins
+//! [`src/bin/playpen-minter-anthropic.rs`]: https://github.com/firefly-engineering/playpen/blob/main/src/bin/playpen-minter-anthropic.rs
 //! [ADR 0008]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0008-credentials-are-minted-outside-and-only-phantoms-cross-the-boundary.md
 //! [ADR 0018]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0018-playpen-authenticates-outside-the-boundary.md
 
@@ -355,7 +363,7 @@ fn wait_bounded(child: &mut Child, timeout: Duration) -> Option<std::process::Ex
 ///
 /// The fraction is dropped rather than rounded: a credential is never renewed on the strength of
 /// a millisecond. A timestamp before the epoch, which no expiry is, reads as `None`.
-fn instant(text: &str) -> Option<u64> {
+pub fn instant(text: &str) -> Option<u64> {
     let bytes = text.as_bytes();
     let digits = |at: usize, count: usize| {
         (bytes.len() >= at + count && bytes[at..at + count].iter().all(u8::is_ascii_digit))
