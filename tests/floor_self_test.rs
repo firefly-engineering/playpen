@@ -12,6 +12,15 @@ use playpen::capability::{Access, CapabilitySet, PathGrant, Scope};
 use playpen::code::Code;
 use playpen::self_test::{self, canary_path};
 
+/// The dedicated floor this host supplies, as `main` resolves it for a real launch: the library
+/// reads no environment of its own ([#134]), so the caller that needs the host's own floor hands
+/// it in. This binary is single-threaded by design and only ever reads the variable.
+///
+/// [#134]: https://github.com/firefly-engineering/playpen/issues/134
+fn dedicated() -> Option<std::path::PathBuf> {
+    playpen::floor::dedicated(std::env::var_os(playpen::floor::FLOOR_ENV))
+}
+
 fn main() {
     let tests: &[(&str, fn())] = &[
         (
@@ -39,7 +48,7 @@ fn main() {
 }
 
 fn the_canary_exits_zero_outside() {
-    let canary = canary_path();
+    let canary = canary_path(dedicated().as_deref());
     let status = Command::new(&canary).status().expect("run the canary");
     assert!(
         status.success(),
@@ -49,7 +58,7 @@ fn the_canary_exits_zero_outside() {
 }
 
 fn the_bare_floor_passes_the_self_test() {
-    if let Err(refusal) = self_test::floor() {
+    if let Err(refusal) = self_test::floor(dedicated().as_deref()) {
         panic!("the floor self-test failed: {refusal}");
     }
 }
@@ -72,10 +81,11 @@ fn unappliable() -> CapabilitySet {
 }
 
 fn a_canary_that_cannot_be_confined_fails_the_self_test() {
-    let refusal = self_test::canary(&unappliable()).expect_err("the child cannot confine itself");
+    let refusal = self_test::canary(&unappliable(), dedicated().as_deref())
+        .expect_err("the child cannot confine itself");
     assert_eq!(refusal.code, Code::FloorSelfTest, "{refusal}");
     let line = refusal.to_string();
-    let canary = canary_path();
+    let canary = canary_path(dedicated().as_deref());
     assert!(
         line.contains(&*canary.to_string_lossy()),
         "the canary is named: {line}"
@@ -88,7 +98,7 @@ fn a_canary_that_cannot_be_confined_fails_the_self_test() {
 
 /// A pass, a failure, then a pass: no verdict is carried from one call to the next.
 fn every_call_runs_the_canary_afresh() {
-    assert!(self_test::floor().is_ok());
-    assert!(self_test::canary(&unappliable()).is_err());
-    assert!(self_test::floor().is_ok());
+    assert!(self_test::floor(dedicated().as_deref()).is_ok());
+    assert!(self_test::canary(&unappliable(), dedicated().as_deref()).is_err());
+    assert!(self_test::floor(dedicated().as_deref()).is_ok());
 }

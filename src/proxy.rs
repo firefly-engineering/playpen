@@ -2520,9 +2520,10 @@ mod tests {
 
     /// A sleeping child of this process, to be torn down.
     fn sleeper() -> std::process::Child {
-        let sleep = crate::floor::binary("sleep").unwrap_or_else(|searched| {
-            panic!("the floor holds no `sleep`; looked at {searched:?}")
-        });
+        let sleep = crate::floor::binary(crate::floor::from_env().as_deref(), "sleep")
+            .unwrap_or_else(|searched| {
+                panic!("the floor holds no `sleep`; looked at {searched:?}")
+            });
         std::process::Command::new(sleep)
             .arg("30")
             .spawn()

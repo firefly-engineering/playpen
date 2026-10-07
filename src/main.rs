@@ -11,6 +11,7 @@ fn main() {
         // where there is one, and it is the binary behind it that must be shown unwritable.
         executable: std::env::current_exe().and_then(std::fs::canonicalize),
         env: std::env::vars_os().collect(),
+        floor: playpen::floor::dedicated(var(playpen::floor::FLOOR_ENV)),
     };
     let status = playpen::launch::main(
         std::env::args_os(),

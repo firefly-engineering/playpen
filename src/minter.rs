@@ -925,7 +925,7 @@ mod tests {
 
     /// A minter that is `script`, run by the floor's shell.
     fn minter(script: &str, timeout: Option<u64>) -> Minter {
-        let sh = crate::floor::binary("sh")
+        let sh = crate::floor::binary(crate::floor::from_env().as_deref(), "sh")
             .unwrap_or_else(|searched| panic!("the floor holds no `sh`; looked at {searched:?}"));
         serde_json::from_value(serde_json::json!({
             "command": [sh, "-c", script],
@@ -1177,7 +1177,7 @@ mod tests {
     /// A minter with `revoke` as a script run by the floor's shell, and no `command` worth
     /// running: these tests revoke, and nothing mints.
     fn revoker(script: &str, timeout: Option<u64>) -> Minter {
-        let sh = crate::floor::binary("sh")
+        let sh = crate::floor::binary(crate::floor::from_env().as_deref(), "sh")
             .unwrap_or_else(|searched| panic!("the floor holds no `sh`; looked at {searched:?}"));
         serde_json::from_value(serde_json::json!({
             "command": ["/unused"],

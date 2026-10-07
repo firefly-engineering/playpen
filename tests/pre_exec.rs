@@ -66,7 +66,7 @@ const GRACE: Duration = Duration::from_millis(300);
 /// `counted` and exits with how many arrived. A child the signal never reaches is ended by
 /// `SIGALRM` instead, so a failure reports rather than hangs. Returns playpen's exit status.
 fn supervise_held_child(ready: libc::c_int, counted: libc::c_int) -> i32 {
-    let caps = playpen::floor::floor().expect("the floor");
+    let caps = playpen::floor::floor(common::dedicated_floor().as_deref()).expect("the floor");
     let run = RunId::allocate().expect("a run id");
     let argv = [OsString::from(os_bin("true"))];
     let hold = || {

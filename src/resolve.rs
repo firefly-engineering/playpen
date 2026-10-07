@@ -145,6 +145,7 @@ pub fn capabilities(
     policy: &Policy,
     name: &str,
     layout: &Layout,
+    dedicated: Option<&Path>,
 ) -> Result<CapabilitySet, Refusal> {
     let Some(selected) = policy.profiles.get(name) else {
         return Err(Refusal::new(
@@ -152,7 +153,7 @@ pub fn capabilities(
             format!("profile {name:?} is not in the policy"),
         ));
     };
-    let mut caps = floor()?;
+    let mut caps = floor(dedicated)?;
     caps.paths.extend(toolchain(name, selected)?);
     caps.paths.extend(roots(policy, selected)?);
     caps.paths.extend(layout.grants());
@@ -739,6 +740,7 @@ mod tests {
                 &policy.profiles["p"],
                 None,
             ),
+            None,
         )
         .expect("resolves");
         assert!(caps.paths.iter().any(|g| g.from == "floor"));
@@ -785,6 +787,7 @@ mod tests {
                 &policy.profiles["p"],
                 None,
             ),
+            None,
         )
         .expect("resolves");
         let resolved = root.path().canonicalize().expect("canonical");
@@ -822,6 +825,7 @@ mod tests {
                 &policy.profiles["p"],
                 None,
             ),
+            None,
         )
         .expect_err("refused");
         assert_eq!(refusal.code, Code::ExclusionMissing);
@@ -854,6 +858,7 @@ mod tests {
                 &policy.profiles["p"],
                 None,
             ),
+            None,
         )
         .expect("resolves");
         assert_eq!(caps.exclusions.len(), 1, "{:?}", caps.exclusions);

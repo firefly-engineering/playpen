@@ -23,10 +23,21 @@ pub const PROBE: &str = env!("CARGO_BIN_EXE_playpen-probe");
 /// floor alone and needs no root of its own. A name the floor does not hold is a broken fixture,
 /// and panics naming where it looked rather than surfacing later as `refusal.target.exec`.
 pub fn os_bin(name: &str) -> String {
-    let path = playpen::floor::binary(name).unwrap_or_else(|searched| {
-        panic!("test setup: the floor holds no `{name}`; looked at {searched:?}")
-    });
+    let path =
+        playpen::floor::binary(dedicated_floor().as_deref(), name).unwrap_or_else(|searched| {
+            panic!("test setup: the floor holds no `{name}`; looked at {searched:?}")
+        });
     path.to_str().expect("utf-8 path").to_owned()
+}
+
+/// The dedicated floor this host supplies, as `main` resolves it for a real launch. The library
+/// reads no environment of its own ([#134]), so a test that needs the host's own floor — rather
+/// than one it is deliberately varying — asks for it here. Reading is all that happens: nothing
+/// sets the variable, so this stays safe under the parallel harness.
+///
+/// [#134]: https://github.com/firefly-engineering/playpen/issues/134
+pub fn dedicated_floor() -> Option<PathBuf> {
+    playpen::floor::dedicated(std::env::var_os(playpen::floor::FLOOR_ENV))
 }
 
 /// The denial errnos of this platform ([spec §15.2]); `ENOENT` is never one.

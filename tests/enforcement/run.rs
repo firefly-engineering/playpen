@@ -1467,6 +1467,7 @@ pub fn as_playpen_tracing(
         profile: None,
         executable: std::env::current_exe(),
         env: Vec::new(),
+        floor: crate::common::dedicated_floor(),
     };
     playpen::launch::main(
         argv,
@@ -1539,6 +1540,7 @@ pub fn as_playpen_offering_nothing(
         profile: None,
         executable: std::env::current_exe(),
         env: Vec::new(),
+        floor: crate::common::dedicated_floor(),
     };
     playpen::launch::main(
         argv,
@@ -1568,7 +1570,10 @@ fn decline(invocation: Invocation) -> Declined {
                 .arg(fixture.state_home())
                 .args(["run", "--profile", "p", "--agent", "claude", "--policy"])
                 .arg(&fixture.policy)
-                .args([OsStr::new("--"), canary_path().as_os_str()])
+                .args([
+                    OsStr::new("--"),
+                    canary_path(crate::common::dedicated_floor().as_deref()).as_os_str(),
+                ])
                 .current_dir(fixture.root());
             command
         }
@@ -1578,7 +1583,10 @@ fn decline(invocation: Invocation) -> Declined {
             fs::write(&policy, MERGED_TYPO.replace("{root}", root)).expect("write policy");
             let mut command =
                 fixture.playpen(&["run", "--profile", "p", "--agent", "claude", "--policy"]);
-            command.arg(&policy).arg("--").arg(canary_path());
+            command
+                .arg(&policy)
+                .arg("--")
+                .arg(canary_path(crate::common::dedicated_floor().as_deref()));
             command
         }
         Invocation::IncoherentWorkspace => {
@@ -1591,7 +1599,10 @@ fn decline(invocation: Invocation) -> Declined {
             fs::write(&policy, document.to_string()).expect("write policy");
             let mut command =
                 fixture.playpen(&["run", "--profile", "p", "--agent", "claude", "--policy"]);
-            command.arg(&policy).arg("--").arg(canary_path());
+            command
+                .arg(&policy)
+                .arg("--")
+                .arg(canary_path(crate::common::dedicated_floor().as_deref()));
             command
         }
         Invocation::WritablePolicy => {
@@ -1604,7 +1615,10 @@ fn decline(invocation: Invocation) -> Declined {
             fs::write(&policy, document.to_string()).expect("write policy");
             let mut command =
                 fixture.playpen(&["run", "--profile", "p", "--agent", "claude", "--policy"]);
-            command.arg(&policy).arg("--").arg(canary_path());
+            command
+                .arg(&policy)
+                .arg("--")
+                .arg(canary_path(crate::common::dedicated_floor().as_deref()));
             command
         }
         Invocation::OverCeiling => {
@@ -1625,7 +1639,10 @@ fn decline(invocation: Invocation) -> Declined {
             fs::write(&policy, document.to_string()).expect("write policy");
             let mut command =
                 fixture.playpen(&["run", "--profile", "p", "--agent", "claude", "--policy"]);
-            command.arg(&policy).arg("--").arg(canary_path());
+            command
+                .arg(&policy)
+                .arg("--")
+                .arg(canary_path(crate::common::dedicated_floor().as_deref()));
             command
         }
         // The real ladder, reading facts no host would present ([spec §14.5]).
@@ -1643,7 +1660,10 @@ fn decline(invocation: Invocation) -> Declined {
         Invocation::StateReachable => {
             let inside = fixture.root().join("state");
             runs = inside.join("playpen/runs");
-            let mut command = fixture.run(&[canary_path().to_str().expect("utf-8 path")]);
+            let mut command =
+                fixture.run(&[canary_path(crate::common::dedicated_floor().as_deref())
+                    .to_str()
+                    .expect("utf-8 path")]);
             command.env("XDG_STATE_HOME", &inside);
             command
         }
@@ -1691,7 +1711,10 @@ fn as_playpen_tracing_command(fixture: &common::Fixture, rung: &str, trace: &Pat
         .arg(trace)
         .arg("--policy")
         .arg(&fixture.policy)
-        .args([OsStr::new("--"), canary_path().as_os_str()])
+        .args([
+            OsStr::new("--"),
+            canary_path(crate::common::dedicated_floor().as_deref()).as_os_str(),
+        ])
         .current_dir(fixture.root());
     command
 }
@@ -1794,7 +1817,7 @@ fn refusal_line(line: &str) -> Option<(String, String)> {
 }
 
 fn canary_outside() -> Seen {
-    let canary = canary_path();
+    let canary = canary_path(crate::common::dedicated_floor().as_deref());
     let named = canary.display();
     let status = Command::new(&canary)
         .stdin(Stdio::null())
@@ -1816,7 +1839,7 @@ fn canary_outside() -> Seen {
 
 /// The floor self-test, called as the launch calls it: one implementation, two callers.
 fn canary_inside() -> Seen {
-    match self_test::floor() {
+    match self_test::floor(crate::common::dedicated_floor().as_deref()) {
         Ok(()) => Seen::Succeeded,
         Err(refusal) => Seen::Failed {
             cause: None,
@@ -1833,7 +1856,7 @@ fn canary_inside() -> Seen {
 ///
 /// [ADR 0029]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0029-the-backend-grants-only-what-the-policy-asked-for.md
 fn canary_ungranted() -> Seen {
-    let canary = canary_path();
+    let canary = canary_path(crate::common::dedicated_floor().as_deref());
     let named = canary.display().to_string();
     let path = CString::new(canary.into_os_string().into_vec()).expect("no NUL in a path");
     // Close-on-exec, so an `exec` that succeeds closes the child's end with nothing on it.

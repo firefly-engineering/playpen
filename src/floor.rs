@@ -19,6 +19,7 @@
 //! [spec §8.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#83-toolchain
 //! [ADR 0014]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0014-the-toolchain-is-a-declared-closure.md
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::capability::{Access, CapabilitySet, PathGrant, Scope};
@@ -100,10 +101,20 @@ pub const FLOOR_ENV: &str = "PLAYPEN_FLOOR";
 #[cfg(target_os = "linux")]
 const SYSTEM_FLOOR: &str = "/run/current-system/sw/share/playpen/floor";
 
-/// The dedicated floor in effect: [`FLOOR_ENV`] if set, else the one the Nix module installed in
-/// the system closure, else none. An FHS host needs none and gets none.
-pub fn dedicated() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os(FLOOR_ENV) {
+/// The dedicated floor in effect: `named` — what the host put in [`FLOOR_ENV`] — if it names one,
+/// else the one the Nix module installed in the system closure, else none. An FHS host needs none
+/// and gets none.
+///
+/// The variable is read by `main` and handed in, never read here: everything playpen takes from
+/// its environment arrives through [`Host`], so a test varies the floor by passing one rather than
+/// by mutating process-global state
+/// ([#134](https://github.com/firefly-engineering/playpen/issues/134)). The *other* half of the
+/// answer is a fact about this host as it is now — whether the system closure carries a floor —
+/// which is why this is a function and not a field.
+///
+/// [`Host`]: crate::launch::Host
+pub fn dedicated(named: Option<OsString>) -> Option<PathBuf> {
+    if let Some(dir) = named {
         return Some(PathBuf::from(dir));
     }
     #[cfg(target_os = "linux")]
@@ -116,18 +127,32 @@ pub fn dedicated() -> Option<PathBuf> {
     None
 }
 
+/// The dedicated floor this host supplies, read from the environment the way `main` reads it.
+///
+/// Compiled into the test build only. Nothing in the shipped library reads [`FLOOR_ENV`] — that is
+/// the whole of [#134] — but a unit test that needs a real OS binary needs this host's real floor
+/// to find one, and it has no [`Host`] to be handed one through. Reading is all it does: no test
+/// sets the variable, so the harness stays parallel-safe.
+///
+/// [#134]: https://github.com/firefly-engineering/playpen/issues/134
+/// [`Host`]: crate::launch::Host
+#[cfg(test)]
+pub(crate) fn from_env() -> Option<PathBuf> {
+    dedicated(std::env::var_os(FLOOR_ENV))
+}
+
 /// Where an FHS host keeps its OS binaries, searched in order. `/bin` comes first because it holds
 /// them with and without a merged `/usr`; `/usr/bin` covers what `/bin` lacks, such as `true` on
 /// macOS. Both are floor paths on every platform, so whatever is found here runs under the floor.
 const FHS_BIN_DIRS: &[&str] = &["/bin", "/usr/bin"];
 
-/// The OS binary `name` as this host's floor holds it: inside the dedicated floor where there is
-/// one, else the first of the FHS binary directories that has it. Resolved per call, like
-/// [`dedicated`], since the answer is a property of the host as it is now.
+/// The OS binary `name` as this host's floor holds it: inside `dedicated` where the host has one,
+/// else the first of the FHS binary directories that has it. Resolved per call, since the answer
+/// is a property of the host as it is now.
 ///
 /// When no directory holds it, the error lists every path looked at, in search order.
-pub fn binary(name: &str) -> Result<PathBuf, Vec<PathBuf>> {
-    let candidates: Vec<PathBuf> = match dedicated() {
+pub fn binary(dedicated: Option<&Path>, name: &str) -> Result<PathBuf, Vec<PathBuf>> {
+    let candidates: Vec<PathBuf> = match dedicated {
         Some(dir) => vec![dir.join("bin").join(name)],
         None => FHS_BIN_DIRS
             .iter()
@@ -215,8 +240,9 @@ const MACH_SERVICES: &[&str] = &[];
 /// what exists, and grants nothing in place of what does not.
 ///
 /// A dedicated floor contributes its declared closure on top of whatever OS-owned paths exist,
-/// because `/proc` and `/dev` are still the kernel's and still required.
-pub fn floor() -> Result<CapabilitySet, Refusal> {
+/// because `/proc` and `/dev` are still the kernel's and still required. Which floor that is comes
+/// in as `dedicated` ([`dedicated`]), never from the environment.
+pub fn floor(dedicated: Option<&Path>) -> Result<CapabilitySet, Refusal> {
     let read = PATHS
         .iter()
         .map(|&(path, scope)| (path, Access::Read, scope));
@@ -236,12 +262,57 @@ pub fn floor() -> Result<CapabilitySet, Refusal> {
             state_derived: false,
         })
         .collect();
-    if let Some(dir) = dedicated() {
-        paths.extend(dedicated_grants(&dir)?);
+    if let Some(dir) = dedicated {
+        paths.extend(dedicated_grants(dir)?);
     }
     Ok(CapabilitySet {
         paths,
         exclusions: Vec::new(),
         mach_services: MACH_SERVICES.iter().map(|s| s.to_string()).collect(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A floor handed in reaches the grants, and one not handed in is not looked for anywhere: the
+    /// only way to vary it is the parameter ([#134]). Two floors in one process, which is what a
+    /// variable read where it is needed could not give.
+    ///
+    /// [#134]: https://github.com/firefly-engineering/playpen/issues/134
+    #[test]
+    fn the_floor_grants_the_closure_of_the_directory_it_is_handed() {
+        let dir = tempfile::TempDir::new().expect("a floor directory");
+        let store = dir.path().join("store-entry");
+        std::fs::create_dir(&store).expect("a store entry");
+        std::fs::write(dir.path().join("closure"), format!("{}\n", store.display()))
+            .expect("a closure");
+
+        let dedicated = floor(Some(dir.path())).expect("the dedicated floor");
+        assert!(
+            dedicated.paths.iter().any(|g| g.path == store),
+            "the declared closure is granted: {:?}",
+            dedicated.paths
+        );
+
+        let fhs = floor(None).expect("the FHS floor");
+        assert!(
+            !fhs.paths.iter().any(|g| g.path == store),
+            "no floor is read from anywhere but the parameter: {:?}",
+            fhs.paths
+        );
+    }
+
+    /// The host's own variable wins over the system closure; with neither, an FHS host gets none.
+    /// Pure of the process environment, so it holds whatever this host's own is set to.
+    #[test]
+    fn a_named_floor_is_the_one_in_effect() {
+        assert_eq!(
+            dedicated(Some("/floor/named".into())),
+            Some(PathBuf::from("/floor/named"))
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(dedicated(None), None, "macOS has no system floor to find");
+    }
 }

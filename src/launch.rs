@@ -91,6 +91,12 @@ pub struct Host {
     ///
     /// [spec §9]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#9-the-environment
     pub env: Vec<(OsString, OsString)>,
+    /// The dedicated floor this host supplies, `None` on an FHS host
+    /// ([`floor::dedicated`](crate::floor::dedicated)). A host fact like the rest of this struct,
+    /// so the floor reaches the launch as an input rather than being read back out of the
+    /// environment where it is needed
+    /// ([#134](https://github.com/firefly-engineering/playpen/issues/134)).
+    pub floor: Option<PathBuf>,
 }
 
 /// Run playpen with `args` (including `argv[0]`) on `host`. Returns the process exit status; on a
@@ -185,6 +191,7 @@ fn invoke(
         profile: _,
         executable,
         env,
+        floor,
     } = host;
     let RunArgs {
         profile,
@@ -218,6 +225,7 @@ fn invoke(
         state.as_deref(),
         executable,
         &env,
+        floor.as_deref(),
         record,
         probe,
         self_test::floor,
@@ -291,6 +299,7 @@ fn shim_invoke(
         profile,
         executable,
         env,
+        floor,
     } = host;
     // A shim takes no option of playpen's: every argument it was given belongs to the target.
     let policy = policies.locate(None)?;
@@ -344,6 +353,7 @@ fn shim_invoke(
         state.as_deref(),
         executable,
         &env,
+        floor.as_deref(),
         record,
         probe,
         self_test::floor,
@@ -543,9 +553,10 @@ fn run(
     state: Option<&Path>,
     executable: std::io::Result<PathBuf>,
     env: &[(OsString, OsString)],
+    dedicated: Option<&Path>,
     record: &mut RunRecord,
     probe: impl FnOnce() -> Mechanism,
-    floor_self_test: impl FnOnce() -> Result<(), Refusal>,
+    floor_self_test: impl FnOnce(Option<&Path>) -> Result<(), Refusal>,
     open_trace: impl FnOnce(&Path, &Path, &RunId) -> Result<trace::Tracing, Refusal>,
 ) -> Result<i32, Refusal> {
     let Context {
@@ -596,7 +607,7 @@ fn run(
             Layout::new(&state, record.id(), &loaded.policy, profile, selected, kind)
                 .with_home(environment::home(env).as_deref())
         })?;
-    let caps = resolve::capabilities(&loaded.policy, profile, &layout)?;
+    let caps = resolve::capabilities(&loaded.policy, profile, &layout, dedicated)?;
     // Nothing that runs unconfined on the next launch is writable from inside this one: the policy,
     // the executable, and the link this playpen was invoked through.
     integrity::check(
@@ -615,7 +626,7 @@ fn run(
     // Step 7, on every launch, never from a cached verdict: the mechanism first, so a missing
     // capability is named as such rather than surfacing as a canary that could not be confined.
     probe().require(mechanism::REQUIRED)?;
-    floor_self_test()?;
+    floor_self_test(dedicated)?;
     // Which regime denied a unix-socket credential oracle, stated outward only ([spec §6.3]).
     // Not a capability a profile can require: below Landlock ABI 9 the surface is unenforceable,
     // so it is a named residual rather than a refusal of the host.
@@ -914,7 +925,7 @@ mod tests {
     /// any other code comes from a check run ahead of it, and no test forks.
     fn refuse_without_target(
         probe: impl FnOnce() -> Mechanism,
-        floor_self_test: impl FnOnce() -> Result<(), Refusal>,
+        floor_self_test: impl FnOnce(Option<&Path>) -> Result<(), Refusal>,
     ) -> (Refusal, bool) {
         refuse_with_toolchain(serde_json::json!([]), probe, floor_self_test)
     }
@@ -923,7 +934,7 @@ mod tests {
     fn refuse_with_toolchain(
         toolchain: serde_json::Value,
         probe: impl FnOnce() -> Mechanism,
-        floor_self_test: impl FnOnce() -> Result<(), Refusal>,
+        floor_self_test: impl FnOnce(Option<&Path>) -> Result<(), Refusal>,
     ) -> (Refusal, bool) {
         let root = tempfile::TempDir::new().expect("root");
         let policy = root.path().join("policy.json");
@@ -958,6 +969,9 @@ mod tests {
             Some(state.path()),
             Ok(executable),
             &[],
+            // An FHS floor: these tests never reach the real self-test, which is the one thing a
+            // dedicated floor would change.
+            None,
             &mut record,
             probe,
             floor_self_test,
@@ -978,7 +992,7 @@ mod tests {
                 probed += 1;
                 offering_everything()
             },
-            || {
+            |_| {
                 self_tested += 1;
                 Ok(())
             },
@@ -995,7 +1009,7 @@ mod tests {
     #[test]
     fn a_failing_floor_self_test_refuses_before_the_real_child_is_forked() {
         let mut ran = 0;
-        let (refusal, completed) = refuse_without_target(offering_everything, || {
+        let (refusal, completed) = refuse_without_target(offering_everything, |_| {
             ran += 1;
             Err(Refusal::new(Code::FloorSelfTest, "the canary died"))
         });
@@ -1013,7 +1027,7 @@ mod tests {
                 probed += 1;
                 Mechanism::new("a mechanism offering nothing", &[])
             },
-            || {
+            |_| {
                 self_tested += 1;
                 Ok(())
             },

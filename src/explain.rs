@@ -143,7 +143,7 @@ fn resolve(args: &Args, host: &Host) -> Result<Resolved, Refusal> {
     let state = state.canonicalize().unwrap_or_else(|_| state.to_owned());
     let layout = Layout::unlaunched(&state, &loaded.policy, &name, selected, kind)
         .with_home(crate::environment::home(&host.env).as_deref());
-    let caps = resolve::capabilities(&loaded.policy, &name, &layout)?;
+    let caps = resolve::capabilities(&loaded.policy, &name, &layout, host.floor.as_deref())?;
     let executable = crate::integrity::executable(&host.executable)?;
     // The shim link, where `--shim` names one and this host has it installed. `explain` was not
     // invoked through it, so an absent link is not a refusal here, where in a shim launch it is:
