@@ -16,7 +16,13 @@
   };
 
   outputs =
-    { nixpkgs, toolbox, ... }:
+    {
+      self,
+      nixpkgs,
+      nix-pins,
+      toolbox,
+      ...
+    }:
     let
       # The systems toolbox builds for; it does not ship x86_64-darwin.
       systems = [
@@ -59,8 +65,30 @@
             }
           }/store-paths "$out/closure"
         '';
+
+      module =
+        tier:
+        import ./nix/module.nix {
+          inherit tier;
+          inherit (self) packages;
+        };
     in
     {
+      # The policy generators, one per tier ([spec §16.1]). home-manager is the primary tier.
+      homeManagerModules.default = module "home";
+      nixosModules.default = module "nixos";
+      darwinModules.default = module "nix-darwin";
+
+      lib = import ./nix/lib.nix { inherit nixpkgs; };
+
+      checks = forAllSystems (
+        system:
+        import ./nix/checks.nix {
+          inherit self nixpkgs system;
+          inherit (nix-pins.inputs) home-manager darwin;
+        }
+      );
+
       # Exposed so an operator on a non-FHS host can build a floor and point `PLAYPEN_FLOOR` at
       # it, and so the dev shell below can set that variable for the suite.
       packages = forAllSystems (
@@ -68,7 +96,11 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
         in
-        nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+        rec {
+          playpen = pkgs.callPackage ./nix/package.nix { };
+          default = playpen;
+        }
+        // nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           floor = floorFor pkgs;
         }
       );

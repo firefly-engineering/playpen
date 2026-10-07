@@ -59,3 +59,19 @@ jobs:
             nix eval --raw ".#devShells.$system.default.drvPath"
             echo
           done
+
+  # The Nix module's checks (nix/checks.nix): each tier emits a policy playpen accepts, and a
+  # policy playpen would refuse fails the build. macOS too, because the ceiling check is macOS's.
+  module:
+    # Building playpen from a cold store is the bulk of it, a few minutes per OS.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Check the flake
+        run: nix flake check --quiet
