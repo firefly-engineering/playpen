@@ -1775,11 +1775,12 @@ linuxbrew and `~/.local` follow the keg-list or coarse-root shapes.
   transparency suite, since this suite's verbs are about the boundary
   ([§15.4](#154-named-asymmetries)).
 - **Gates.** CI may be green with skips. A **release requires the full set green on a reference
-  host of each platform.** Runner labels are **pinned**, never `-latest`: use `ubuntu-24.04`,
-  and a pinned `macos-*`. **Every job states a `timeout-minutes`.** The platform default is 360
-  minutes and a macOS minute bills at ten times a Linux one, so one wedged job silently spends a
-  month's quota. The bound is set from the observed green runtime with slack, never left to the
-  default, and a step that can block on a socket carries its own tighter bound inside the job's.
+  host of each platform**, with none skipped ([docs/release.md](release.md)). Runner labels are
+  **pinned**, never `-latest`: use `ubuntu-24.04`, and a pinned `macos-*`. **Every job states a
+  `timeout-minutes`.** The platform default is 360 minutes and a macOS minute bills at ten times
+  a Linux one, so one wedged job silently spends a month's quota. The bound is set from the
+  observed green runtime with slack, never left to the default, and a step that can block on a
+  socket carries its own tighter bound inside the job's.
 
 ### 17.2 Rows
 

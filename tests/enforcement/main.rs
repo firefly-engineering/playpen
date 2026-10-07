@@ -22,8 +22,8 @@ use std::path::{Path, PathBuf};
 use playpen::code::Code;
 use row::{
     Action, Asymmetry, BOTH, Cause, Checked, Class, Declined, Exchange, Exchanged, Expected,
-    Fixture, Os, Outcome, Platform, Precondition, Row, Scope, Seen, Substitution, Target, Verdict,
-    judge, judge_refusal, judge_request, judge_unexamined,
+    Fixture, Invocation, Os, Outcome, Platform, Precondition, Row, Scope, Seen, Substitution,
+    Target, Verdict, judge, judge_coverage, judge_refusal, judge_request, judge_unexamined,
 };
 use rows::ROWS;
 use run::{DECOY, DECOY_MARKER, SSH_KEY_DECOY};
@@ -87,6 +87,10 @@ fn main() {
         (
             "an_unrecorded_refusal_names_no_run_and_leaves_the_ring_empty",
             an_unrecorded_refusal_names_no_run_and_leaves_the_ring_empty,
+        ),
+        (
+            "coverage_fails_naming_every_code_no_row_produces",
+            coverage_fails_naming_every_code_no_row_produces,
         ),
         (
             "a_spanned_refusal_needs_every_site_on_its_line",
@@ -409,6 +413,73 @@ fn an_unrecorded_refusal_names_no_run_and_leaves_the_ring_empty() {
             "{broken:?}: {verdict:?}"
         );
     }
+}
+
+/// `R-code-coverage` reads the table, so it is checked against tables of its own: one producing
+/// every `refusal.*` code passes, and one missing any fails naming each code it misses and no other.
+/// A row that only *mentions* a code — a broker denial's, or a refusal expected of some other
+/// class — produces nothing.
+fn coverage_fails_naming_every_code_no_row_produces() {
+    let refusals: Vec<Code> = Code::ALL
+        .iter()
+        .copied()
+        .filter(|code| code.as_str().starts_with("refusal."))
+        .collect();
+    let producing = |code: Code, expected: Expected| Row {
+        id: code.as_str(),
+        class: Class::Refusal,
+        platform: BOTH,
+        fixture: Fixture::Outside,
+        action: Action::Refuse(Invocation::Usage),
+        expected,
+        from: &[],
+    };
+    // Every way a refusal row produces a code counts.
+    let every: Vec<Row> = refusals
+        .iter()
+        .enumerate()
+        .map(|(i, &code)| {
+            producing(
+                code,
+                match i % 4 {
+                    0 => Expected::Recorded(code),
+                    1 => Expected::RecordedAt(code, &[]),
+                    2 => Expected::Unrecorded(code),
+                    _ => Expected::Unexamined(code),
+                },
+            )
+        })
+        .collect();
+    assert_eq!(judge_coverage(Expected::Covered, &every), Verdict::Pass);
+    let (gone, kept) = (&refusals[..2], &every[2..]);
+    let Verdict::Fail(why) = judge_coverage(Expected::Covered, kept) else {
+        panic!("a table missing {gone:?} passed");
+    };
+    for code in gone {
+        assert!(why.contains(code.as_str()), "{why}");
+    }
+    for code in &refusals[2..] {
+        assert!(!why.contains(code.as_str()), "{code} is produced: {why}");
+    }
+    // The first code again, by a row that is not a refusal: still missing.
+    let mut mentioned = kept.to_vec();
+    mentioned.push(Row {
+        class: Class::Negative,
+        ..producing(gone[0], Expected::Recorded(gone[0]))
+    });
+    let verdict = judge_coverage(Expected::Covered, &mentioned);
+    assert!(
+        matches!(&verdict, Verdict::Fail(why) if why.contains(gone[0].as_str())),
+        "{verdict:?}"
+    );
+    // An empty table names every one.
+    let Verdict::Fail(why) = judge_coverage(Expected::Covered, &[]) else {
+        panic!("an empty table passed");
+    };
+    assert!(
+        refusals.iter().all(|code| why.contains(code.as_str())),
+        "{why}"
+    );
 }
 
 fn a_spanned_refusal_needs_every_site_on_its_line() {

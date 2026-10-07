@@ -36,7 +36,8 @@ use crate::row::{
     Action, Bracketed, CANARY, Cause, Checked, Declined, DedicatedFloor, Exchange, Exchanged,
     Expected, Fixture, Host, Invocation, Legs, Listening, Location, OVER_CEILING, Outcome, ROOT,
     Row, Rung, SH, SHIM, Seen, Services, Signalled, Substitution, Target, Traced, Verdict, applies,
-    judge, judge_bracket, judge_refusal, judge_request, judge_unexamined, over_ceiling_name,
+    judge, judge_bracket, judge_coverage, judge_refusal, judge_request, judge_unexamined,
+    over_ceiling_name,
 };
 use playpen::refusal::EXIT_REFUSED;
 
@@ -1503,6 +1504,8 @@ fn refusal(row: &Row) -> Verdict {
         Action::Refuse(invocation) => judge_refusal(row.expected, &decline(invocation)),
         Action::CheckDocument => judge_unexamined(row.expected, &check_document()),
         Action::TraceBrackets => judge_bracket(row.expected, &bracketed()),
+        // Over the whole table, whichever rows this run was handed.
+        Action::CoverCodes => judge_coverage(row.expected, crate::rows::ROWS),
         action => Verdict::Setup(format!(
             "{action:?} runs under a boundary, and a refusal has none"
         )),
@@ -2415,7 +2418,7 @@ fn prepare(action: Action, home: &Path, root: &Path, made: &mut Made) -> Result<
                 "the canary runs under the bare floor alone, never beside the probe".into(),
             );
         }
-        Action::Refuse(_) | Action::CheckDocument => {
+        Action::Refuse(_) | Action::CheckDocument | Action::CoverCodes => {
             return Err("a refusal has no boundary for the probe to run under".into());
         }
         Action::TraceBrackets => {

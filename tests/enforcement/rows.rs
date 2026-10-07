@@ -775,6 +775,16 @@ pub const ROWS: &[Row] = &[
         expected: Expected::Recorded(Code::BudgetExceeded),
         from: &[Decision::Adr(16), Decision::Issue(67)],
     },
+    // The release gate's: every `refusal.*` code has a row below, or above, that produces it.
+    Row {
+        id: "R-code-coverage",
+        class: Class::Refusal,
+        platform: BOTH,
+        fixture: Fixture::Outside,
+        action: Action::CoverCodes,
+        expected: Expected::Covered,
+        from: &[Decision::Adr(16), Decision::Adr(24), Decision::Issue(108)],
+    },
     // One row per code from here on, each provoking exactly its own: `R-code-coverage` asks every
     // `refusal.*` code for a row that produces it, and a row passing on some other code would be
     // the vacuous pass ADR 0016 denies.

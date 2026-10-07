@@ -471,6 +471,13 @@ pub enum Action {
     /// [spec §17.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#172-rows
     #[allow(dead_code)] // constructed by the liveness suite, which shares this form
     Live(Agent),
+    /// Every `refusal.*` code in the registry is what at least one refusal row of the table
+    /// expects ([spec §17.2], [spec Appendix A]). A check over the rows, which are data, so it
+    /// runs nothing: whether each row really produces its code is that row's own assertion.
+    ///
+    /// [spec §17.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#172-rows
+    /// [spec Appendix A]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#appendix-a--code-registry
+    CoverCodes,
 }
 
 /// Which leg or legs of the proxy a [`Action::Request`] row drives. **Chosen explicitly, never
@@ -523,9 +530,10 @@ impl Action {
             | Action::LookUp(_)
             | Action::Signal(_)
             | Action::Connect(_) => fixture == Fixture::ProbeRoot,
-            Action::Refuse(_) | Action::CheckDocument | Action::TraceBrackets => {
-                fixture == Fixture::Outside
-            }
+            Action::Refuse(_)
+            | Action::CheckDocument
+            | Action::TraceBrackets
+            | Action::CoverCodes => fixture == Fixture::Outside,
             Action::PullDenials => fixture == Fixture::DescendantDenied,
             Action::ManifestIsTrue => fixture == Fixture::Manifest,
             Action::ArgvMatches => fixture == Fixture::Shim,
@@ -955,6 +963,12 @@ pub enum Expected {
     ///
     /// [spec §7.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#76-endpoint-rule-sets
     NoUpstreamLeg,
+    /// No `refusal.*` code of the registry lacks a producing row: a refusal row whose expected
+    /// code it is. Fails naming every one that does. There is no exemption list — a code nothing
+    /// can provoke is a fault, and belongs under `bug.*` ([ADR 0024]).
+    ///
+    /// [ADR 0024]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0024-a-status-playpen-cannot-learn-is-a-fault-and-not-a-refusal.md
+    Covered,
 }
 
 impl Expected {
@@ -972,8 +986,57 @@ impl Expected {
             Expected::Recorded(_)
             | Expected::RecordedAt(..)
             | Expected::Unrecorded(_)
-            | Expected::Unexamined(_) => Class::Refusal,
+            | Expected::Unexamined(_)
+            | Expected::Covered => Class::Refusal,
         }
+    }
+
+    /// The code a row expecting this produces, if it expects one to be produced.
+    pub fn produces(self) -> Option<Code> {
+        match self {
+            Expected::Recorded(code)
+            | Expected::RecordedAt(code, _)
+            | Expected::Unrecorded(code)
+            | Expected::Unexamined(code) => Some(code),
+            // Enumerated rather than a wildcard: a new way to produce a code must be a compile
+            // error here, or `R-code-coverage` would not see it.
+            Expected::Denial
+            | Expected::Closed
+            | Expected::Succeeds
+            | Expected::Authenticated
+            | Expected::OnlyThroughTheProxy
+            | Expected::Brokered(_)
+            | Expected::TraceBracketed
+            | Expected::NoUpstreamLeg
+            | Expected::Covered => None,
+        }
+    }
+}
+
+/// `R-code-coverage`: every `refusal.*` code of the registry is produced by a refusal row of
+/// `rows`, or the verdict names each one that is not.
+pub fn judge_coverage(expected: Expected, rows: &[Row]) -> Verdict {
+    if expected != Expected::Covered {
+        return Verdict::Setup(format!("{expected:?} is not a coverage assertion"));
+    }
+    let missing: Vec<&str> = Code::ALL
+        .iter()
+        .map(|code| code.as_str())
+        .filter(|code| code.starts_with("refusal."))
+        .filter(|code| {
+            !rows.iter().any(|row| {
+                row.class == Class::Refusal
+                    && row.expected.produces().map(Code::as_str) == Some(*code)
+            })
+        })
+        .collect();
+    match missing.as_slice() {
+        [] => Verdict::Pass,
+        missing => Verdict::Fail(format!(
+            "no row produces {} of the registry's refusal codes: {}",
+            missing.len(),
+            missing.join(", ")
+        )),
     }
 }
 
@@ -1140,6 +1203,9 @@ pub fn judge(expected: Expected, outside: &Seen, inside: &Seen) -> Verdict {
             "a bracketed trace is judged by what two runs' records hold, not by a call's errno"
                 .into(),
         ),
+        (Expected::Covered, _) => {
+            Verdict::Setup("coverage is judged over the table, not by a call's errno".into())
+        }
     }
 }
 
@@ -1319,7 +1385,8 @@ pub fn judge_request(
         | Expected::Recorded(_)
         | Expected::RecordedAt(..)
         | Expected::Unrecorded(_)
-        | Expected::Unexamined(_)) => {
+        | Expected::Unexamined(_)
+        | Expected::Covered) => {
             Verdict::Setup(format!("{other:?} is not a credential route's assertion"))
         }
     }
