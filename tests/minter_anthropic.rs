@@ -192,6 +192,29 @@ fn the_host_login_is_read_and_never_refreshed() {
     assert_eq!(entries, [".credentials.json"]);
 }
 
+/// Claude Code 2.1.288 stores a fractional `expiresAt`, and the login is read all the same, its
+/// expiry truncated to the millisecond
+/// ([#106](https://github.com/firefly-engineering/playpen/issues/106)).
+#[test]
+fn a_fractional_expiry_is_read_to_the_millisecond() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join(".credentials.json");
+    let expires = now() + 3600;
+    let login = host_login(expires * 1000 + 250).replace(
+        &format!("{}", expires * 1000 + 250),
+        &format!("{}.0049", expires * 1000 + 250),
+    );
+    assert!(login.contains(".0049"), "{login}");
+    std::fs::write(&file, &login).expect("login");
+    let minted = minted(&["host-login", "--file", file.to_str().expect("utf-8")]).expect("minted");
+    assert_eq!(minted.secret(), SECRET);
+    assert!(
+        minted.expires_at.ends_with(".250Z"),
+        "{}",
+        minted.expires_at
+    );
+}
+
 /// An expired host login fails rather than being refreshed, and says so without the token.
 #[test]
 fn an_expired_host_login_fails_rather_than_refresh() {

@@ -133,9 +133,22 @@ struct HostLogin {
 struct Oauth {
     #[serde(rename = "accessToken")]
     access_token: String,
-    /// Milliseconds since the epoch.
-    #[serde(rename = "expiresAt")]
+    /// Milliseconds since the epoch. Claude Code 2.1.288 writes a fractional count
+    /// (`1791411623874.0049`), which a `u64` refuses, so it is read as a number and truncated to
+    /// whole milliseconds: never later than the login's own expiry
+    /// ([#106](https://github.com/firefly-engineering/playpen/issues/106)).
+    #[serde(rename = "expiresAt", deserialize_with = "whole_ms")]
     expires_at: u64,
+}
+
+/// A JSON number of milliseconds, integral or not, truncated to whole ones.
+fn whole_ms<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    let ms = f64::deserialize(deserializer)?;
+    if ms.is_finite() && (0.0..u64::MAX as f64).contains(&ms) {
+        Ok(ms as u64)
+    } else {
+        Err(serde::de::Error::custom("not a count of milliseconds"))
+    }
 }
 
 /// What a minter is handed: only the version is read, since neither minter's answer depends on
