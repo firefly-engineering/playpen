@@ -145,7 +145,7 @@ pub fn capabilities(
     policy: &Policy,
     name: &str,
     layout: &Layout,
-    dedicated: Option<&Path>,
+    dedicated_floor: Option<&Path>,
 ) -> Result<CapabilitySet, Refusal> {
     let Some(selected) = policy.profiles.get(name) else {
         return Err(Refusal::new(
@@ -153,7 +153,7 @@ pub fn capabilities(
             format!("profile {name:?} is not in the policy"),
         ));
     };
-    let mut caps = floor(dedicated)?;
+    let mut caps = floor(dedicated_floor)?;
     caps.paths.extend(toolchain(name, selected)?);
     caps.paths.extend(roots(policy, selected)?);
     caps.paths.extend(layout.grants());

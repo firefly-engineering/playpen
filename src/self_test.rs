@@ -36,25 +36,25 @@ const CANARY: &str = "true";
 /// names where the canary belongs.
 ///
 /// [`floor::binary`]: crate::floor::binary
-pub fn canary_path(dedicated: Option<&Path>) -> PathBuf {
-    crate::floor::binary(dedicated, CANARY).unwrap_or_else(|searched| searched[0].clone())
+pub fn canary_path(dedicated_floor: Option<&Path>) -> PathBuf {
+    crate::floor::binary(dedicated_floor, CANARY).unwrap_or_else(|searched| searched[0].clone())
 }
 
-/// Run [`CANARY`] under the bare floor `dedicated` selects. A failure is
+/// Run [`CANARY`] under the bare floor `dedicated_floor` selects. A failure is
 /// `refusal.floor.self-test`.
 ///
 /// The caller must be single-threaded, as for [`child::run_confined`]: the throwaway child
 /// allocates between `fork` and `exec`.
-pub fn floor(dedicated: Option<&Path>) -> Result<(), Refusal> {
-    canary(&crate::floor::floor(dedicated)?, dedicated)
+pub fn floor(dedicated_floor: Option<&Path>) -> Result<(), Refusal> {
+    canary(&crate::floor::floor(dedicated_floor)?, dedicated_floor)
 }
 
 /// Run [`CANARY`] confined under `caps`, with its stdin and stdout on the null device, and assert
 /// that it exits 0. Its stderr is captured into the refusal, so a failure names what went wrong
 /// as far as the child could tell; nothing it writes reaches playpen's own stdio. The caller must
-/// be single-threaded, as for [`floor`]. `dedicated` is where the canary is looked for, as in
+/// be single-threaded, as for [`floor`]. `dedicated_floor` is where the canary is looked for, as in
 /// [`canary_path`].
-pub fn canary(caps: &CapabilitySet, dedicated: Option<&Path>) -> Result<(), Refusal> {
+pub fn canary(caps: &CapabilitySet, dedicated_floor: Option<&Path>) -> Result<(), Refusal> {
     let null = File::options()
         .read(true)
         .write(true)
@@ -62,7 +62,7 @@ pub fn canary(caps: &CapabilitySet, dedicated: Option<&Path>) -> Result<(), Refu
         .map_err(|e| prepare_refusal("open /dev/null", e))?;
     let (mut stderr, writer) = std::io::pipe().map_err(|e| prepare_refusal("pipe", e))?;
     let _reapable = Reapable::new()?;
-    let path = canary_path(dedicated);
+    let path = canary_path(dedicated_floor);
     let named = path.display();
     // A host with no canary has no floor to test. Said here rather than left to surface as an
     // `exec` that found nothing, because the remedy is a floor, not anything about this run.

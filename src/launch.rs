@@ -553,7 +553,7 @@ fn run(
     state: Option<&Path>,
     executable: std::io::Result<PathBuf>,
     env: &[(OsString, OsString)],
-    dedicated: Option<&Path>,
+    dedicated_floor: Option<&Path>,
     record: &mut RunRecord,
     probe: impl FnOnce() -> Mechanism,
     floor_self_test: impl FnOnce(Option<&Path>) -> Result<(), Refusal>,
@@ -607,7 +607,7 @@ fn run(
             Layout::new(&state, record.id(), &loaded.policy, profile, selected, kind)
                 .with_home(environment::home(env).as_deref())
         })?;
-    let caps = resolve::capabilities(&loaded.policy, profile, &layout, dedicated)?;
+    let caps = resolve::capabilities(&loaded.policy, profile, &layout, dedicated_floor)?;
     // Nothing that runs unconfined on the next launch is writable from inside this one: the policy,
     // the executable, and the link this playpen was invoked through.
     integrity::check(
@@ -626,7 +626,7 @@ fn run(
     // Step 7, on every launch, never from a cached verdict: the mechanism first, so a missing
     // capability is named as such rather than surfacing as a canary that could not be confined.
     probe().require(mechanism::REQUIRED)?;
-    floor_self_test(dedicated)?;
+    floor_self_test(dedicated_floor)?;
     // Which regime denied a unix-socket credential oracle, stated outward only ([spec §6.3]).
     // Not a capability a profile can require: below Landlock ABI 9 the surface is unenforceable,
     // so it is a named residual rather than a refusal of the host.

@@ -276,8 +276,7 @@ fn render_resolved(resolved: &Resolved, out: &mut impl Write) -> io::Result<()> 
         "network   {mode}  (from {})",
         OneLine(&resolved.network.from)
     )?;
-    writeln!(out, "env")?;
-    render_env(&resolved.env, out)?;
+    render_env(Some(&resolved.env), out)?;
     if !resolved.argv.is_empty() {
         writeln!(out, "argv")?;
         for arg in &resolved.argv {
@@ -548,22 +547,27 @@ fn render_run(replay: &Replay, out: &mut impl Write) -> io::Result<()> {
     //
     // [spec §9.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#93-inward-and-outward
     // [#131]: https://github.com/firefly-engineering/playpen/issues/131
-    match &record.env {
-        Some(env) => {
-            writeln!(out, "env")?;
-            render_env(env, out)?;
-        }
-        None => writeln!(out, "env       -")?,
-    }
-    Ok(())
+    render_env(record.env.as_deref(), out)
 }
 
-/// The constructed environment, one variable a line. An inherited value is shown as inherited
-/// rather than as a value: playpen never inspected it ([spec §9.3]). Shared by the live report and
-/// `explain --run`, so a past run's environment reads exactly as a resolved one does.
+/// The whole `env` section, header included: one variable a line, and `-` where there is no
+/// environment to show — a record written before the field existed, which an empty section would
+/// misreport as "nothing was set".
+///
+/// A value is shown only where playpen or the policy wrote it. An inherited one reads as
+/// inherited, because playpen never inspected it, and a route's delivery variable reads the same
+/// way, because its value is this run's secret ([spec §9.3], [spec §14.1]).
+///
+/// Shared by the live report and `explain --run`, so a past run's environment reads exactly as a
+/// resolved one does and neither can state what the other withholds.
 ///
 /// [spec §9.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#93-inward-and-outward
-fn render_env(env: &[resolve::ResolvedVar], out: &mut impl Write) -> io::Result<()> {
+/// [spec §14.1]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#141-the-run-record
+fn render_env(env: Option<&[resolve::ResolvedVar]>, out: &mut impl Write) -> io::Result<()> {
+    let Some(env) = env else {
+        return writeln!(out, "env       -");
+    };
+    writeln!(out, "env")?;
     for var in env {
         let var_line = match &var.value {
             Some(value) => format!("{}={value}", var.name),

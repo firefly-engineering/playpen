@@ -146,13 +146,13 @@ pub(crate) fn from_env() -> Option<PathBuf> {
 /// macOS. Both are floor paths on every platform, so whatever is found here runs under the floor.
 const FHS_BIN_DIRS: &[&str] = &["/bin", "/usr/bin"];
 
-/// The OS binary `name` as this host's floor holds it: inside `dedicated` where the host has one,
-/// else the first of the FHS binary directories that has it. Resolved per call, since the answer
+/// The OS binary `name` as this host's floor holds it: inside `dedicated_floor` where the host has
+/// one, else the first of the FHS binary directories that has it. Resolved per call, since the answer
 /// is a property of the host as it is now.
 ///
 /// When no directory holds it, the error lists every path looked at, in search order.
-pub fn binary(dedicated: Option<&Path>, name: &str) -> Result<PathBuf, Vec<PathBuf>> {
-    let candidates: Vec<PathBuf> = match dedicated {
+pub fn binary(dedicated_floor: Option<&Path>, name: &str) -> Result<PathBuf, Vec<PathBuf>> {
+    let candidates: Vec<PathBuf> = match dedicated_floor {
         Some(dir) => vec![dir.join("bin").join(name)],
         None => FHS_BIN_DIRS
             .iter()
@@ -241,8 +241,8 @@ const MACH_SERVICES: &[&str] = &[];
 ///
 /// A dedicated floor contributes its declared closure on top of whatever OS-owned paths exist,
 /// because `/proc` and `/dev` are still the kernel's and still required. Which floor that is comes
-/// in as `dedicated` ([`dedicated`]), never from the environment.
-pub fn floor(dedicated: Option<&Path>) -> Result<CapabilitySet, Refusal> {
+/// in as `dedicated_floor` ([`dedicated`]), never from the environment.
+pub fn floor(dedicated_floor: Option<&Path>) -> Result<CapabilitySet, Refusal> {
     let read = PATHS
         .iter()
         .map(|&(path, scope)| (path, Access::Read, scope));
@@ -262,7 +262,7 @@ pub fn floor(dedicated: Option<&Path>) -> Result<CapabilitySet, Refusal> {
             state_derived: false,
         })
         .collect();
-    if let Some(dir) = dedicated {
+    if let Some(dir) = dedicated_floor {
         paths.extend(dedicated_grants(dir)?);
     }
     Ok(CapabilitySet {
@@ -289,11 +289,11 @@ mod tests {
         std::fs::write(dir.path().join("closure"), format!("{}\n", store.display()))
             .expect("a closure");
 
-        let dedicated = floor(Some(dir.path())).expect("the dedicated floor");
+        let grants = floor(Some(dir.path())).expect("the dedicated floor");
         assert!(
-            dedicated.paths.iter().any(|g| g.path == store),
+            grants.paths.iter().any(|g| g.path == store),
             "the declared closure is granted: {:?}",
-            dedicated.paths
+            grants.paths
         );
 
         let fhs = floor(None).expect("the FHS floor");
