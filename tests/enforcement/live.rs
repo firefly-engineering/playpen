@@ -384,11 +384,7 @@ fn answered(
         Ok(text) => text,
         Err(e) => return failed(format!("{}: {e}", rendered.display())),
     };
-    let import = format!(
-        "{}{}",
-        presentation.import.unwrap_or_default(),
-        made.shared.display()
-    );
+    let import = format!("{}{}", presentation.import, made.shared.display());
     if rendered.contains(&made.nonce) || !rendered.lines().any(|line| line == import) {
         return failed(format!(
             "the rendered entry point does not import the nonce by reference as {import:?}: \

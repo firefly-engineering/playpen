@@ -348,9 +348,9 @@ granted.
   read-only inside the directory. The list is default-deny: empty unless entries are named.
 - **The presentation adapter owns the kind's instruction entry point** ([§13.3](#133-presentation)).
   A share entry naming that same file is **composed by reference**: the rendered file ends with
-  the kind's import line pointing at the real file, which is granted read-only. For a kind with
-  no import mechanism, the collision is `refusal.state.collision`. Both kinds in the table import
-  ([§12](#12-the-kind-table)), so today no kind can produce it.
+  the kind's import line pointing at the real file, which is granted read-only. Every kind in the
+  table imports ([§12](#12-the-kind-table)); a kind added without an import mechanism brings back a
+  refusal for this collision, with a row that produces it.
 
 The cost is stated: a first launch under a new profile has no MCP auth and no history.
 
@@ -2015,7 +2015,8 @@ establish during implementation. The wayfinding map closed with them handed off 
   it has an import mechanism, `@<path>` at the start of a line or after whitespace, absolute paths
   included. Established the same way
   ([#107](https://github.com/firefly-engineering/playpen/issues/107)). So its share-list collision
-  composes, and neither kind can produce `refusal.state.collision`.
+  composes, and neither kind could produce `refusal.state.collision`, which is retired
+  ([#158](https://github.com/firefly-engineering/playpen/issues/158)).
 
 **In the nono fork** ([ADR 0022](adr/0022-playpen-pins-a-maintained-fork-of-nono.md)):
 
@@ -2089,7 +2090,6 @@ rather than a `refusal.*` code needing an exemption from the gate.
 | `refusal.state.reachable` † | existence | a granted path reaches playpen's state directory, in either containment direction, naming both paths and the mode. Checked per grant rather than per declaring construct, so it covers the floor and brought roots today and toolchain roots and exclusions as those arrive; exempt are only subtrees playpen *derived from* that directory ([ADR 0027](adr/0027-the-state-directory-is-unreachable-by-refusal-because-a-carve-out-is-not-portable.md)) |
 | `refusal.cwd.ungranted` | existence | the CWD is not inside a granted root |
 | `refusal.area.busy` † | launch | an `exclusive` area is held; names the holding run id |
-| `refusal.state.collision` | coherence | a share entry names the kind's instruction entry point and the kind has no import mechanism |
 | `refusal.state.io` | launch | playpen cannot create its own state: run scratch, an area, the manifest, the record or the lock file. Also when the host names **no** state directory, which `explain` needs to derive provisioned paths from ([§14.2](#142-playpen-explain)) — not knowing where state goes is a case of not being able to make it |
 | `refusal.process.fork` † | launch | the supervisor could not fork the child |
 | `refusal.process.wait` † | launch | playpen could not wait for the floor self-test's throwaway canary, which is its one caller: a wait that fails after the agent has been `exec`ed is a fault, not a refusal ([ADR 0024](adr/0024-a-status-playpen-cannot-learn-is-a-fault-and-not-a-refusal.md)) |
@@ -2150,7 +2150,9 @@ because §14.3's rule holds here too — a caller meeting a crash should be able
 and no catch-all backend code: a backend failure that maps to no listed code is a playpen bug.
 `refusal.workspace.worktree-on-read-root` was retired by
 [#74](https://github.com/firefly-engineering/playpen/issues/74): nothing in a workspace can say that an
-area is a worktree, so nothing could produce it.
+area is a worktree, so nothing could produce it. `refusal.state.collision` was retired by
+[#158](https://github.com/firefly-engineering/playpen/issues/158): every kind in the table imports,
+so a share entry naming a kind's entry point always composes by reference.
 
 ---
 

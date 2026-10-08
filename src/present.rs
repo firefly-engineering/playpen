@@ -66,10 +66,7 @@ pub fn render(
     render_network(manifest, &mut text);
     render_failure(manifest, &mut text);
     for import in imports {
-        // A kind with no import mechanism never reaches here: the collision refuses at step 6.
-        if let Some(prefix) = presentation.import {
-            let _ = writeln!(text, "\n{prefix}{}", import.display());
-        }
+        let _ = writeln!(text, "\n{}{}", presentation.import, import.display());
     }
     Some(Rendered {
         at: agent_state.join(presentation.entry_point),
@@ -383,6 +380,28 @@ mod tests {
             .map(|entry| entry.expect("entry").file_name())
             .collect();
         assert_eq!(left, ["CLAUDE.md"]);
+    }
+
+    /// Every kind in the table imports, so a shared entry point is composed into the rendered one
+    /// by the kind's own import line, and no kind has a collision left to refuse
+    /// ([#158](https://github.com/firefly-engineering/playpen/issues/158)).
+    #[test]
+    fn every_kind_composes_a_shared_entry_point_by_import() {
+        let dir = tempfile::TempDir::new().expect("dir");
+        let shared = PathBuf::from("/home/operator/shared/instructions.md");
+        for kind in crate::kind::KINDS {
+            let presentation = kind.presentation.as_ref().expect("an entry point");
+            let rendered = render(&full(), kind, dir.path(), std::slice::from_ref(&shared))
+                .expect("an entry point");
+            assert_eq!(rendered.at, dir.path().join(presentation.entry_point));
+            let import = format!("{}{}", presentation.import, shared.display());
+            assert_eq!(
+                rendered.text.lines().last(),
+                Some(import.as_str()),
+                "{}",
+                kind.name
+            );
+        }
     }
 
     /// Rewritten on every launch: the second launch's facts replace the first's, in one step.

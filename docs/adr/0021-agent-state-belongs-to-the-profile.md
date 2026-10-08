@@ -75,7 +75,9 @@ collision is a refusal, `refusal.state.collision`, never a merge.
 - **Edge case.** A policy edit made while a run is live re-renders the shared file at the next
   launch, so the live run's agent can read facts from the newer policy. This is tolerated: the
   rendered view carries no compatibility promise, and `$PLAYPEN_MANIFEST` stays true for each run.
-- **New code.** `refusal.state.collision`.
+- **New code.** `refusal.state.collision`. Retired by
+  [#158](https://github.com/firefly-engineering/playpen/issues/158): both kinds import, so nothing
+  could produce it. A kind added without an import mechanism brings it back with a producing row.
 - **Implementation-time checks**, covered by the liveness probe: that `claude` loads
   `$CLAUDE_CONFIG_DIR/CLAUDE.md` and follows an absolute `@` import, and which entry point `omp`
   reads.

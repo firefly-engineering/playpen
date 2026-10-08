@@ -225,8 +225,7 @@ impl Layout {
             // The adapter owns the kind's instruction entry point, so an entry naming it is
             // composed **by reference**: the rendered file ends with the kind's import line
             // pointing at the real file, rather than the real file replacing the rendered one
-            // ([spec §13.3]). The coherence tier has already refused a kind with no import
-            // mechanism sharing its own entry point.
+            // ([spec §13.3]).
             //
             // [spec §13.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#133-presentation
             is_entry_point: kind

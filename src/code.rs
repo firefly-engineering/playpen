@@ -68,7 +68,6 @@ registry! {
     StateReachable => "refusal.state.reachable",
     CwdUngranted => "refusal.cwd.ungranted",
     AreaBusy => "refusal.area.busy",
-    StateCollision => "refusal.state.collision",
     StateIo => "refusal.state.io",
     ProcessFork => "refusal.process.fork",
     ProcessWait => "refusal.process.wait",
