@@ -10,6 +10,7 @@
 //! [spec §8.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#86-the-floor-self-test
 //! [spec §17.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#172-rows
 
+use std::convert::Infallible;
 use std::fs::File;
 use std::io::Read;
 use std::mem::MaybeUninit;
@@ -20,6 +21,7 @@ use std::process::Command;
 use crate::capability::CapabilitySet;
 use crate::child::{self, Started};
 use crate::code::Code;
+use crate::fault::Fault;
 use crate::refusal::Refusal;
 
 /// The canary: an OS-owned binary, dynamically linked against the platform's C library, that needs
@@ -41,20 +43,35 @@ pub fn canary_path(dedicated_floor: Option<&Path>) -> PathBuf {
 }
 
 /// Run [`CANARY`] under the bare floor `dedicated_floor` selects. A failure is
-/// `refusal.floor.self-test`.
+/// `refusal.floor.self-test`. A canary whose status playpen cannot learn is no verdict on the
+/// floor but a defect of playpen's own, so it goes to `on_fault` with the canary's pid, and never
+/// returns ([ADR 0024]).
 ///
 /// The caller must be single-threaded, as for [`child::run_confined`]: the throwaway child
 /// allocates between `fork` and `exec`.
-pub fn floor(dedicated_floor: Option<&Path>) -> Result<(), Refusal> {
-    canary(&crate::floor::floor(dedicated_floor)?, dedicated_floor)
+///
+/// [ADR 0024]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0024-a-status-playpen-cannot-learn-is-a-fault-and-not-a-refusal.md
+pub fn floor(
+    dedicated_floor: Option<&Path>,
+    on_fault: impl FnOnce(Fault, libc::pid_t) -> Infallible,
+) -> Result<(), Refusal> {
+    canary(
+        &crate::floor::floor(dedicated_floor)?,
+        dedicated_floor,
+        on_fault,
+    )
 }
 
 /// Run [`CANARY`] confined under `caps`, with its stdin and stdout on the null device, and assert
 /// that it exits 0. Its stderr is captured into the refusal, so a failure names what went wrong
 /// as far as the child could tell; nothing it writes reaches playpen's own stdio. The caller must
 /// be single-threaded, as for [`floor`]. `dedicated_floor` is where the canary is looked for, as in
-/// [`canary_path`].
-pub fn canary(caps: &CapabilitySet, dedicated_floor: Option<&Path>) -> Result<(), Refusal> {
+/// [`canary_path`], and `on_fault` is as for [`floor`].
+pub fn canary(
+    caps: &CapabilitySet,
+    dedicated_floor: Option<&Path>,
+    on_fault: impl FnOnce(Fault, libc::pid_t) -> Infallible,
+) -> Result<(), Refusal> {
     let null = File::options()
         .read(true)
         .write(true)
@@ -102,7 +119,7 @@ pub fn canary(caps: &CapabilitySet, dedicated_floor: Option<&Path>) -> Result<()
     let mut said = Vec::new();
     // The canary's stderr is a diagnostic only: failing to read it changes no verdict.
     let _ = stderr.read_to_end(&mut said);
-    let status = wait(pid)?;
+    let status = wait(pid).unwrap_or_else(|fault| match on_fault(fault, pid) {});
     if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 {
         return Ok(());
     }
@@ -172,8 +189,10 @@ impl Drop for Reapable {
     }
 }
 
-/// Wait for the throwaway child and return its raw wait status.
-fn wait(pid: libc::pid_t) -> Result<libc::c_int, Refusal> {
+/// Wait for the throwaway child and return its raw wait status. A failure is the same fault as a
+/// failed wait for the agent: the child is one playpen has just forked, with `SIGCHLD` reset by
+/// [`Reapable`], so nothing outside playpen can make the wait fail.
+fn wait(pid: libc::pid_t) -> Result<libc::c_int, Fault> {
     loop {
         let mut status = 0;
         // SAFETY: `status` is a valid out-pointer for the duration of the call.
@@ -182,10 +201,25 @@ fn wait(pid: libc::pid_t) -> Result<libc::c_int, Refusal> {
         }
         let err = std::io::Error::last_os_error();
         if err.kind() != std::io::ErrorKind::Interrupted {
-            return Err(Refusal::new(
-                Code::ProcessWait,
-                format!("waitpid on the floor self-test failed: {err}"),
+            return Err(crate::supervisor::wait_fault(
+                "the floor self-test's canary",
+                pid,
+                err,
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A canary whose wait fails is a fault, never a refusal: `pid 1` is no child of this process,
+    /// so the wait fails `ECHILD`, the same defect as an agent reaped behind playpen's back.
+    #[test]
+    fn a_wait_that_fails_is_a_fault() {
+        let fault = wait(1).expect_err("init is no child of ours");
+        assert_eq!(fault.code, Code::BugStatusNoChild, "{fault}");
+        assert!(fault.message().contains("canary"), "{fault}");
     }
 }

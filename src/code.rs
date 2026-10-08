@@ -70,7 +70,6 @@ registry! {
     AreaBusy => "refusal.area.busy",
     StateIo => "refusal.state.io",
     ProcessFork => "refusal.process.fork",
-    ProcessWait => "refusal.process.wait",
     // Mechanism
     MechanismUnavailable => "refusal.mechanism.unavailable",
     FloorUnavailable => "refusal.floor.unavailable",

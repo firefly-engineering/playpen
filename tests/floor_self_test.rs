@@ -6,12 +6,14 @@
 //!
 //! [spec §8.6]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#86-the-floor-self-test
 
+use std::convert::Infallible;
 use std::process::Command;
 
 mod common;
 
 use playpen::capability::{Access, CapabilitySet, PathGrant, Scope};
 use playpen::code::Code;
+use playpen::fault::Fault;
 use playpen::self_test::{self, canary_path};
 
 use common::dedicated_floor;
@@ -53,7 +55,7 @@ fn the_canary_exits_zero_outside() {
 }
 
 fn the_bare_floor_passes_the_self_test() {
-    if let Err(refusal) = self_test::floor(dedicated_floor().as_deref()) {
+    if let Err(refusal) = self_test::floor(dedicated_floor().as_deref(), unexpected) {
         panic!("the floor self-test failed: {refusal}");
     }
 }
@@ -76,7 +78,7 @@ fn unappliable() -> CapabilitySet {
 }
 
 fn a_canary_that_cannot_be_confined_fails_the_self_test() {
-    let refusal = self_test::canary(&unappliable(), dedicated_floor().as_deref())
+    let refusal = self_test::canary(&unappliable(), dedicated_floor().as_deref(), unexpected)
         .expect_err("the child cannot confine itself");
     assert_eq!(refusal.code, Code::FloorSelfTest, "{refusal}");
     let line = refusal.to_string();
@@ -91,9 +93,14 @@ fn a_canary_that_cannot_be_confined_fails_the_self_test() {
     );
 }
 
+/// The suite has no run to declare a fault against, and a fault is a defect: it fails the test.
+fn unexpected(fault: Fault, canary: libc::pid_t) -> Infallible {
+    panic!("the floor self-test faulted on canary {canary}: {fault}")
+}
+
 /// A pass, a failure, then a pass: no verdict is carried from one call to the next.
 fn every_call_runs_the_canary_afresh() {
-    assert!(self_test::floor(dedicated_floor().as_deref()).is_ok());
-    assert!(self_test::canary(&unappliable(), dedicated_floor().as_deref()).is_err());
-    assert!(self_test::floor(dedicated_floor().as_deref()).is_ok());
+    assert!(self_test::floor(dedicated_floor().as_deref(), unexpected).is_ok());
+    assert!(self_test::canary(&unappliable(), dedicated_floor().as_deref(), unexpected).is_err());
+    assert!(self_test::floor(dedicated_floor().as_deref(), unexpected).is_ok());
 }

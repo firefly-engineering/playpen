@@ -228,7 +228,7 @@ fn invoke(
         floor.as_deref(),
         record,
         probe,
-        self_test::floor,
+        floor_self_test_of_run,
         open_trace,
     )
 }
@@ -356,7 +356,7 @@ fn shim_invoke(
         floor.as_deref(),
         record,
         probe,
-        self_test::floor,
+        floor_self_test_of_run,
         open_trace,
     )
 }
@@ -537,7 +537,21 @@ fn usage_refusal(err: &clap::Error) -> Refusal {
     Refusal::new(Code::InvocationUsage, message)
 }
 
-/// `probe`, `floor_self_test` and `open_trace` are [`Mechanism::probe`], [`self_test::floor`]
+/// [`self_test::floor`] as a launch runs it: a canary whose status playpen cannot learn is a fault
+/// of this run, declared against its record before playpen aborts ([ADR 0024]).
+///
+/// [ADR 0024]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0024-a-status-playpen-cannot-learn-is-a-fault-and-not-a-refusal.md
+fn floor_self_test_of_run(
+    dedicated_floor: Option<&Path>,
+    record: &mut RunRecord,
+) -> Result<(), Refusal> {
+    self_test::floor(dedicated_floor, |fault, canary| {
+        let run = record.id().clone();
+        fault.abort(&run, canary, |fault| record.fault(fault))
+    })
+}
+
+/// `probe`, `floor_self_test` and `open_trace` are [`Mechanism::probe`], [`floor_self_test_of_run`]
 /// and [`trace::open`] in every launch; they are parameters so a test can show that each one's
 /// refusal stops the launch before the real child is forked.
 #[expect(
@@ -556,7 +570,7 @@ fn run(
     dedicated_floor: Option<&Path>,
     record: &mut RunRecord,
     probe: impl FnOnce() -> Mechanism,
-    floor_self_test: impl FnOnce(Option<&Path>) -> Result<(), Refusal>,
+    floor_self_test: impl FnOnce(Option<&Path>, &mut RunRecord) -> Result<(), Refusal>,
     open_trace: impl FnOnce(&Path, &Path, &RunId) -> Result<trace::Tracing, Refusal>,
 ) -> Result<i32, Refusal> {
     let Context {
@@ -626,7 +640,7 @@ fn run(
     // Step 7, on every launch, never from a cached verdict: the mechanism first, so a missing
     // capability is named as such rather than surfacing as a canary that could not be confined.
     probe().require(mechanism::REQUIRED)?;
-    floor_self_test(dedicated_floor)?;
+    floor_self_test(dedicated_floor, record)?;
     // Which regime denied a unix-socket credential oracle, stated outward only ([spec §6.3]).
     // Not a capability a profile can require: below Landlock ABI 9 the surface is unenforceable,
     // so it is a named residual rather than a refusal of the host.
@@ -925,7 +939,7 @@ mod tests {
     /// any other code comes from a check run ahead of it, and no test forks.
     fn refuse_without_target(
         probe: impl FnOnce() -> Mechanism,
-        floor_self_test: impl FnOnce(Option<&Path>) -> Result<(), Refusal>,
+        floor_self_test: impl FnOnce(Option<&Path>, &mut RunRecord) -> Result<(), Refusal>,
     ) -> (Refusal, bool) {
         refuse_with_toolchain(serde_json::json!([]), probe, floor_self_test)
     }
@@ -934,7 +948,7 @@ mod tests {
     fn refuse_with_toolchain(
         toolchain: serde_json::Value,
         probe: impl FnOnce() -> Mechanism,
-        floor_self_test: impl FnOnce(Option<&Path>) -> Result<(), Refusal>,
+        floor_self_test: impl FnOnce(Option<&Path>, &mut RunRecord) -> Result<(), Refusal>,
     ) -> (Refusal, bool) {
         let root = tempfile::TempDir::new().expect("root");
         let policy = root.path().join("policy.json");
@@ -992,7 +1006,7 @@ mod tests {
                 probed += 1;
                 offering_everything()
             },
-            |_| {
+            |_, _| {
                 self_tested += 1;
                 Ok(())
             },
@@ -1009,7 +1023,7 @@ mod tests {
     #[test]
     fn a_failing_floor_self_test_refuses_before_the_real_child_is_forked() {
         let mut ran = 0;
-        let (refusal, completed) = refuse_without_target(offering_everything, |_| {
+        let (refusal, completed) = refuse_without_target(offering_everything, |_, _| {
             ran += 1;
             Err(Refusal::new(Code::FloorSelfTest, "the canary died"))
         });
@@ -1027,7 +1041,7 @@ mod tests {
                 probed += 1;
                 Mechanism::new("a mechanism offering nothing", &[])
             },
-            |_| {
+            |_, _| {
                 self_tested += 1;
                 Ok(())
             },

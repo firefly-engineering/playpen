@@ -2092,7 +2092,6 @@ rather than a `refusal.*` code needing an exemption from the gate.
 | `refusal.area.busy` † | launch | an `exclusive` area is held; names the holding run id |
 | `refusal.state.io` | launch | playpen cannot create its own state: run scratch, an area, the manifest, the record or the lock file. Also when the host names **no** state directory, which `explain` needs to derive provisioned paths from ([§14.2](#142-playpen-explain)) — not knowing where state goes is a case of not being able to make it |
 | `refusal.process.fork` † | launch | the supervisor could not fork the child |
-| `refusal.process.wait` † | launch | playpen could not wait for the floor self-test's throwaway canary, which is its one caller: a wait that fails after the agent has been `exec`ed is a fault, not a refusal ([ADR 0024](adr/0024-a-status-playpen-cannot-learn-is-a-fault-and-not-a-refusal.md)) |
 
 ### Mechanism
 
@@ -2141,7 +2140,7 @@ because §14.3's rule holds here too — a caller meeting a crash should be able
 
 | Code | Fires when |
 |---|---|
-| `bug.status.no-child` † | the supervisor's wait for the agent failed with `ECHILD`: something reaped it behind playpen's back |
+| `bug.status.no-child` † | playpen's wait for a child it forked — the agent, or the floor self-test's canary — failed with `ECHILD`: something reaped it behind playpen's back |
 | `bug.status.unreadable` † | that wait failed for any other reason, which means the call itself was wrong |
 
 **Deliberately absent:** `refusal.flag.*` was never minted, and `required` was dropped
@@ -2152,7 +2151,10 @@ and no catch-all backend code: a backend failure that maps to no listed code is 
 [#74](https://github.com/firefly-engineering/playpen/issues/74): nothing in a workspace can say that an
 area is a worktree, so nothing could produce it. `refusal.state.collision` was retired by
 [#158](https://github.com/firefly-engineering/playpen/issues/158): every kind in the table imports,
-so a share entry naming a kind's entry point always composes by reference.
+so a share entry naming a kind's entry point always composes by reference. `refusal.process.wait` was
+retired by [#157](https://github.com/firefly-engineering/playpen/issues/157): a failed wait for the
+floor self-test's canary is the same defect as a failed wait for the agent, so it is
+`bug.status.*` ([ADR 0024](adr/0024-a-status-playpen-cannot-learn-is-a-fault-and-not-a-refusal.md)).
 
 ---
 

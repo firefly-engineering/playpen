@@ -434,7 +434,7 @@ fn reap(child: pid_t) -> Result<Option<i32>, Fault> {
             -1 => {
                 let err = std::io::Error::last_os_error();
                 if err.kind() != std::io::ErrorKind::Interrupted {
-                    return Err(wait_fault(child, err));
+                    return Err(wait_fault("agent", child, err));
                 }
             }
             _ if libc::WIFSIGNALED(status) => return Ok(Some(128 + libc::WTERMSIG(status))),
@@ -443,17 +443,18 @@ fn reap(child: pid_t) -> Result<Option<i32>, Fault> {
     }
 }
 
-/// The fault a failed `waitpid` on the agent is. `ECHILD` means the kernel has no such child of
-/// ours, so something reaped it behind the supervisor's back; anything else means the call itself
-/// is wrong, which is a different defect and so a different code.
-fn wait_fault(child: pid_t, err: std::io::Error) -> Fault {
+/// The fault a failed `waitpid` on `child`, playpen's own `what`, is. `ECHILD` means the kernel has
+/// no such child of ours, so something reaped it behind playpen's back; anything else means the
+/// call itself is wrong, which is a different defect and so a different code. The agent's wait and
+/// the floor self-test's share it: each waits for a child it has just forked.
+pub(crate) fn wait_fault(what: &str, child: pid_t, err: std::io::Error) -> Fault {
     let code = match err.raw_os_error() {
         Some(libc::ECHILD) => Code::BugStatusNoChild,
         _ => Code::BugStatusUnreadable,
     };
     Fault::new(
         code,
-        format!("cannot learn the status of agent {child}: waitpid failed: {err}"),
+        format!("cannot learn the status of {what} {child}: waitpid failed: {err}"),
     )
 }
 
@@ -483,7 +484,7 @@ mod tests {
     /// [ADR 0024]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0024-a-status-playpen-cannot-learn-is-a-fault-and-not-a-refusal.md
     #[test]
     fn a_failed_wait_is_a_fault_naming_why() {
-        let fault = |errno| wait_fault(4242, std::io::Error::from_raw_os_error(errno));
+        let fault = |errno| wait_fault("agent", 4242, std::io::Error::from_raw_os_error(errno));
         // Something reaped the agent behind the supervisor's back.
         assert_eq!(fault(libc::ECHILD).code, Code::BugStatusNoChild);
         // The call itself is wrong, which is a different defect.

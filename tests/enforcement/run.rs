@@ -2122,7 +2122,11 @@ fn canary_outside() -> Seen {
 
 /// The floor self-test, called as the launch calls it: one implementation, two callers.
 fn canary_inside() -> Seen {
-    match self_test::floor(crate::common::dedicated_floor().as_deref()) {
+    // A fault is a defect, never a verdict on the floor, so it fails the suite outright.
+    match self_test::floor(
+        crate::common::dedicated_floor().as_deref(),
+        |fault, canary| panic!("the floor self-test faulted on canary {canary}: {fault}"),
+    ) {
         Ok(()) => Seen::Succeeded,
         Err(refusal) => Seen::Failed {
             cause: None,

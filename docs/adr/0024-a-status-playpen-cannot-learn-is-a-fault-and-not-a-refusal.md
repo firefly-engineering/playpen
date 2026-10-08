@@ -85,3 +85,11 @@ itself broken, which is the uncontrolled version of the teardown this ADR delibe
   `refusal.process.fork` is near-unproducible on a healthy host, and `refusal.process.wait` now
   only fires from the self-test. How the release gate treats a code no row can produce is #108's
   question, which will surface it as a failing enumeration rather than in the abstract.
+- _Amended by [#157](https://github.com/firefly-engineering/playpen/issues/157): **the self-test's
+  failed wait is a fault too, and `refusal.process.wait` is retired.** The enumeration surfaced it:
+  the self-test resets `SIGCHLD` itself before it waits, and `waitpid` on a child playpen has just
+  forked fails only when playpen called it wrong, so no host fact provokes the code. That is this
+  ADR's own argument. The canary's wait now maps to `bug.status.no-child` and
+  `bug.status.unreadable` exactly as the agent's does, and the run aborts the same way. Exit `125`
+  would not have lied there, since the agent never ran; the code is moved because a defect is not
+  a refusal, whichever outcome it ends in.
