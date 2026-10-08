@@ -223,7 +223,8 @@ not parse is refused as a launch, with a record ([#52](https://github.com/firefl
     5. exit with the child's status.
 
     No teardown failure changes the exit status. Teardown failures go to the run record. Locks
-    release when the process exits.
+    release when the process exits. A run that never reaches teardown leaves its ephemeral areas
+    and run scratch for run record eviction to remove ([§14.1](#141-the-run-record)).
 
 A proxy that stops serving mid-run **tears the run down**, so the agent never runs on with no
 exit. A panic in the proxy is caught at the runtime boundary and routed into teardown.
@@ -1344,7 +1345,9 @@ the selection trace, the capability set and the route table. Retention is a boun
 runs; it is a debugging aid, not an audit log. The ring holds the **100** most recent **ended**
 runs, plus **every live run**. Opening a record removes ended runs beyond those, with the staging
 file a crash left behind for one
-([#52](https://github.com/firefly-engineering/playpen/issues/52)).
+([#52](https://github.com/firefly-engineering/playpen/issues/52)), and with the run scratch and
+ephemeral areas of a run that ended by fault or `SIGKILL` and so never tore them down
+([#132](https://github.com/firefly-engineering/playpen/issues/132)).
 
 **A live run's record is never evicted**, which is a promise `explain`'s consumers depend on: the
 run most worth inspecting is the longest-running one, and shims count as runs, so a long session
@@ -1891,9 +1894,11 @@ exactly the information both ledgers exist to carry.
     ([§11.6](#116-process-transparency)) runs no teardown. The credential half needs none: the
     proxy is hosted in the supervisor rather than detached, so process death *is* the credential
     teardown ([ADR 0013](adr/0013-the-proxy-is-the-supervisors-and-the-two-confinements-are-independent.md)).
-    The filesystem half is bounded, inspectable litter, and removing it would mean running the
-    most failure-prone code in playpen on a process that has just declared itself broken — a
-    teardown that hangs converts a crash into a hang.
+    The filesystem half is not removed by the faulting process: that would mean running the most
+    failure-prone code in playpen on a process that has just declared itself broken — a teardown
+    that hangs converts a crash into a hang. It is inspectable litter until run record eviction
+    removes it with the run's record ([§14.1](#141-the-run-record),
+    [#132](https://github.com/firefly-engineering/playpen/issues/132)).
 12. **A group-directed signal reaches the agent twice**, and this one is **unclosable** rather
     than unclosed. `kill -TERM -<job>` delivers one copy to the agent directly, and playpen
     forwards a second. A receiver learns a signal's *sender* and never its *target*, so playpen

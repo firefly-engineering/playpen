@@ -328,7 +328,7 @@ impl Layout {
 
     /// The run scratch: the run's own, and nobody else's.
     pub fn scratch(&self) -> PathBuf {
-        self.state.join(SCRATCH).join(&self.run)
+        scratch_of(&self.state, &self.run)
     }
 
     /// Where this run's manifest is written, which `PLAYPEN_MANIFEST` names ([spec §13.1]). In the
@@ -357,7 +357,7 @@ impl Layout {
 
     /// Every ephemeral area of this run lives under this one directory, keyed by run.
     fn ephemeral(&self) -> PathBuf {
-        self.state.join(AREAS).join(EPHEMERAL).join(&self.run)
+        ephemeral_of(&self.state, &self.run)
     }
 
     fn path(&self, planned: &Planned) -> PathBuf {
@@ -578,6 +578,31 @@ impl Drop for Provisioned {
         // [spec §4.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#42-launch-sequence
         let _ = self.remove();
     }
+}
+
+/// Remove what run `run` provisioned under `state` and never tore down: its run scratch and its
+/// ephemeral areas. A run that ends by fault or `SIGKILL` runs no destructor, so this is how they
+/// go — called by run record eviction, which only ever names a dead run ([ADR 0028]). Best effort,
+/// like the rest of eviction: a failure to remove is ignored and refuses nothing.
+///
+/// [ADR 0028]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0028-the-run-record-ring-evicts-history-and-never-a-live-run.md
+pub fn discard(state: &Path, run: &RunId) {
+    for path in [
+        scratch_of(state, run.as_str()),
+        ephemeral_of(state, run.as_str()),
+    ] {
+        let _ = std::fs::remove_dir_all(path);
+    }
+}
+
+/// The run scratch of run `run` under `state`.
+pub(crate) fn scratch_of(state: &Path, run: &str) -> PathBuf {
+    state.join(SCRATCH).join(run)
+}
+
+/// The directory holding every ephemeral area of run `run` under `state`.
+pub(crate) fn ephemeral_of(state: &Path, run: &str) -> PathBuf {
+    state.join(AREAS).join(EPHEMERAL).join(run)
 }
 
 /// Who holds a lock file: the run id it holds, or a sentence saying it cannot be read.

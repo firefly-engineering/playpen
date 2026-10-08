@@ -442,7 +442,8 @@ impl RunRecord {
     /// Create the state directory if need be, and the record of run `id` in it. A failure is
     /// `refusal.state.io`; `state` is `None` when the environment names no state directory.
     pub fn open(id: &RunId, state: Option<&Path>) -> Result<Self, Refusal> {
-        let runs = runs_dir(state)?;
+        let state = state.ok_or_else(no_state)?;
+        let runs = state.join(RUNS);
         // Owner-only: a record names the policy and the paths of every grant.
         DirBuilder::new()
             .recursive(true)
@@ -489,7 +490,9 @@ impl RunRecord {
         // Taken before eviction runs, so this run is already live when the ring is swept and
         // cannot evict itself — which is the whole of #119.
         let lock = Some(Sidecar::take(&runs, id)?);
-        evict(&runs, RETAINED);
+        for evicted in evict(&runs, RETAINED) {
+            crate::provision::discard(state, &evicted);
+        }
         Ok(Self {
             id: id.clone(),
             path,
@@ -708,7 +711,7 @@ pub fn list(state: Option<&Path>) -> Result<Vec<Record>, Refusal> {
 
 /// Keep the `keep` most recent **ended** runs in `runs`, plus every live run, and remove the rest
 /// along with each removed run's sidecar and any staging file a crash left behind for it
-/// ([ADR 0028]).
+/// ([ADR 0028]). Returns the runs it evicted, so their caller can remove what else they left.
 ///
 /// Eviction used to order by start time, which is a ULID's key and the opposite of what a
 /// debugging aid wants: the longest-running run is the most interesting and was the most certain
@@ -720,23 +723,21 @@ pub fn list(state: Option<&Path>) -> Result<Vec<Record>, Refusal> {
 /// than its bound until the next run tries again.
 ///
 /// [ADR 0028]: https://github.com/firefly-engineering/playpen/blob/main/docs/adr/0028-the-run-record-ring-evicts-history-and-never-a-live-run.md
-fn evict(runs: &Path, keep: usize) {
+fn evict(runs: &Path, keep: usize) -> Vec<RunId> {
     let Ok(ids) = stored_ids(runs) else {
-        return;
+        return Vec::new();
     };
     // History is what the bound applies to. A live run takes no place in the ring: live runs are
     // self-limiting because each one is a process.
     let mut history: Vec<RunId> = ids.into_iter().filter(|id| !is_live(runs, id)).collect();
     if history.len() <= keep {
-        return;
+        return Vec::new();
     }
     history.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-    let evicted: std::collections::HashSet<&str> = history[..history.len() - keep]
-        .iter()
-        .map(RunId::as_str)
-        .collect();
+    history.truncate(history.len() - keep);
+    let evicted: std::collections::HashSet<&str> = history.iter().map(RunId::as_str).collect();
     let Ok(entries) = std::fs::read_dir(runs) else {
-        return;
+        return Vec::new();
     };
     for entry in entries.flatten() {
         let path = entry.path();
@@ -748,6 +749,7 @@ fn evict(runs: &Path, keep: usize) {
             let _ = std::fs::remove_file(&path);
         }
     }
+    history
 }
 
 /// Whether run `id` is still going: something holds its sidecar's lock.
@@ -1264,6 +1266,42 @@ mod tests {
             RETAINED + 1,
             "the bound's {RETAINED} most recent ended runs, plus the one live run"
         );
+    }
+
+    /// A run that faulted or was killed ran no teardown, so its run scratch and ephemeral areas
+    /// outlive it. Evicting its record removes them too, and only for the runs evicted: a live
+    /// run's, and a kept one's, stay
+    /// ([#132](https://github.com/firefly-engineering/playpen/issues/132)).
+    #[test]
+    fn evicting_a_run_removes_what_it_left_provisioned() {
+        let state = tempfile::TempDir::new().expect("state");
+        let session = id_at(0);
+        let _live = RunRecord::open(&session, Some(state.path())).expect("open");
+        let runs = state.path().join(RUNS);
+        for unix_ms in 1..=RETAINED as u64 + 1 {
+            plant(&runs, &format!("{}.json", id_at(unix_ms)));
+        }
+        let left = |id: &RunId| {
+            let scratch = crate::provision::scratch_of(state.path(), id.as_str());
+            let ephemeral = crate::provision::ephemeral_of(state.path(), id.as_str());
+            for dir in [&scratch, &ephemeral] {
+                std::fs::create_dir_all(dir.join("w")).expect("left behind");
+            }
+            [scratch, ephemeral]
+        };
+        let (evicted, kept) = (id_at(1), id_at(2));
+        let [evicted_paths, kept_paths, live_paths] = [&evicted, &kept, &session].map(left);
+
+        let _run =
+            RunRecord::open(&RunId::allocate().expect("id"), Some(state.path())).expect("open");
+
+        assert!(!runs.join(format!("{evicted}.json")).exists(), "evicted");
+        for path in &evicted_paths {
+            assert!(!path.exists(), "{} went with its run", path.display());
+        }
+        for path in kept_paths.iter().chain(&live_paths) {
+            assert!(path.exists(), "{} stays", path.display());
+        }
     }
 
     /// The bug #119 reported: a long session's own record was guaranteed to be evicted, because
