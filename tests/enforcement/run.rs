@@ -1505,7 +1505,9 @@ fn refusal(row: &Row) -> Verdict {
         Action::CheckDocument => judge_unexamined(row.expected, &check_document()),
         Action::TraceBrackets => judge_bracket(row.expected, &bracketed()),
         // Over the whole table, whichever rows this run was handed.
-        Action::CoverCodes => judge_coverage(row.expected, crate::rows::ROWS),
+        Action::CoverCodes => {
+            judge_coverage(row.expected, crate::rows::ROWS, crate::row::UNPROVOKED)
+        }
         action => Verdict::Setup(format!(
             "{action:?} runs under a boundary, and a refusal has none"
         )),

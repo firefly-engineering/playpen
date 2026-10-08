@@ -825,13 +825,18 @@ pub struct Bound {
 ///
 /// [spec §6.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#62-the-broker
 pub fn bind() -> Result<Bound, Refusal> {
+    bind_on(INTERFACE)
+}
+
+/// [`bind`], on `interface`.
+fn bind_on(interface: Ipv4Addr) -> Result<Bound, Refusal> {
     let bind_failed = |what: &str, e: std::io::Error| {
         Refusal::new(
             Code::ProxyBind,
-            format!("the broker cannot {what} on {INTERFACE}: {e}"),
+            format!("the broker cannot {what} on {interface}: {e}"),
         )
     };
-    let listener = TcpListener::bind((INTERFACE, 0)).map_err(|e| bind_failed("bind", e))?;
+    let listener = TcpListener::bind((interface, 0)).map_err(|e| bind_failed("bind", e))?;
     let addr = listener
         .local_addr()
         .map_err(|e| bind_failed("read back the address it bound", e))?;
@@ -2458,6 +2463,21 @@ mod tests {
         // Two proxies never collide: each gets its own.
         let other = bind().expect("bound");
         assert_ne!(bound.addr(), other.addr());
+    }
+
+    /// A listener that cannot bind is `refusal.proxy.bind`, naming where it tried. No suite row
+    /// can provoke this ([#145]), so the code is proven here, on an address no host holds
+    /// (TEST-NET-1, RFC 5737), rather than on loopback.
+    ///
+    /// [#145]: https://github.com/firefly-engineering/playpen/issues/145
+    #[test]
+    fn a_listener_that_cannot_bind_is_refused() {
+        let nowhere = Ipv4Addr::new(192, 0, 2, 1);
+        let refusal = bind_on(nowhere)
+            .err()
+            .expect("bound an address no host holds");
+        assert_eq!(refusal.code, Code::ProxyBind);
+        assert!(refusal.message().contains("192.0.2.1"), "{refusal}");
     }
 
     /// A `CONNECT` names its authority, and nothing else here is one.

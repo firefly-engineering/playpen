@@ -1013,30 +1013,71 @@ impl Expected {
     }
 }
 
+/// A `refusal.*` code no suite row can provoke, and why: what [`judge_coverage`] takes in place of
+/// a producing row. Each needs a proof of its own, outside the suite, that its code is produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unprovoked {
+    pub code: Code,
+    pub why: &'static str,
+    pub from: &'static [Decision],
+}
+
+/// The refusal codes no row can provoke, which `R-code-coverage` takes in place of a producing row
+/// ([spec §17.2]). Each is proven by a unit test of its own instead.
+///
+/// [spec §17.2]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#172-rows
+pub const UNPROVOKED: &[Unprovoked] = &[Unprovoked {
+    code: Code::ProxyBind,
+    why: "binding loopback at a kernel-picked port fails in no environment a row can build: a \
+          network namespace binds 127.0.0.1 with no address on lo, and a file limit low enough \
+          to fail the bind fails an earlier step first; proven by \
+          proxy::tests::a_listener_that_cannot_bind_is_refused",
+    from: &[Decision::Adr(16), Decision::Issue(145)],
+}];
+
 /// `R-code-coverage`: every `refusal.*` code of the registry is produced by a refusal row of
-/// `rows`, or the verdict names each one that is not.
-pub fn judge_coverage(expected: Expected, rows: &[Row]) -> Verdict {
+/// `rows` or named by `unprovoked`, or the verdict names each one that is neither. An entry of
+/// `unprovoked` is itself a failure where a row produces its code or the code is no refusal, so the
+/// ledger only ever names what the suite cannot reach.
+pub fn judge_coverage(expected: Expected, rows: &[Row], unprovoked: &[Unprovoked]) -> Verdict {
     if expected != Expected::Covered {
         return Verdict::Setup(format!("{expected:?} is not a coverage assertion"));
     }
+    let produced = |code: &str| {
+        rows.iter().any(|row| {
+            row.class == Class::Refusal && row.expected.produces().map(Code::as_str) == Some(code)
+        })
+    };
+    let refusal = |code: &str| code.starts_with("refusal.");
     let missing: Vec<&str> = Code::ALL
         .iter()
         .map(|code| code.as_str())
-        .filter(|code| code.starts_with("refusal."))
-        .filter(|code| {
-            !rows.iter().any(|row| {
-                row.class == Class::Refusal
-                    && row.expected.produces().map(Code::as_str) == Some(*code)
-            })
-        })
+        .filter(|&code| refusal(code) && !produced(code))
+        .filter(|&code| !unprovoked.iter().any(|entry| entry.code.as_str() == code))
         .collect();
-    match missing.as_slice() {
-        [] => Verdict::Pass,
-        missing => Verdict::Fail(format!(
+    let stale: Vec<&str> = unprovoked
+        .iter()
+        .map(|entry| entry.code.as_str())
+        .filter(|&code| !refusal(code) || produced(code))
+        .collect();
+    let mut failures = Vec::new();
+    if !missing.is_empty() {
+        failures.push(format!(
             "no row produces {} of the registry's refusal codes: {}",
             missing.len(),
             missing.join(", ")
-        )),
+        ));
+    }
+    if !stale.is_empty() {
+        failures.push(format!(
+            "the unprovoked ledger names {} code(s) a row produces or that are no refusal: {}",
+            stale.len(),
+            stale.join(", ")
+        ));
+    }
+    match failures.as_slice() {
+        [] => Verdict::Pass,
+        failures => Verdict::Fail(failures.join("; ")),
     }
 }
 

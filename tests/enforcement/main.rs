@@ -23,7 +23,8 @@ use playpen::code::Code;
 use row::{
     Action, Asymmetry, BOTH, Cause, Checked, Class, Declined, Exchange, Exchanged, Expected,
     Fixture, Invocation, Os, Outcome, Platform, Precondition, Row, Scope, Seen, Substitution,
-    Target, Verdict, judge, judge_coverage, judge_refusal, judge_request, judge_unexamined,
+    Target, Unprovoked, Verdict, judge, judge_coverage, judge_refusal, judge_request,
+    judge_unexamined,
 };
 use rows::ROWS;
 use run::{DECOY, DECOY_MARKER, SSH_KEY_DECOY};
@@ -450,9 +451,12 @@ fn coverage_fails_naming_every_code_no_row_produces() {
             )
         })
         .collect();
-    assert_eq!(judge_coverage(Expected::Covered, &every), Verdict::Pass);
+    assert_eq!(
+        judge_coverage(Expected::Covered, &every, &[]),
+        Verdict::Pass
+    );
     let (gone, kept) = (&refusals[..2], &every[2..]);
-    let Verdict::Fail(why) = judge_coverage(Expected::Covered, kept) else {
+    let Verdict::Fail(why) = judge_coverage(Expected::Covered, kept, &[]) else {
         panic!("a table missing {gone:?} passed");
     };
     for code in gone {
@@ -467,19 +471,44 @@ fn coverage_fails_naming_every_code_no_row_produces() {
         class: Class::Negative,
         ..producing(gone[0], Expected::Recorded(gone[0]))
     });
-    let verdict = judge_coverage(Expected::Covered, &mentioned);
+    let verdict = judge_coverage(Expected::Covered, &mentioned, &[]);
     assert!(
         matches!(&verdict, Verdict::Fail(why) if why.contains(gone[0].as_str())),
         "{verdict:?}"
     );
     // An empty table names every one.
-    let Verdict::Fail(why) = judge_coverage(Expected::Covered, &[]) else {
+    let Verdict::Fail(why) = judge_coverage(Expected::Covered, &[], &[]) else {
         panic!("an empty table passed");
     };
     assert!(
         refusals.iter().all(|code| why.contains(code.as_str())),
         "{why}"
     );
+    // A code no row can provoke passes once the ledger names it, and only that code.
+    let unprovoked = |code: Code| Unprovoked {
+        code,
+        why: "",
+        from: &[],
+    };
+    let ledger: Vec<Unprovoked> = gone.iter().map(|&code| unprovoked(code)).collect();
+    assert_eq!(
+        judge_coverage(Expected::Covered, kept, &ledger),
+        Verdict::Pass
+    );
+    let Verdict::Fail(why) = judge_coverage(Expected::Covered, kept, &ledger[..1]) else {
+        panic!("a table missing {:?} passed", gone[1]);
+    };
+    assert!(why.contains(gone[1].as_str()), "{why}");
+    assert!(!why.contains(gone[0].as_str()), "{why}");
+    // An entry for a code a row produces is stale, and so is one for a code that is no refusal.
+    for code in [refusals[2], Code::BugStatusNoChild] {
+        let stale = [ledger.as_slice(), &[unprovoked(code)]].concat();
+        let verdict = judge_coverage(Expected::Covered, kept, &stale);
+        assert!(
+            matches!(&verdict, Verdict::Fail(why) if why.contains(code.as_str())),
+            "{code}: {verdict:?}"
+        );
+    }
 }
 
 fn a_spanned_refusal_needs_every_site_on_its_line() {

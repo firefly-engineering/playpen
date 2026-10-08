@@ -1823,7 +1823,7 @@ Row ids are provisional. The implementation owns the final ids.
 | `R-record` | refusal | a run record exists **after** a refusal | both |
 | `R-state-reachable` | refusal | a root that is an ancestor of playpen's state directory → `125` + `refusal.state.reachable`, naming both paths. The state directory is **synthetic**, not the real `$HOME`: the check compares resolved paths and does not care whose home it is | both |
 | `R-integrity` | refusal | a policy file inside the profile's own read-write root → `125` + `refusal.integrity.writable` | both |
-| `R-code-coverage` | refusal | every `refusal.*` code in the registry has ≥ 1 producing row | both |
+| `R-code-coverage` | refusal | every `refusal.*` code in the registry has ≥ 1 producing row, or is named by the **unprovoked ledger**: a code no environment a row can build provokes, each with its reason, its deciding issue and a unit test that proves the code instead. An entry for a code a row produces, or for a code that is no refusal, fails the row, so the ledger cannot outlive its reason. One entry: `refusal.proxy.bind` ([#145](https://github.com/firefly-engineering/playpen/issues/145)), since loopback at a kernel-picked port binds in a network namespace with no address on `lo`, and a file limit low enough to fail the bind fails an earlier step first | both |
 | `R-<code>` | refusal | one row per `refusal.*` code no row above produces (`R-policy-syntax`, `R-area-busy`, …) → `125` + that code + a record holding it, and no other code. Provoked by a policy document alone, or by **one host fact set on that one launch** — a search path, a working directory, a held area, a process limit, a dedicated floor, a trust store — never by a seam in the shipped source. `R-run-unknown` is the converse, since `explain` launches nothing: no run named, and the ring left empty | both |
 | `R-policy-span` | refusal | a policy refusal names file, line and column, including through a merge key | both |
 | `R-no-filesystem` | refusal | `check --no-filesystem` performs no existence check | both |
@@ -2036,7 +2036,8 @@ One namespace, **three prefixes**: `refusal.*` for a refusal, `broker.*` for a b
 broker denial fires against a live agent, and a fault at no validation point at all. Only
 `refusal.*` is bound by `R-code-coverage`'s requirement that every code have a producing row
 ([§17.2](#172-rows)) — a fault cannot be provoked by one, which is why it is a separate prefix
-rather than a `refusal.*` code needing an exemption from the gate.
+rather than a `refusal.*` code needing an exemption from the gate. The gate's one exemption is
+for a refusal no row can reach, and is named, entry by entry, in its unprovoked ledger.
 
 ### Policy
 
