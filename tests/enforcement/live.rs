@@ -91,11 +91,10 @@ impl Agent {
                 ],
                 delivery: "ANTHROPIC_OAUTH_TOKEN",
                 interpreter: Some("bun"),
-                // omp 18.8.2 keeps its daemon registry in `~/.omp/run` whatever
-                // `PI_CODING_AGENT_DIR` says, and dies on `EPERM` making it. The synthetic home's is
-                // granted here; a real one's is not, and that is
-                // [#156](https://github.com/firefly-engineering/playpen/issues/156).
-                writes: &[".omp/run"],
+                // Nothing in the home: omp's config root, where it keeps its daemon registry, is
+                // pointed into the agent state directory by the kind table
+                // ([#156](https://github.com/firefly-engineering/playpen/issues/156)).
+                writes: &[],
                 // omp shapes an Anthropic request by the token's content: only one holding
                 // `sk-ant-oat` is sent as `Authorization: Bearer`, and the phantom is opaque, so
                 // the built-in provider sends it as `x-api-key` and the minted OAuth token is

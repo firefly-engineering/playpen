@@ -324,3 +324,69 @@ fn a_share_entry_that_is_not_one_name_refuses() {
         common::assert_refused(&output, "refusal.root.missing");
     }
 }
+
+/// A kind whose redirect leaves state outside it gets its config root pointed into the state
+/// directory too, relative to the child's own `HOME` because that is how the agent joins it: omp
+/// keeps its daemon registry under its config root whatever `PI_CODING_AGENT_DIR` says, and dies
+/// confined making it ([#156]). The root is under the redirect, and the agent can write it.
+///
+/// [#156]: https://github.com/firefly-engineering/playpen/issues/156
+#[test]
+fn the_config_root_is_reached_from_home_inside_the_state_directory() {
+    let fx = Fixture::new();
+    let policy = two_profiles(&fx);
+    let kind = playpen::kind::require("omp").expect("a known kind");
+    let name = kind.config_root.expect("omp names its config root");
+    let output = run(&fx, &policy, "p", "omp", &[&os_bin("env")])
+        .output()
+        .expect("playpen");
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).expect("utf-8");
+    let var = |wanted: &str| {
+        stdout
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .find(|(var, _)| *var == wanted)
+            .map(|(_, value)| PathBuf::from(value))
+            .unwrap_or_else(|| panic!("{wanted} is not in the child's environment"))
+    };
+    let (home, relative) = (var("HOME"), var(name));
+    assert!(relative.is_relative(), "{name}={relative:?}");
+    // Joined as omp joins it (`path.join(os.homedir(), PI_CONFIG_DIR)`): lexically.
+    let mut root = home.clone();
+    for part in relative.components() {
+        match part {
+            std::path::Component::ParentDir => {
+                root.pop();
+            }
+            part => root.push(part),
+        }
+    }
+    assert_eq!(
+        root,
+        redirect(&fx, &policy, "p", "omp").join(playpen::kind::CONFIG_ROOT)
+    );
+    // omp makes the root itself, as the agent state directory's own; made here because the probe
+    // only writes files.
+    std::fs::create_dir_all(&root).expect("the config root");
+    let written = root.join("registry");
+    assert_eq!(
+        common::verdict(
+            run(
+                &fx,
+                &policy,
+                "p",
+                "omp",
+                &[
+                    fx.probe().to_str().expect("utf-8"),
+                    "write",
+                    written.to_str().expect("utf-8"),
+                ]
+            )
+            .output()
+            .expect("playpen")
+        )["ok"],
+        true,
+        "the agent cannot write its config root"
+    );
+}

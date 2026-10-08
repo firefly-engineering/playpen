@@ -88,7 +88,7 @@ pub const SET_ENTRIES: &[&str] = &[
 pub const FORBIDDEN: &[&str] = &["SSH_AUTH_SOCK"];
 
 /// Every name playpen itself writes in some run, with which entry writes it: the set entries, and
-/// every kind's state-dir redirect, suppression, scratch and proxy entries ([spec Appendix B], B7). A route's
+/// every kind's state-dir redirect, suppression, scratch, proxy and config-root entries ([spec Appendix B], B7). A route's
 /// delivery name is reserved too ([`deliveries`]), but the policy authors that one.
 ///
 /// [spec Appendix B]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#appendix-b--reconciliations-made-in-assembly
@@ -110,6 +110,9 @@ pub fn written_by_playpen() -> Vec<(&'static str, String)> {
         }
         for &name in kind.proxy {
             names.push((name, format!("kind:{}'s proxy entry", kind.name)));
+        }
+        if let Some(name) = kind.config_root {
+            names.push((name, format!("kind:{}'s config-root entry", kind.name)));
         }
     }
     names

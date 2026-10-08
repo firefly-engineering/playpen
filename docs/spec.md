@@ -830,6 +830,7 @@ share one condition ([ADR 0020](adr/0020-playpen-claims-credential-confinement-o
 | the kind's suppression entries | per kind | always ([§12](#12-the-kind-table)) |
 | the kind's scratch entries | the run scratch | always ([§12](#12-the-kind-table)) |
 | the kind's proxy entries | the value `HTTPS_PROXY` has | iff a route resolves ([§12](#12-the-kind-table)) |
+| the kind's config-root entry | the path from the child's `HOME` to `root` in the agent state directory | iff the child's `HOME` is absolute and holds no `..` ([§12](#12-the-kind-table)) |
 
 - **The CA pair covers two TLS stacks in one boundary.** Both flagship binaries are Bun and
   honour `NODE_EXTRA_CA_CERTS`, while `git` and `curl` read `SSL_CERT_FILE`.
@@ -1206,6 +1207,7 @@ redirect `git`, `gh` and every other XDG-aware tool too.
 | Suppression table | `CLAUDE_CODE_SANDBOXED=1` | — |
 | Scratch entries | `CLAUDE_CODE_TMPDIR` | — |
 | Proxy entries | — | `PI_PROXY` |
+| Config-root entry | — | `PI_CONFIG_DIR` |
 | Presentation adapter | renders the manifest into `CLAUDE.md` in the agent state directory; imports with `@<path>` | same, into `AGENTS.md`; imports with `@<path>` |
 | Liveness invocation | trivial no-network invocation, plus one task through the proxy | same |
 
@@ -1218,9 +1220,17 @@ redirect `git`, `gh` and every other XDG-aware tool too.
   named by `PI_PROXY`; without it the request bypasses the broker and the phantom is refused
   upstream ([#106](https://github.com/firefly-engineering/playpen/issues/106),
   [#107](https://github.com/firefly-engineering/playpen/issues/107)).
-- **`omp`'s redirect is incomplete.** omp 18.8.2 keeps its daemon registry in `~/.omp/run`
-  whatever `PI_CODING_AGENT_DIR` says, and `omp -p` dies making it, so a confined `omp` cannot run
-  against a real home ([#156](https://github.com/firefly-engineering/playpen/issues/156)).
+- **A config-root entry completes a redirect that leaves state behind.** omp 18.8.2 keeps its
+  daemon registry, logs and caches under its config root, `path.join(os.homedir(), PI_CONFIG_DIR ??
+  ".omp")`, whatever `PI_CODING_AGENT_DIR` says, and without the entry `omp -p` dies confined
+  making `~/.omp/run` ([#156](https://github.com/firefly-engineering/playpen/issues/156)). The
+  entry points the root at `root` inside the agent state directory, so it belongs to the profile
+  as the agent directory does ([ADR 0021](adr/0021-agent-state-belongs-to-the-profile.md)), and
+  nothing of the real `~/.omp` is reached. Its value is **relative to the child's `HOME`**, read
+  from the constructed environment since a `set:` can replace it, because omp joins it onto its
+  home lexically: `..` for each component of `HOME` past what the two paths share, then the rest.
+  It reaches the state directory whether or not that is under `HOME`. A `HOME` that is not
+  absolute or holds `..` has no such path, and then the entry is not written.
 
 - **The suppression table only sets entries.** It is cooperative, and that is permitted: if a
   guest ignores it, the guest breaks and does not escape. A guest's nested `sandbox_init`
@@ -2189,7 +2199,8 @@ reconciled form. **Reviewed and accepted** in [#9](https://github.com/firefly-en
   entries are also written by playpen, so ADR 0012's own one-author law reserves them too, as it
   does the scratch and proxy entries the liveness suite added
   ([#106](https://github.com/firefly-engineering/playpen/issues/106),
-  [#107](https://github.com/firefly-engineering/playpen/issues/107)).
+  [#107](https://github.com/firefly-engineering/playpen/issues/107)) and the config-root entry
+  ([#156](https://github.com/firefly-engineering/playpen/issues/156)).
 - **B8. ADR 0012's "No `refusal.env.*` code exists"** (the #31 amendment) refers to
   *value validation*. `refusal.env.reserved` remains minted, and the spec adds
   `refusal.env.forbidden` for `SSH_AUTH_SOCK`.

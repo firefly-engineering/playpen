@@ -253,9 +253,51 @@ pub fn environment(
             from: crate::proxy::FROM.into(),
         }));
     }
-    environment::construct(policy, name, selected, host, written, |reference| {
+    let mut env = environment::construct(policy, name, selected, host, written, |reference| {
         layout.area(reference)
-    })
+    });
+    // Relative to the child's own `HOME`, which the agent joins it onto, so it is read from the
+    // constructed environment rather than the host's: a profile's `set:` can replace it. With no
+    // home a lexical join reads, the entry is not written.
+    if let Some(kind) = kind
+        && let Some(name) = kind.config_root
+        && let Some(agent_state) = layout.agent_state()
+        && let Some(relative) = env.iter().find(|var| var.name == "HOME").and_then(|home| {
+            home_relative(
+                Path::new(home.value.as_os_str()),
+                &agent_state.join(crate::kind::CONFIG_ROOT),
+            )
+        })
+    {
+        env.push(Var {
+            name: name.into(),
+            value: Value::Written(relative.into_os_string()),
+            from: kind.from(),
+        });
+    }
+    env
+}
+
+/// The path that, joined lexically onto `home`, is `target`: `..` for each component of `home`
+/// past what the two share, then the rest of `target`. `None` unless both are absolute and hold
+/// no `..`, the only paths whose lexical join is the path itself.
+fn home_relative(home: &Path, target: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    let plain = |path: &Path| {
+        path.is_absolute() && path.components().all(|part| part != Component::ParentDir)
+    };
+    if !plain(home) || !plain(target) {
+        return None;
+    }
+    let (home, target): (Vec<_>, Vec<_>) =
+        (home.components().collect(), target.components().collect());
+    let shared = home.iter().zip(&target).take_while(|(a, b)| a == b).count();
+    let mut relative: PathBuf = home[shared..]
+        .iter()
+        .map(|_| Component::ParentDir)
+        .collect();
+    relative.extend(&target[shared..]);
+    Some(relative)
 }
 
 /// Every exclusion on the selected profile's roots, brought and toolchain alike, at its resolved
@@ -620,6 +662,52 @@ mod tests {
             "profiles": {"p": {"workspaces": ["w"], "toolchain": []}},
         });
         Policy::parse(&text.to_string(), Path::new("/p.json")).expect("parses")
+    }
+
+    /// `home` joined with what [`home_relative`] returns, as a lexical join does it: `..` takes a
+    /// component off, which is how omp reaches its config root ([#156]).
+    ///
+    /// [#156]: https://github.com/firefly-engineering/playpen/issues/156
+    fn joined(home: &Path, relative: &Path) -> PathBuf {
+        let mut path = home.to_path_buf();
+        for part in relative.components() {
+            match part {
+                std::path::Component::ParentDir => {
+                    path.pop();
+                }
+                part => path.push(part),
+            }
+        }
+        path
+    }
+
+    /// A path relative to `HOME` reaches its target wherever the target is: under the home, beside
+    /// it, or nowhere near it. Only a home or target a lexical join would misread has none.
+    #[test]
+    fn a_home_relative_path_reaches_its_target_from_the_home() {
+        for (home, target) in [
+            ("/home/u", "/home/u/.local/state/playpen/agent/root"),
+            ("/Users/u", "/var/state/playpen/agent/root"),
+            ("/home/u/", "/home/v/state"),
+            ("/", "/state/root"),
+        ] {
+            let (home, target) = (Path::new(home), Path::new(target));
+            let relative = home_relative(home, target).expect("a relative path");
+            assert!(relative.is_relative(), "{relative:?}");
+            assert_eq!(joined(home, &relative), target, "{home:?} {relative:?}");
+        }
+        for (home, target) in [
+            ("home/u", "/state"),
+            ("/home/u", "state"),
+            ("/home/u/../v", "/state"),
+            ("/home/u", "/state/../x"),
+        ] {
+            assert_eq!(
+                home_relative(Path::new(home), Path::new(target)),
+                None,
+                "{home} {target}"
+            );
+        }
     }
 
     fn roots_of(root: &Path) -> Vec<PathGrant> {

@@ -38,7 +38,16 @@ pub struct Kind {
     ///
     /// [spec §13.3]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#133-presentation
     pub presentation: Option<Presentation>,
+    /// The agent's own variable naming its config root, where that root holds state the redirect
+    /// does not move. Written as a path relative to the child's `HOME` that reaches
+    /// [`CONFIG_ROOT`] inside the agent state directory, because the agent joins it onto its home
+    /// lexically.
+    pub config_root: Option<&'static str>,
 }
+
+/// Where a kind's config root is pointed, inside its agent state directory ([`Kind::config_root`]).
+/// A directory of its own, so the root's names never meet the agent directory's.
+pub const CONFIG_ROOT: &str = "root";
 
 /// What the presentation adapter needs of a kind ([spec §13.3]).
 ///
@@ -75,6 +84,7 @@ pub const KINDS: &[Kind] = &[
             entry_point: "CLAUDE.md",
             import: "@",
         }),
+        config_root: None,
     },
     Kind {
         name: "omp",
@@ -99,6 +109,12 @@ pub const KINDS: &[Kind] = &[
             entry_point: "AGENTS.md",
             import: "@",
         }),
+        // omp 18.8.2 keeps its daemon registry, logs and caches under its config root,
+        // `path.join(os.homedir(), PI_CONFIG_DIR ?? ".omp")` (`pi-utils/src/dirs.ts`), whatever
+        // `PI_CODING_AGENT_DIR` says: confined without this, `omp -p` dies on `EPERM` making
+        // `~/.omp/run/daemons` ([#156](https://github.com/firefly-engineering/playpen/issues/156)).
+        // The join is lexical, so a relative value reaches the state directory wherever it is.
+        config_root: Some("PI_CONFIG_DIR"),
     },
 ];
 
