@@ -4,6 +4,8 @@
 //!
 //! [spec §7.5]: https://github.com/firefly-engineering/playpen/blob/main/docs/spec.md#75-subscription-logins
 
+mod common;
+
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -74,6 +76,9 @@ const REQUEST: &str =
 /// `stdin`, and answers `find-generic-password` with the file `item`, or `errSecItemNotFound`.
 fn fake_security(dir: &Path) -> PathBuf {
     let path = dir.join("security");
+    // `cat` by the path the floor holds it at: the minter runs with an empty environment, and the
+    // default search path of `sh` does not hold it on every host (NixOS).
+    let cat = common::os_bin("cat");
     std::fs::write(
         &path,
         format!(
@@ -81,8 +86,8 @@ fn fake_security(dir: &Path) -> PathBuf {
              d={}\n\
              printf '%s\\n' \"$*\" >> \"$d/argv\"\n\
              case \"$1\" in\n\
-             -i) cat > \"$d/stdin\" ;;\n\
-             find-generic-password) cat \"$d/item\" 2>/dev/null || exit 44 ;;\n\
+             -i) {cat} > \"$d/stdin\" ;;\n\
+             find-generic-password) {cat} \"$d/item\" 2>/dev/null || exit 44 ;;\n\
              esac\n",
             dir.display()
         ),
