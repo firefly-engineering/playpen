@@ -389,6 +389,20 @@ fn a_signal_addressed_to_the_whole_job_reaches_the_agent_twice() {
     let mut command = fx.run(&[probe.to_str().unwrap(), "wait-signal"]);
     // A job of its own, so the kill below reaches playpen and the child and nothing of the suite.
     command.process_group(0);
+    let queued = libc::SIGRTMIN();
+    // At its default action, whatever this process inherited: playpen leaves a signal its caller
+    // ignores ignored and forwards nothing, and a host can ignore this one from its first
+    // process, as OrbStack's containers do
+    // ([#128](https://github.com/firefly-engineering/playpen/issues/128)).
+    // SAFETY: signal is async-signal-safe.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::signal(queued, libc::SIG_DFL) == libc::SIG_ERR {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
     let run = Waiting::spawn(command);
     let job = run.pid();
     assert_eq!(run.child_group(), job, "the child is in playpen's job");
@@ -396,7 +410,6 @@ fn a_signal_addressed_to_the_whole_job_reaches_the_agent_twice() {
     // Addressed to the whole job: the kernel delivers one copy to the child directly, and playpen
     // forwards a second. Not tty-generated, so no origin test suppresses it — and `SI_USER` is
     // what a group kill and a process kill both report, which is the whole point.
-    let queued = libc::SIGRTMIN();
     // SAFETY: kill has no memory preconditions.
     assert_eq!(unsafe { libc::kill(-job, queued) }, 0, "kill the job");
 
