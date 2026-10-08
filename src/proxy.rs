@@ -905,11 +905,13 @@ impl Serving {
         // returns. Not `shutdown` on the listener: Linux wakes a blocked `accept` for that, but
         // Darwin refuses it with `ENOTCONN` and leaves `accept` blocked. Where the loop has already
         // returned the connection waits in the backlog of the socket held here, unread. No teardown
-        // failure changes the exit status, so a connect that fails is dropped.
-        if self.listener.is_some() {
-            let _ = TcpStream::connect(self.addr);
-        }
-        if let Some(served) = self.served.take() {
+        // failure changes the exit status, so a connect that fails is dropped, and so is the loop:
+        // nothing woke it, so waiting for it would wait forever, as it does in a network namespace
+        // whose loopback can be bound but not connected to.
+        let woken = self.listener.is_some() && TcpStream::connect(self.addr).is_ok();
+        if let Some(served) = self.served.take()
+            && woken
+        {
             let _ = served.join();
         }
     }
@@ -2649,5 +2651,25 @@ mod tests {
             let _ = client.read_to_string(&mut answer);
             assert!(answer.is_empty(), "{answer}");
         }
+    }
+
+    /// Stopping returns even where the connection that wakes the accept loop cannot be made, as in
+    /// a network namespace whose loopback is down: binding there succeeds and connecting fails.
+    /// The loop is left blocked in `accept` rather than waited for.
+    #[test]
+    fn stopping_returns_when_the_wake_up_cannot_connect() {
+        let mut serving = bind().expect("bound").serve(tunnelling(), 0);
+        // Somewhere refusing connections, standing in for a loopback that cannot be reached.
+        serving.addr = TcpListener::bind((INTERFACE, 0))
+            .and_then(|closed| closed.local_addr())
+            .expect("a closed port");
+        let (stopped, returned) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            serving.stop();
+            let _ = stopped.send(());
+        });
+        returned
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("stopping hung on an accept loop nothing could wake");
     }
 }
