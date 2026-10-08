@@ -843,7 +843,9 @@ mod tests {
         for concurrency in [None, Some("exclusive")] {
             let policy = persistent(concurrency);
             let holder = layout_of(state.path(), &policy);
-            let held = holder.provision().expect("the first run claims it");
+            // Retried for the same reason as the re-claim below: past the first iteration, this
+            // claim follows the previous iteration's release of the same area.
+            let held = reclaimed(&holder);
             let refusal = layout_of(state.path(), &policy)
                 .provision()
                 .expect_err("the second run is refused");
