@@ -27,9 +27,12 @@ A commit is releasable only when, on **one macOS and one Linux reference host**:
    `n/a` is fine: it is a row scoped to the other platform under a named asymmetry
    ([spec §15.4](spec.md#154-named-asymmetries)). Every row the platform owes must *run*.
 3. `R-code-coverage` is among the rows that ran and passed: every `refusal.*` code in the registry
-   ([spec Appendix A](spec.md#appendix-a--code-registry)) has a row that produces it. It has no
-   exemption list, so a code no row can provoke blocks the release until it gets a row or is
-   re-cut.
+   ([spec Appendix A](spec.md#appendix-a--code-registry)) has a row that produces it, or is named
+   by the unprovoked ledger (`UNPROVOKED` in
+   [`tests/enforcement/row.rs`](../tests/enforcement/row.rs), [spec §17.2](spec.md#172-rows)).
+   An entry there is a code no environment a row can build provokes, proven by a unit test
+   instead, and each is decided in an issue of its own. Any other code no row produces blocks the
+   release until it gets a row, is re-cut, or is decided into the ledger.
 
 The release notes name each reference host (OS version, and on Linux the kernel and its Landlock
 ABI), the commit, and the two summary lines.

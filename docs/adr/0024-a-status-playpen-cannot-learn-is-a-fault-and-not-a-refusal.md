@@ -92,4 +92,10 @@ itself broken, which is the uncontrolled version of the teardown this ADR delibe
   ADR's own argument. The canary's wait now maps to `bug.status.no-child` and
   `bug.status.unreadable` exactly as the agent's does, and the run aborts the same way. Exit `125`
   would not have lied there, since the agent never ran; the code is moved because a defect is not
-  a refusal, whichever outcome it ends in.
+  a refusal, whichever outcome it ends in._
+- _Amended by [#145](https://github.com/firefly-engineering/playpen/issues/145): **the gate now has
+  one exemption mechanism, the unprovoked ledger.** It names a `refusal.*` code no environment a
+  row can build provokes, with a unit test proving the code instead, and fails if a row produces
+  the code. Its one entry is `refusal.proxy.bind`. The prefix split above still stands: a fault is
+  not a refusal, so the ledger is no place for one, and an entry for a code that is no refusal
+  fails the gate._
